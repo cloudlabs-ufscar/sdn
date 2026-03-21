@@ -1,0 +1,1604 @@
+# OVN_CHECK_PACKETS([PCAP], [EXPECTED])
+#
+# This compares packets read from PCAP, in pcap format, to those read
+# from EXPECTED, which is a text file containing packets as hex
+# strings, one per line.  If PCAP contains fewer packets than
+# EXPECTED, it waits up to 10 seconds for more packets to appear.
+#
+# The implementation is an m4 macro that is mostly implemented in
+# terms of a shell function.  This reduces the size of the generated
+# testsuite file since the shell function is only emitted once even
+# when this macro is invoked many times.
+m4_divert_text([PREPARE_TESTS],
+  [dump_diff__ () {
+     local rcv_pcap=$1 exp_text=$2
+     rcv_text=`echo "$rcv_pcap.packets" | sed 's/\.pcap//'`
+     echo "Expected:"
+     sort $exp_text
+     echo "Received:"
+     sort $rcv_text
+     sort $exp_text -o $exp_text.sorted
+     sort $rcv_text -o $rcv_text.sorted
+     echo "Diff:"
+     diff -u $exp_text.sorted $rcv_text.sorted
+   }
+   ovn_check_packets__ () {
+     rcv_pcap=$1
+     exp_text=$2
+     cmd=${4-cat}
+     echo "$3: checking packets in $1 against $2:"
+     rcv_text=`echo "$rcv_pcap.packets" | sed 's/\.pcap//'`
+     exp_n=`wc -l < "$exp_text"`
+     OVS_WAIT_UNTIL(
+       [$PYTHON "$ovs_srcdir/utilities/ovs-pcap.in" $rcv_pcap > rcv_tmp
+        rcv_n=`wc -l < rcv_tmp`
+        echo "rcv_n=$rcv_n exp_n=$exp_n"
+        cat rcv_tmp > $rcv_text
+        test $rcv_n -ge $exp_n],
+       [dump_diff__ "$rcv_pcap" "$exp_text"])
+     sort $exp_text | $cmd > expout
+     cat rcv_tmp | $cmd > $rcv_text
+   }
+   ovn_check_packets_remove_broadcast__ () {
+     rcv_pcap=$1
+     exp_text=$2
+     cmd=${4-cat}
+     echo "$3: checking packets in $1 against $2:"
+     rcv_text=`echo "$rcv_pcap.packets" | sed 's/\.pcap//'`
+     exp_n=`wc -l < "$exp_text"`
+     OVS_WAIT_UNTIL(
+       [$PYTHON "$ovs_srcdir/utilities/ovs-pcap.in" $rcv_pcap > rcv_tmp
+        sed -i '/ffffffffffff/d' rcv_tmp
+        rcv_n=`wc -l < rcv_tmp`
+        echo "rcv_n=$rcv_n exp_n=$exp_n"
+        cat rcv_tmp > $rcv_text
+        test $rcv_n -ge $exp_n],
+       [dump_diff__ "$rcv_pcap" "$exp_text"])
+     sort $exp_text | $cmd > expout
+     cat rcv_tmp | $cmd > $rcv_text
+   }
+   ovn_wait_packets__ () {
+     rcv_pcap=$1
+     exp_text=$2
+     cmd=${4-cat}
+     echo "$3: waiting packets from $2 at $1:"
+     rcv_text=`echo "$rcv_pcap.packets" | sed 's/\.pcap//'`
+     OVS_WAIT_UNTIL(
+       [$PYTHON "$ovs_srcdir/utilities/ovs-pcap.in" $rcv_pcap > rcv_tmp
+        sort $exp_text | $cmd > expout
+        cat rcv_tmp | $cmd > $rcv_text
+        test x"$(sort $rcv_text | comm -2 -3 expout -)" = "x"],
+       [dump_diff__ "$rcv_pcap" "$exp_text"])
+   }
+
+   ovn_wait_packets_uniq__ () {
+     rcv_pcap=$1
+     exp_text=$2
+     cmd=${4-cat}
+     echo "$3: waiting for packets from $2 at $1:"
+     rcv_text=`echo "$rcv_pcap.packets" | sed 's/\.pcap//'`
+     OVS_WAIT_UNTIL(
+       [$PYTHON "$ovs_srcdir/utilities/ovs-pcap.in" $rcv_pcap > $rcv_text
+        sort $exp_text | $cmd > expout
+        test x"$(sort $rcv_text | $cmd | uniq | comm -3 expout -)" = "x"],
+       [dump_diff__ "$rcv_pcap" "$exp_text"])
+   }
+
+   ovn_wait_patch_port_flows () {
+     for localnet in $1; do
+       patch_port="patch-br-int-to-$localnet"
+       for hv in $2; do
+         echo "$3: waiting for flows for $patch_port on $hv"
+         # Patch port might be created after ports are reported up
+         OVS_WAIT_UNTIL([
+             test 1 = $(as $hv ovs-vsctl show | grep "Port \b$patch_port\b" | wc -l)
+         ])
+         # Wait for a flow outputing to patch port
+         OVS_WAIT_UNTIL([
+             hv_patch_ofport=$(as $hv ovs-vsctl --bare --columns ofport find Interface name=$patch_port)
+             echo "$patch_port=$hv_patch_ofport"
+             test -n "$hv_patch_ofport" && test 1 -le $(as $hv ovs-ofctl dump-flows br-int | grep -c "output:\b$hv_patch_ofport\b")
+         ])
+       done
+     done
+   }
+
+   ovn_wait_remote_output_flows () {
+     hv1=$1
+     hv2=$2
+     echo "$3: waiting for flows for remote output on $hv1"
+     # Wait for a flow outputing  to remote output
+     OVS_WAIT_UNTIL([
+         if test X$OVN_ENABLE_FLOW_BASED_TUNNELS = Xyes; then
+             tun_name=ovn-geneve
+         else
+             tun_name=ovn-${hv2}-0
+         fi
+         ofport=$(as $hv1 ovs-vsctl --bare --columns ofport find Interface name=$tun_name)
+         echo "tunnel port=$ofport"
+         test -n "$ofport" && test 1 -le $(as $hv1 ovs-ofctl dump-flows br-int | grep -c "output:$ofport")
+     ])
+   }
+
+   ovn_wait_remote_input_flows () {
+     hv1=$1
+     hv2=$2
+     echo "$3: waiting for flows for remote input on $hv1"
+     # Wait for a flow outputing  to remote input
+     OVS_WAIT_UNTIL([
+         if test X$OVN_ENABLE_FLOW_BASED_TUNNELS = Xyes; then
+             tun_name=ovn-geneve
+         else
+             tun_name=ovn-${hv2}-0
+         fi
+         ofport=$(as $hv1 ovs-vsctl --bare --columns ofport find Interface name=$tun_name)
+         echo "tunnel port=$ofport"
+         test -n "$ofport" && test 1 -le $(as $hv1 ovs-ofctl dump-flows br-int | grep -c "in_port=$ofport")
+     ])
+   }
+
+   # ovn_wait_for_bfd_up HV
+   # BFD might be quite slow. While BFD is not up, all chassis will fight to claim the port
+   # Wait for BFD between different chassis to be up
+   ovn_wait_for_bfd_up() {
+     for hv; do
+       as $hv
+       for chassis; do
+         if test $hv != $chassis; then
+             echo "checking bdf_status for $hv -> $chassis"
+             OVS_WAIT_UNTIL([
+                 bfd_status=$(as $hv ovs-vsctl get interface ovn-$chassis-0 bfd_status:state)
+                 echo "bfd status = $bfd_status"
+                 test "$bfd_status" = "up"
+             ])
+         fi
+       done
+     done
+   }
+])
+
+# Wait to receive all packets in $2.
+# Fails if any additional packet, or any duplicate packets is received,
+m4_define([OVN_CHECK_PACKETS],
+  [AT_CHECK([$PYTHON "$ovs_srcdir/utilities/ovs-pcap.in" $1 ], [0], [ignore])
+   ovn_check_packets__ "$1" "$2" "__file__:__line__" $3
+   AT_CHECK([sort $rcv_text], [0], [expout], [ignore], [dump_diff__ "$1" "$2"])])
+
+# Wait to receive all packets in $2, potentially receiving extra broadcast packets.
+# Fails if any (non bcast) additional packet, or any duplicate packets is received.
+m4_define([OVN_CHECK_PACKETS_REMOVE_BROADCAST],
+  [ovn_check_packets_remove_broadcast__ "$1" "$2" "__file__:__line__" $3
+   AT_CHECK([sort $rcv_text], [0], [expout], [ignore], [dump_diff__ "$1" "$2"])])
+
+# Wait to receive all packets from $2.
+# Any additional and duplicate packets are accepted.
+m4_define([OVN_CHECK_PACKETS_CONTAIN],
+  [ovn_wait_packets__ "$1" "$2" "__file__:__line__" $3])
+
+# Wait to receive all packets from $2.
+# Duplicate packets are accepted, but the macro fails if unexpected packets are received.
+m4_define([OVN_CHECK_PACKETS_UNIQ],
+  [ovn_wait_packets_uniq__ "$1" "$2" "__file__:__line__" $3])
+
+m4_define([OVN_WAIT_PATCH_PORT_FLOWS],
+  [ovn_wait_patch_port_flows "$1" "$2" "__file__:__line__"])
+
+m4_define([OVN_WAIT_REMOTE_OUTPUT_FLOWS],
+  [ovn_wait_remote_output_flows "$1" "$2" "__file__:__line__"])
+
+m4_define([OVN_WAIT_REMOTE_INPUT_FLOWS],
+  [ovn_wait_remote_input_flows "$1" "$2" "__file__:__line__"])
+
+# OVN_CLEANUP_DBS
+#
+# Gracefully terminate NB, SB OVN daemons.
+m4_define([OVN_CLEANUP_DBS],[
+    as ovn-sb
+    OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+
+    as ovn-nb
+    OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+])
+
+# OVN_CLEANUP_NORTHD
+#
+# Gracefully terminate all central OVN daemons: NB, SB and ovn-northd.
+m4_define([OVN_CLEANUP_NORTHD],[
+    OVN_CLEANUP_DBS
+
+    as northd
+    OVS_APP_EXIT_AND_WAIT([ovn-northd])
+
+    if test -d northd-backup; then
+        as northd-backup
+        OVS_APP_EXIT_AND_WAIT([ovn-northd])
+    fi
+])
+
+# OVN_CLEANUP_VSWITCH(sim)
+#
+# Gracefully terminate vswitch daemons in the
+# specified sandbox.
+m4_define([OVN_CLEANUP_VSWITCH],[
+    echo
+    echo "$1: clean up vswitch"
+    as $1
+    OVS_APP_EXIT_AND_WAIT([ovs-vswitchd])
+    OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+])
+
+# DUMP_FLOWS(sbox, output_file)
+# Dump openflows to output_file for sbox
+m4_define([DUMP_FLOWS], [
+    sbox=$1
+    output_file=$2
+    as $sbox
+    ovs-ofctl dump-flows br-int  | grep -v "NXST_FLOW reply" |
+          sed 's/cookie=0x[[^,]]*/cookie=xx/g' |
+          sed 's/duration=[[^,]]*/duration=xx/g' |
+          sed 's/idle_age=[[^,]]*/idle_age=xx/g' |
+          sed 's/, hard_age=[[^,]]*//g' |
+          sed 's/n_bytes=[[^,]]*/n_bytes=xx/g' |
+          sed 's/n_packets=[[^,]]*/n_packets=xx/g' |
+          sed 's/conjunction([[^,]]*/conjunction(xx/g' |
+          sort > $output_file
+])
+
+# DUMP_RELATED_PORTS(sbox, output_file)
+# Dump related ports
+m4_define([DUMP_RELATED_PORTS], [
+    sbox=$1
+    output_file=$2
+    as $sbox
+    ovn-appctl debug/dump-related-ports | sort > $output_file
+])
+
+m4_define([CHECK_FLOWS_AFTER_RECOMPUTE], [
+    hv=$1
+    sbox=$2
+    # Make sure I+P has finalized his job before getting flows and comparing them after recompte.
+    # Some tests have northd and ovn-nb ovsdb stopped, so avoid ovn-nbctl for those.
+    if [[ -e ${AZ_DIR}ovn-nb/ovn-nb.sock ]] && [[ -e ${AZ_DIR}northd/ovn-northd.pid ]]; then
+        # Do wait twice to handle some potential race conditions
+        check ovn-nbctl --wait=hv sync
+        check ovn-nbctl --wait=hv sync
+    fi
+
+    as $sbox
+    if test "$hv" != "vtep"; then
+      # Get flows before and after recompute
+      DUMP_FLOWS([$sbox], [flows-$hv-before])
+
+      check ovn-appctl -t ovn-controller recompute
+      # The recompute might cause some sb changes. Let controller catch up.
+      if [[ -e ${AZ_DIR}ovn-nb/ovn-nb.sock ]] && [[ -e ${AZ_DIR}northd/ovn-northd.pid ]]; then
+          check ovn-nbctl --wait=hv sync
+      fi
+      DUMP_FLOWS([$sbox], [flows-$hv-after])
+      diff flows-$hv-before flows-$hv-after > flow-diff
+      AT_CHECK([wc -l < flow-diff], [0], [0
+])
+    fi
+])
+
+m4_define([CHECK_RELATED_PORTS_AFTER_RECOMPUTE], [
+    hv=$1
+    sbox=$2
+    related_ports=$3
+    AT_CAPTURE_FILE([related-ports-diff])
+    # Make sure I+P has finalized the job before getting flows and comparing them after recompte.
+    # Some tests have northd and ovn-nb ovsdb stopped, so avoid ovn-nbctl for those.
+    if [[ -e ${AZ_DIR}ovn-nb/ovn-nb.sock ]] && [[ -e ${AZ_DIR}northd/ovn-northd.pid ]]; then
+        # Do wait twice to handle some potential race conditions
+        check ovn-nbctl --wait=hv sync
+        check ovn-nbctl --wait=hv sync
+    fi
+
+    as $sbox
+    if test "$hv" != "vtep"; then
+      DUMP_RELATED_PORTS([$sbox], [related-ports-$hv-before])
+      check ovn-appctl -t ovn-controller recompute
+      # The recompute might cause some sb changes. Let controller catch up.
+      if [[ -e ${AZ_DIR}ovn-nb/ovn-nb.sock ]] && [[ -e ${AZ_DIR}northd/ovn-northd.pid ]]; then
+          check ovn-nbctl --wait=hv sync
+      fi
+      DUMP_RELATED_PORTS([$sbox], [related-ports-$hv-after])
+      # Compare and store differences before and after recompute
+      comm -3 related-ports-$hv-before related-ports-$hv-after > related-ports-diff-$hv
+      # Ignore some differences.
+      echo "$related_ports" | comm -2 -3 related-ports-diff-$hv - > related-ports-diff
+      AT_CHECK([wc -l < related-ports-diff], [0], [0
+])
+    fi
+])
+
+# CHECK_AFTER_RECOMPUTE(hv, sbox, related_ports, ignored_dp)
+# Check related ports (ignoring $related_ports) and FLOWS (ignoring flows from $ignored_dp and from $ignored_tables)
+# by comparing IP flows and flows after recompute.
+# We also ignore Flows from tables OFTABLE_MAC_BINDING, OFTABLE_MAC_LOOKUP, OFTABLE_MAC_CACHE_USE.
+m4_define([CHECK_AFTER_RECOMPUTE], [
+    hv=$1
+    sbox=$2
+    related_ports=$3
+    ignored_dp=$4
+    ignored_tables=$5
+    AT_CAPTURE_FILE([related-ports-diff])
+    # Make sure I+P has finalized his job before getting flows and comparing them after recompte.
+    # Some tests have northd and ovn-nb ovsdb stopped, so avoid ovn-nbctl for those.
+    if [[ -e ${AZ_DIR}ovn-nb/ovn-nb.sock ]] && [[ -e ${AZ_DIR}northd/ovn-northd.pid ]]; then
+        # Do wait twice to handle some potential race conditions
+        check ovn-nbctl --wait=hv sync
+        check ovn-nbctl --wait=hv sync
+    fi
+
+    as $sbox
+    if test "$hv" != "vtep"; then
+      DUMP_RELATED_PORTS([$sbox], [related-ports-$hv-before])
+      DUMP_FLOWS([$sbox], [flows-$hv-before])
+      check ovn-appctl -t ovn-controller recompute
+      echo "Checking after recompute for $sbox"
+      # The recompute might cause some sb changes. Let controller catch up.
+      if [[ -e ${AZ_DIR}ovn-nb/ovn-nb.sock ]] && [[ -e ${AZ_DIR}northd/ovn-northd.pid ]]; then
+          check ovn-nbctl --wait=hv sync
+      fi
+      DUMP_RELATED_PORTS([$sbox], [related-ports-$hv-after])
+      DUMP_FLOWS([$sbox], [flows-$hv-after])
+
+      # Compare and store related_ports differences before and after recompute
+      comm -3 related-ports-$hv-before related-ports-$hv-after > related-ports-diff-$hv
+      # Ignore some differences.
+      if [[ -n "$related_ports" ]]; then
+        echo "Ignoring related ports $related_ports"
+      fi
+      echo "$related_ports" | comm -2 -3 related-ports-diff-$hv - > related-ports-diff
+      AT_CHECK([wc -l < related-ports-diff], [0], [0
+])
+
+      # Compare and store flow differences before and after recompute
+      diff -u flows-$hv-before flows-$hv-after | grep "^+ \|^- " > flow-diff-$hv
+      if [[ -n "$related_ports" ]]; then
+        tag=$(ovn-sbctl --bare --columns tag list port_binding $related_ports)
+        if [[ -n "$tag" ]]; then
+          echo "Ignoring tag $tag"
+          cat flow-diff-$hv | grep -v "dl_vlan=$tag" > tmp; mv tmp flow-diff-$hv
+        fi
+      fi
+
+      dps=$(echo "$ignored_dp" | tr ',' ' ')
+      for dp in $dps
+      do
+        if [[ -n "${dp}" ]]; then
+          key=$(printf '0x%x' $(ovn-sbctl --bare --columns tunnel_key list datapath $dp))
+          if [[ -n "${key}" ]]; then
+            echo "Ignoring $dp i.e. tunnel_key $key"
+            cat flow-diff-$hv | grep -v "metadata=$key" | grep -v "load:${key}->OXM_OF_METADATA" > tmp; mv tmp flow-diff-$hv
+          fi
+        fi
+      done
+
+      tables=$(echo "$ignored_tables" | tr ',' ' ')
+      for table in $tables
+      do
+        echo "Ignoring table $table"
+        cat flow-diff-$hv | grep -v "table=$table" > tmp; mv tmp flow-diff-$hv
+      done
+
+      cat flow-diff-$hv | grep -v "table=OFTABLE_MAC_BINDING" | grep -v "table=OFTABLE_MAC_LOOKUP" | grep -v "table=OFTABLE_MAC_CACHE_USE" > tmp; mv tmp flow-diff-$hv
+      AT_CHECK([wc -l < flow-diff-$hv], [0], [0
+])
+    fi
+])
+
+# OVN_CLEANUP_CONTROLLER(sbox)
+#
+# Gracefully terminate ovn-controller in the specified
+# sandbox instance. The sandbox name "vtep" is treated
+# as a special case, and is assumed to have ovn-controller-vtep
+# and ovs-vtep daemons running instead of ovn-controller.
+m4_define([OVN_CLEANUP_CONTROLLER],[
+    hv=$1
+    sbox=$2
+    related_ports=$3
+    ignored_dp=$4
+    ignored_tables=$5
+    no_recompute_check=$6
+    if test "$no_recompute_check" != "True"; then
+        CHECK_AFTER_RECOMPUTE([$hv], [$sbox], [$related_ports], [$ignored_dp], [$ignored_tables])
+    fi
+
+    if test "$hv" = "vtep"; then
+        OVS_APP_EXIT_AND_WAIT([ovn-controller-vtep])
+        OVS_APP_EXIT_AND_WAIT([ovs-vtep])
+    else
+        OVS_APP_EXIT_AND_WAIT([ovn-controller])
+    fi
+])
+
+# OVN_CLEANUP_SBOX(sbox)
+#
+# Gracefully terminate OVN daemons in the specified
+# sandbox instance. The sandbox name "vtep" is treated
+# as a special case, and is assumed to have ovn-controller-vtep
+# and ovs-vtep daemons running instead of ovn-controller.
+m4_define([OVN_CLEANUP_SBOX],[
+    sbox=$1
+    error=$2
+    related_ports=$3
+    ignored_dp=$4
+    ignored_tables=$5
+    no_recompute_check=$6
+    echo "$sbox: clean up sandbox"
+    as $sbox
+    OVN_CLEANUP_CONTROLLER([$sbox], [$sbox], [$related_ports], [$ignored_dp], [$ignored_tables], [$no_recompute_check])
+    OVN_CLEANUP_VSWITCH([$sbox])
+
+    # Check for errors in logs. Ignore following errors:
+    # "connection failed (No such file or directory)" as happens everytime we restart ovs-vswitchd.
+    # "has no network name*" as localnet network_name is often set "after" creating localnet.
+    # "receive tunnel port not found*" happening when closing other hv.
+    # "Failed to locate tunnel to reach main chassis" happening when controller started e.g. before ovn-bridge-mappings is set
+    # "Transaction causes multiple rows in \"MAC_Binding\" table to have identical values"
+    #  happening as ovn-controller has a race condition over MAC binding table with other controllers (GARP).
+    # "Transaction causes multiple rows in \"FDB\" table to have identical values"
+    #  happens when there is a race between multiple ovn-controllers that try to create the same FDB.
+    AT_CHECK([check_logs "
+        $error
+        /connection failed (No such file or directory)/d
+        /has no network name*/d
+        /receive tunnel port not found*/d
+        /Failed to locate tunnel to reach main chassis/d
+        /Transaction causes multiple rows.*MAC_Binding/d
+        /Transaction causes multiple rows.*FDB/d
+    " $sbox])
+])
+
+# OVN_CLEANUP(sim [, sim ...])
+#
+# Gracefully terminate all OVN daemons, including those in the
+# specified sandbox instances.
+m4_define([OVN_CLEANUP],[
+    m4_foreach([sbox_and_error], [$@], [
+        sbox=$(echo "sbox_and_error" |sed -n '1p')
+        error=$(echo "sbox_and_error"  | grep '/')
+        ignored_dp=$(echo "sbox_and_error"  | grep 'ignored_dp' |  cut -d'=' -f 2)
+        ignored_tables=$(echo "sbox_and_error"  | grep 'ignored_tables' |  cut -d'=' -f 2)
+        related_ports=$(echo "sbox_and_error" | sed -n '2,$p' | grep -v '/' | grep -v 'ignored_dp' | grep -v 'ignored_tables')
+        CHECK_AFTER_RECOMPUTE([$sbox], [$sbox], [$related_ports], [$ignored_dp], [$ignored_tables])
+    ])
+    m4_foreach([sbox_and_error], [$@], [
+        sbox=$(echo "sbox_and_error" |sed -n '1p')
+        error=$(echo "sbox_and_error"  | grep '/')
+        OVN_CLEANUP_SBOX([$sbox], [$error], [], [], [], ["True"])
+    ])
+
+    echo
+    echo "clean up OVN"
+    as ovn-sb
+    OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+
+    as ovn-nb
+    OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+
+    as northd
+    OVS_APP_EXIT_AND_WAIT([ovn-northd])
+
+    if test -d northd-backup; then
+        as northd-backup
+        OVS_APP_EXIT_AND_WAIT([ovn-northd])
+    fi
+
+    OVN_CLEANUP_VSWITCH([main])
+])
+
+# OVN_CLEANUP_AZ(az)
+#
+# Gracefully terminate all OVN daemons, including those in the
+# specified sandbox instances.
+m4_define([OVN_CLEANUP_AZ],[
+    echo
+    echo "$1: clean up availability zone"
+    as $1/ovn-sb
+    OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+
+    as $1/ovn-nb
+    OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+
+    as $1/northd
+    OVS_APP_EXIT_AND_WAIT([ovn-northd])
+
+    if test -d $1/northd-backup; then
+        as $1/northd-backup
+        OVS_APP_EXIT_AND_WAIT([ovn-northd])
+    fi
+
+    as $1/ic
+    OVS_APP_EXIT_AND_WAIT([ovn-ic])
+])
+
+# OVN_CLEANUP_IC([az ...])
+#
+# Gracefully terminate all interconnection DBs, and daemons in the
+# specified AZs, if any.
+m4_define([OVN_CLEANUP_IC],[
+    m4_foreach([az], [$@], [
+        OVN_CLEANUP_AZ([az])
+    ])
+
+    echo
+    echo "clean up interconnection"
+    as ovn-ic-sb
+    OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+
+    as ovn-ic-nb
+    OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+
+    if test -d "$ovs_base"/main; then
+        OVN_CLEANUP_VSWITCH([main])
+    fi
+])
+
+m4_divert_push([PREPARE_TESTS])
+
+# ovn_init_db DATABASE [AZ]
+#
+# Creates and initializes the given DATABASE (one of "ovn-sb" or "ovn-nb"),
+# starts its ovsdb-server instance, and sets the appropriate environment
+# variable (OVN_SB_DB or OVN_NB_DB) so that ovn-sbctl or ovn-nbctl uses the
+# database by default.
+#
+# Usually invoked from ovn_start.
+ovn_init_db () {
+    echo "${AZ:+$AZ: }creating $1 database"
+    local as_d=$1
+    if test -n "$2"; then
+        as_d=$2/$as_d
+    fi
+    local d=$ovs_base/$as_d
+    mkdir "$d" || return 1
+    : > "$d"/.$1.db.~lock~
+    as $as_d ovsdb-tool create "$d"/$1.db "$abs_top_srcdir"/$1.ovsschema
+
+    local remote_in_db=
+    if test X$HAVE_OPENSSL = Xyes -a X"$1" = X"ovn-sb"; then
+        remote_in_db="--remote=db:OVN_Southbound,SB_Global,connections --private-key=$PKIDIR/testpki-test-privkey.pem --certificate=$PKIDIR/testpki-test-cert.pem --ca-cert=$PKIDIR/testpki-cacert.pem"
+    fi
+
+    as $as_d start_daemon ovsdb-server \
+        -vjsonrpc \
+        --remote=punix:"$d"/$1.sock \
+        $remote_in_db \
+        "$d"/$1.db
+
+    local var=`echo $1_db | tr a-z- A-Z_`
+    AS_VAR_SET([$var], [unix:"$d"/$1.sock]); export $var
+}
+
+# ovn_init_ic_db
+#
+# Creates and initializes ovn-ic-nb and ovn-ic-sb databases and starts their
+# ovsdb-server instances, for OVN interconnection.
+ovn_init_ic_db () {
+    ovn_init_db ovn-ic-nb
+    ovn_init_db ovn-ic-sb
+}
+
+# ovn_start_northd [--paused] (primary|backup) [AZ]
+ovn_start_northd() {
+    local northd_args=
+    case $1 in
+        --paused) northd_args=--dry-run; shift ;;
+    esac
+    local priority=$1
+    local AZ=$2
+    local msg_prefix=${AZ:+$AZ: }
+    local d_prefix=${AZ:+$AZ/}
+
+    local suffix=
+    case $priority in
+        backup) suffix=-backup ;;
+    esac
+
+    if test X$NORTHD_USE_PARALLELIZATION = Xyes; then
+        northd_args="$northd_args --n-threads=4"
+    fi
+
+    local name=${d_prefix}northd${suffix}
+    echo "${prefix}starting $name"
+    test -d "$ovs_base/$name" || mkdir "$ovs_base/$name"
+    as $name start_daemon ovn-northd $northd_args -vjsonrpc \
+               --ovnnb-db=$OVN_NB_DB --ovnsb-db=$OVN_SB_DB
+}
+
+# ovn_start [--backup-northd=none|paused] [AZ]
+#
+# Creates and initializes ovn-sb and ovn-nb databases and starts their
+# ovsdb-server instance, sets appropriate environment variables so that
+# ovn-sbctl and ovn-nbctl use them by default, and starts ovn-northd running
+# against them.
+#
+# Normally this starts only an active northd and no backup northd.  The following
+# options are accepted to adjust that:
+#   --backup-northd         Start a backup northd.
+#   --backup-northd=paused  Start the backup northd in the paused state.
+#   --use-tcp-to-sb         Use tcp to connect to sb.
+ovn_start () {
+    local backup_northd=false
+    local backup_northd_options=
+    case $1 in
+        --backup-northd) backup_northd=true; shift ;;
+        --backup-northd=paused) backup_northd=true; backup_northd_options=--paused; shift ;;
+        --use-tcp-to-sb) use_tcp=true; shift ;;
+    esac
+    local AZ=$1
+    local msg_prefix=${AZ:+$AZ: }
+    local d_prefix=${AZ:+$AZ/}
+
+    if test -n "$AZ"; then
+        mkdir "$ovs_base"/$AZ
+    fi
+
+    ovn_init_db ovn-sb $1; ovn-sbctl init
+    ovn_init_db ovn-nb $1; ovn-nbctl init
+    if test -n "$1"; then
+        check ovn-nbctl set NB_Global . name=$1
+    fi
+
+    ovn_start_northd primary $AZ
+    if $backup_northd; then
+        ovn_start_northd $backup_northd_options backup $AZ
+    fi
+
+    if test $use_tcp; then
+        # Create the SB DB ptcp connection.
+        ovn-sbctl \
+            -- --id=@c create connection \
+                target=\"ptcp:0:127.0.0.1\" \
+            -- add SB_Global . connections @c
+    elif test X$HAVE_OPENSSL = Xyes; then
+        # Create the SB DB pssl+RBAC connection.
+        ovn-sbctl \
+            -- --id=@c create connection \
+                target=\"pssl:0:127.0.0.1\" role=ovn-controller \
+            -- add SB_Global . connections @c
+        local d=$ovs_base
+        if test -n "$AZ"; then
+            d=$d/$AZ
+        fi
+        PARSE_LISTENING_PORT([$d/ovn-sb/ovsdb-server.log], [TCP_PORT])
+        var="SSL_OVN_SB_DB"
+        AS_VAR_SET([$var], [ssl:127.0.0.1:$TCP_PORT]); export $var
+    fi
+
+    if test -n "$AZ"; then
+        check ovn-nbctl --wait=sb sync || exit $?
+
+        echo "${msg_prefix}starting ovn-ic"
+        mkdir "$ovs_base"/$d_prefix/ic
+        as $d_prefix/ic start_daemon ovn-ic -v \
+               --ovnnb-db=$OVN_NB_DB --ovnsb-db=$OVN_SB_DB \
+               --ic-nb-db=unix:"$ovs_base"/ovn-ic-nb/ovn-ic-nb.sock \
+               --ic-sb-db=unix:"$ovs_base"/ovn-ic-sb/ovn-ic-sb.sock
+    fi
+}
+
+# Interconnection networks.
+#
+# When multiple sandboxed Open vSwitch instances exist, one will inevitably
+# want to connect them together.  These commands allow for that.  Conceptually,
+# an interconnection network is a switch for which these functions make it easy
+# to plug into other switches in other sandboxed Open vSwitch instances.
+# Interconnection networks are implemented as bridges in a switch named "main",
+# so to use interconnection networks please avoid working with that switch
+# directly.
+
+# net_add NETWORK
+#
+# Creates a new interconnection network named NETWORK.
+net_add () {
+    test -d "$ovs_base"/main || sim_add main || return 1
+    as main ovs-vsctl add-br "$1"
+}
+
+# net_attach NETWORK BRIDGE
+#
+# Adds a new port to BRIDGE in the default sandbox (as set with as()) and plugs
+# it into the NETWORK interconnection network.  NETWORK must already have been
+# created by a previous invocation of net_add.  The default sandbox must not be
+# "main".
+net_attach () {
+    local net=$1 bridge=$2
+
+    local port=${sandbox}_$bridge
+    as main ovs-vsctl \
+        -- add-port $net $port \
+        -- set Interface $port options:pstream="punix:$ovs_base/main/$port.sock" options:rxq_pcap="$ovs_base/main/$port-rx.pcap" options:tx_pcap="$ovs_base/main/$port-tx.pcap" \
+        || return 1
+
+    ovs-vsctl \
+        -- set Interface $bridge options:tx_pcap="$ovs_base/$sandbox/$bridge-tx.pcap" options:rxq_pcap="$ovs_base/$sandbox/$bridge-rx.pcap" \
+        -- add-port $bridge ${bridge}_$net \
+        -- set Interface ${bridge}_$net options:stream="unix:$ovs_base/main/$port.sock" options:rxq_pcap="$ovs_base/$sandbox/${bridge}_$net-rx.pcap" options:tx_pcap="$ovs_base/$sandbox/${bridge}_$net-tx.pcap" \
+        || return 1
+}
+
+ovn_wait_for_encaps() {
+    local systemid=$1
+
+    if [[ -f "${OVN_SYSCONFDIR}/system-id-override" ]]; then
+        systemid=$(cat ${OVN_SYSCONFDIR}/system-id-override)
+    fi
+
+    local encap=$(ovs-vsctl get Open_vSwitch . external_ids:ovn-encap-type-$systemid)
+    if [[ -z "$encap" ]]; then
+        encap=$(ovs-vsctl get Open_vSwitch . external_ids:ovn-encap-type)
+    fi
+    encap=$(tr -d '"' <<< $encap)
+
+    local ip=$(ovs-vsctl get Open_vSwitch . external_ids:ovn-encap-ip-$systemid)
+    if [[ -z "$ip" ]]; then
+        ip=$(ovs-vsctl get Open_vSwitch . external_ids:ovn-encap-ip)
+    fi
+    ip=$(tr -d '"' <<< $ip)
+
+    IFS="," read -r -a encap_types <<< "$encap"
+    for e in "${encap_types[[@]]}"; do
+        wait_column "$ip" sb:Encap ip chassis_name="$systemid" type="$e"
+    done
+}
+
+# ovn_az_attach AZ NETWORK BRIDGE IP [MASKLEN] [ENCAP]
+ovn_az_attach() {
+    local az=$1 net=$2 bridge=$3 ip=$4 masklen=${5-24} encap=${6-geneve,vxlan}
+    local systemid=${7-$sandbox} systemid_override=$8
+    net_attach $net $bridge || return 1
+
+    local expected_encap_id=$systemid
+    local cli_args=""
+    if [[ -n "$systemid_override" ]]; then
+        cli_args="-n $systemid_override"
+        expected_encap_id=$systemid_override
+    fi
+
+    mac=`ovs-vsctl get Interface $bridge mac_in_use | sed s/\"//g`
+    arp_table="$arp_table $sandbox,$bridge,$ip,$mac"
+    if test -z $(echo $ip | sed '/:/d'); then
+        ipversion="6"
+    else
+        ipversion="4"
+    fi
+    ovs-appctl netdev-dummy/ip${ipversion}addr $bridge $ip/$masklen >/dev/null || return 1
+    ovs-appctl ovs/route/add $ip/$masklen $bridge >/dev/null || return 1
+
+    local ovn_remote
+    if test X"$az" = XNONE; then
+        if test X$HAVE_OPENSSL = Xyes; then
+            ovn_remote=$SSL_OVN_SB_DB
+        else
+            ovn_remote=unix:$ovs_base/ovn-sb/ovn-sb.sock
+        fi
+    else
+        ovn_remote=unix:$ovs_base/$az/ovn-sb/ovn-sb.sock
+    fi
+    ovs-vsctl \
+        -- set Open_vSwitch . external-ids:hostname=$sandbox \
+        -- set Open_vSwitch . external-ids:system-id=$systemid \
+        -- set Open_vSwitch . external-ids:ovn-remote=$ovn_remote \
+        -- set Open_vSwitch . external-ids:ovn-encap-type=$encap \
+        -- set Open_vSwitch . external-ids:ovn-encap-ip=$ip \
+        -- --may-exist add-br br-int \
+        -- set bridge br-int fail-mode=secure other-config:disable-in-band=true \
+        || return 1
+
+    # currently this is the optimal place to add the ovn-monitor-all=true option,
+    # this can be implemented in a different way by redefining the sim-add function
+    # to add the ovn-related external-ids when we add a new simulated node via sim-add.
+    #
+    if test X$OVN_MONITOR_ALL = Xyes; then
+        ovs-vsctl set open . external_ids:ovn-monitor-all=true
+    fi
+
+    # Configure flow-based tunnels if the test variable is set
+    if test X$OVN_ENABLE_FLOW_BASED_TUNNELS = Xyes; then
+        ovs-vsctl set open . external_ids:ovn-enable-flow-based-tunnels=true
+    elif test X$OVN_ENABLE_FLOW_BASED_TUNNELS = Xno; then
+        ovs-vsctl set open . external_ids:ovn-enable-flow-based-tunnels=false
+    fi
+
+    start_daemon ovn-controller --enable-dummy-vif-plug ${cli_args} || return 1
+    if test X"$az" = XNONE; then
+        ovn_wait_for_encaps $expected_encap_id
+    else
+        ovn_as $az ovn_wait_for_encaps $expected_encap_id
+    fi
+}
+
+# ovn_attach NETWORK BRIDGE IP [MASKLEN] [ENCAP]
+#
+# First, this command attaches BRIDGE to interconnection network NETWORK, just
+# like "net_attach NETWORK BRIDGE".  Second, it configures (simulated) IP
+# address IP (with network mask length MASKLEN, which defaults to 24) on
+# BRIDGE.  Finally, it configures the Open vSwitch database to work with OVN
+# and starts ovn-controller.
+ovn_attach() {
+    ovn_az_attach NONE $@
+}
+
+# This function is similar to ovn_attach but makes sure it doesn't
+# mess with another controller settings
+start_virtual_controller() {
+    local net=$1 bridge=$2 int_bridge=$3 ip=$4 masklen=${5-24} encap=${6-geneve,vxlan} systemid=${7-$sandbox} cli_args=${@:8}
+    net_attach $net $bridge || return 1
+
+    mac=`ovs-vsctl get Interface $bridge mac_in_use | sed s/\"//g`
+    arp_table="$arp_table $sandbox,$bridge,$ip,$mac"
+    ovs-appctl netdev-dummy/ip4addr $bridge $ip/$masklen >/dev/null || return 1
+    ovs-appctl ovs/route/add $ip/$masklen $bridge >/dev/null || return 1
+
+    local ovn_remote
+    if test X$HAVE_OPENSSL = Xyes; then
+        ovn_remote=$SSL_OVN_SB_DB
+    else
+        ovn_remote=unix:$ovs_base/ovn-sb/ovn-sb.sock
+    fi
+    ovs-vsctl \
+        -- set Open_vSwitch . external-ids:ovn-remote-$systemid=$ovn_remote \
+        -- set Open_vSwitch . external-ids:ovn-encap-type-$systemid=$encap \
+        -- set Open_vSwitch . external-ids:ovn-encap-ip-$systemid=$ip \
+        -- set Open_vSwitch . external-ids:ovn-bridge-$systemid=$int_bridge \
+        -- --may-exist add-br $int_bridge \
+        -- set bridge $int_bridge fail-mode=secure other-config:disable-in-band=true \
+        || return 1
+
+    ovn-controller --enable-dummy-vif-plug ${cli_args} -vconsole:off --detach --no-chdir
+    ovn_wait_for_encaps $systemid
+}
+
+# ovn_setenv AZ
+ovn_setenv () {
+    local d=$ovs_base/$1
+    AS_VAR_SET([AZ_DIR], ["$d"/]); export $var
+    AS_VAR_SET([OVN_NB_DB], [unix:"$d"/ovn-nb/ovn-nb.sock]); export $var
+    AS_VAR_SET([OVN_SB_DB], [unix:"$d"/ovn-sb/ovn-sb.sock]); export $var
+}
+
+# ovs_as AZ
+ovn_as() {
+    if test "X$2" != X; then
+        (ovn_setenv $1; shift; "$@")
+    else
+        ovn_setenv $1
+    fi
+}
+
+# OVN_POPULATE_ARP
+#
+# This pre-populates the ARP tables of all of the OVN instances that have been
+# started with ovn_attach().  That means that packets sent from one hypervisor
+# to another never get dropped or delayed by ARP resolution, which makes
+# testing easier.
+ovn_populate_arp__() {
+    for e1 in $arp_table; do
+        set `echo $e1 | sed 's/,/ /g'`; sb1=$1 br1=$2 ip=$3 mac=$4
+        for e2 in $arp_table; do
+            set `echo $e2 | sed 's/,/ /g'`; sb2=$1 br2=$2
+            if test $sb1,$br1 != $sb2,$br2; then
+                as $sb2 ovs-appctl tnl/neigh/set $br2 $ip $mac || return 1
+            fi
+        done
+    done
+}
+m4_divert_pop([PREPARE_TESTS])
+
+OVS_START_SHELL_HELPERS
+# check COMMAND...
+#
+# Runs COMMAND and checks that it succeeds without any output.
+check() {
+    echo "$@"
+    AT_CHECK(["$@"])
+}
+
+# Runs COMMAND and checks that it does not print anything else than uuid as output.
+# It also fails if the output is empty.
+check_uuid() {
+    echo "$@"
+    output=$("${@}")
+    AT_CHECK([echo "$output" | grep .], [0], [ignore], [], [echo "Unexpected empty output: check_uuid is expecting a UUID"])
+    AT_CHECK([echo "$output" | grep -vE '^[[0-9a-fA-F]]{8}-[[0-9a-fA-F]]{4}-[[0-9a-fA-F]]{4}-[[0-9a-fA-F]]{4}-[[0-9a-fA-F]]{12}$'], [1])
+}
+
+parse_db() {
+    case $1 in
+        (*:*) echo ${1%%:*} ;;
+        (*) echo sb ;;
+    esac
+}
+
+parse_table() {
+    case $1 in
+        (*:*) echo ${1##*:} ;;
+        (*) echo $1 ;;
+    esac
+}
+
+# count_rows TABLE [CONDITION...]
+#
+# Prints the number of rows in TABLE (that satisfy CONDITION).
+# Uses the southbound db by default; set DB=nb for the northbound database.
+count_rows() {
+    local db=$(parse_db $1) table=$(parse_table $1); shift
+    ovn-${db}ctl --format=table --no-headings find $table "$@" | wc -l
+}
+
+# check_row_count [DATABASE:]TABLE COUNT [CONDITION...]
+#
+# Checks that TABLE contains COUNT rows (that satisfy CONDITION).
+# The default DATABASE is "sb".
+check_row_count() {
+    local db=$(parse_db $1) table=$(parse_table $1); shift
+    local count=$1; shift
+    local found=$(count_rows $db:$table "$@")
+    echo
+    echo "Checking for $count rows in $db $table${1+ with $*}... found $found"
+    if test "$count" != "$found"; then
+        ovn-${db}ctl list $table
+        AT_FAIL_IF([:])
+    fi
+}
+
+# wait_row_count [DATABASE:]TABLE COUNT [CONDITION...]
+#
+# Waits until TABLE contains COUNT rows (that satisfy CONDITION).
+# The default DATABASE is "sb".
+wait_row_count() {
+    local db=$(parse_db $1) table=$(parse_table $1); shift
+    local count=$1; shift
+    local a=$1 b=$2 c=$3 d=$4 e=$5
+    echo "Waiting until $count rows in $db $table${1+ with $*}..."
+    OVS_WAIT_UNTIL([test $count = $(count_rows $db:$table $a $b $c $d $e)],[
+      echo "$db table $table has the following rows. $(count_rows $db:$table $a $b $c $d $e) rows match instead of expected $count:"
+      ovn-${db}ctl list $table])
+}
+
+# fetch_column [DATABASE:]TABLE COLUMN [CONDITION...]
+#
+# Fetches and prints all the values of COLUMN in the rows of TABLE
+# (that satisfy CONDITION), sorting the results lexicographically.
+# The default DATABASE is "sb".
+fetch_column() {
+    local db=$(parse_db $1) table=$(parse_table $1) column=${2-_uuid}; shift; shift
+    # Using "echo" removes spaces and newlines.
+    echo $(ovn-${db}ctl --bare --columns $column find $table "$@" | sort)
+}
+
+# check_column EXPECTED [DATABASE:]TABLE COLUMN [CONDITION...]
+#
+# Fetches all of the values of COLUMN in the rows of TABLE (that
+# satisfy CONDITION), and compares them against EXPECTED (ignoring
+# order).
+#
+# The default DATABASE is "sb".
+check_column() {
+    local expected=$1 db=$(parse_db $2) table=$(parse_table $2) column=${3-_uuid}; shift; shift; shift
+    local found=$(ovn-${db}ctl --bare --columns $column find $table "$@")
+
+    # Sort the expected and found values.
+    local found=$(for d in $found; do echo $d; done | sort)
+    local expected=$(for d in $expected; do echo $d; done | sort)
+
+    echo
+    echo "Checking values in $db $table${1+ with $*} against $expected... found $found"
+    if test "$found" != "$expected"; then
+        ovn-${db}ctl list $table
+        AT_FAIL_IF([:])
+    fi
+}
+
+# wait_column EXPECTED [DATABASE:]TABLE [COLUMN [CONDITION...]]
+#
+# Wait until all of the values of COLUMN in the rows of TABLE (that
+# satisfy CONDITION) equal EXPECTED (ignoring order).
+#
+# The default DATABASE is "sb".
+#
+# COLUMN defaults to _uuid if unspecified.
+wait_column() {
+    local expected=$(for d in $1; do echo $d; done | sort)
+    local db=$(parse_db $2) table=$(parse_table $2) column=${3-_uuid}; shift; shift; shift
+    local a=$1 b=$2 c=$3 d=$4 e=$5
+
+    echo
+    echo "Waiting until $column in $db $table${1+ with $*} is $expected..."
+    OVS_WAIT_UNTIL([
+      found=$(ovn-${db}ctl --bare --columns $column find $table $a $b $c $d $e)
+      found=$(for d in $found; do echo $d; done | sort)
+      test "$expected" = "$found"
+    ], [
+      echo "$column in $db table $table has value $found, from the following rows:"
+      ovn-${db}ctl list $table])
+}
+
+# wait_for_ports_up [PORT...]
+#
+# With arguments, waits for specified Logical_Switch_Ports to come up.
+# Without arguments, waits for all "plain" and router
+# Logical_Switch_Ports to come up.
+wait_for_ports_up() {
+    if test $# = 0; then
+        wait_row_count nb:Logical_Switch_Port 0 up!=true type='""'
+        wait_row_count nb:Logical_Switch_Port 0 up!=true type=router
+    else
+        for port; do
+            wait_row_count nb:Logical_Switch_Port 1 up=true name=$port
+        done
+    fi
+}
+
+# reset_pcap_file iface pcap_file
+# Resets the pcap file associates with OVS interface.  should be used
+# with dummy datapath.
+reset_pcap_file() {
+    local iface=$1
+    local pcap_file=$2
+    check rm -f dummy-*.pcap
+    check ovs-vsctl -- set Interface $iface options:tx_pcap=dummy-tx.pcap \
+options:rxq_pcap=dummy-rx.pcap
+    check rm -f ${pcap_file}*.pcap
+    check ovs-vsctl -- set Interface $iface options:tx_pcap=${pcap_file}-tx.pcap \
+options:rxq_pcap=${pcap_file}-rx.pcap
+}
+
+# Receive a packet on a dummy netdev interface. If we expect packets to be
+# recorded, then wait until the pcap file reflects the change.
+netdev_dummy_receive() {
+    local interface="$1"
+    local packet="$2"
+    local hv="$3"
+    local pcap_file="$4"
+
+    if test -n "pcap_file" ; then
+        ts_old=$(stat -c %y "$pcap_file")
+    fi
+    if test -n "$hv" ; then
+        as "$hv" ovs-appctl netdev-dummy/receive "$interface" "$packet"
+    else
+        ovs-appctl netdev-dummy/receive "$interface" "$packet"
+    fi
+    if test -n "$pcap_file" ; then
+        OVS_WAIT_WHILE(
+          [ts_new=$(stat -c %y "$pcap_file")
+           test "$ts_new" = "$ts_old"])
+    fi
+}
+
+# send_igmp_v3_report INPORT HV ETH_SRC IP_SRC IP_CSUM GROUP REC_TYPE
+#                     IGMP_CSUM OUTFILE
+#
+# This shell function causes an IGMPv3 report to be received on INPORT of HV.
+# The packet's content has Ethernet destination 01:00:5E:00:00:22 and source
+# ETH_SRC (exactly 12 hex digits). Ethernet type is set to IP.
+# GROUP is the IP multicast group to be joined/to leave (based on REC_TYPE).
+# REC_TYPE == 04: join GROUP
+# REC_TYPE == 03: leave GROUP
+# The packet hexdump is also stored in OUTFILE.
+#
+send_igmp_v3_report() {
+    local inport=$1 hv=$2 eth_src=$3 ip_src=$4 ip_chksum=$5 group=$6
+    local rec_type=$7 igmp_chksum=$8 outfile=$9
+
+    local eth_dst=01005e000016
+    local ip_dst=$(ip_to_hex 224 0 0 22)
+    local ip_ttl=01
+    local ip_ra_opt=94040000
+
+    local igmp_type=2200
+    local num_rec=00000001
+    local aux_dlen=00
+    local num_src=0000
+
+    local eth=${eth_dst}${eth_src}0800
+    local ip=46c0002800004000${ip_ttl}02${ip_chksum}${ip_src}${ip_dst}${ip_ra_opt}
+    local igmp=${igmp_type}${igmp_chksum}${num_rec}${rec_type}${aux_dlen}${num_src}${group}
+    local packet=${eth}${ip}${igmp}
+
+    echo ${packet} >> ${outfile}
+    check as $hv ovs-appctl netdev-dummy/receive ${inport} ${packet}
+}
+
+# store_igmp_v3_query ETH_SRC IP_SRC IP_CSUM OUTFILE
+#
+# This shell function builds an IGMPv3 general query from ETH_SRC and IP_SRC
+# and stores the hexdump of the packet in OUTFILE.
+#
+store_igmp_v3_query() {
+    local eth_src=$1 ip_src=$2 ip_chksum=$3 outfile=$4
+
+    local eth_dst=01005e000001
+    local ip_dst=$(ip_to_hex 224 0 0 1)
+    local ip_ttl=01
+    local igmp_type=11
+    local max_resp=0a
+    local igmp_chksum=eeeb
+    local addr=00000000
+
+    local eth=${eth_dst}${eth_src}0800
+    local ip=4500002000004000${ip_ttl}02${ip_chksum}${ip_src}${ip_dst}
+    local igmp=${igmp_type}${max_resp}${igmp_chksum}${addr}000a0000
+    local packet=${eth}${ip}${igmp}
+
+    echo ${packet} >> ${outfile}
+}
+
+# send_igmp_v3_query INPORT HV ETH_SRC IP_SRC IP_CSUM OUTFILE
+#
+# This shell function builds and sends an IGMPv3 general query from
+# ETH_SRC and IP_SRC and stores the hexdump of the packet in OUTFILE.
+#
+send_igmp_v3_query() {
+    local inport=$1 hv=$2 eth_src=$3 ip_src=$4 ip_chksum=$5 outfile=$6
+
+    local eth_dst=01005e000001
+    local ip_dst=$(ip_to_hex 224 0 0 1)
+    local ip_ttl=01
+    local igmp_type=11
+    local max_resp=0a
+    local igmp_chksum=eeeb
+    local addr=00000000
+
+    local eth=${eth_dst}${eth_src}0800
+    local ip=4500002000004000${ip_ttl}02${ip_chksum}${ip_src}${ip_dst}
+    local igmp=${igmp_type}${max_resp}${igmp_chksum}${addr}000a0000
+    local packet=${eth}${ip}${igmp}
+
+    echo ${packet} >> ${outfile}
+    check as $hv ovs-appctl netdev-dummy/receive ${inport} ${packet}
+}
+
+# send_ip_multicast_pkt INPORT HV ETH_SRC ETH_DST IP_SRC IP_DST IP_LEN TTL
+#    IP_CHKSUM IP_PROTO DATA
+#
+# This shell function causes an IP multicast packet to be received on INPORT
+# of HV.
+# The hexdump of the packet is stored in OUTFILE.
+#
+send_ip_multicast_pkt() {
+    local inport=$1 hv=$2 eth_src=$3 eth_dst=$4
+    local ip_src=$5 ip_dst=$6 ip_len=$7 ip_ttl=$8 ip_chksum=$9 proto=${10}
+    local data=${11}
+
+    local eth=${eth_dst}${eth_src}0800
+    local ip=450000${ip_len}95f14000${ip_ttl}${proto}${ip_chksum}${ip_src}${ip_dst}
+    local packet=${eth}${ip}${data}
+
+    check as $hv ovs-appctl netdev-dummy/receive ${inport} ${packet}
+}
+
+# store_ip_multicast_pkt ETH_SRC ETH_DST IP_SRC IP_DST IP_LEN TTL
+#    IP_CHKSUM IP_PROTO DATA OUTFILE
+#
+# This shell function builds an IP multicast packet and stores the hexdump of
+# the packet in OUTFILE.
+#
+store_ip_multicast_pkt() {
+    local eth_src=$1 eth_dst=$2
+    local ip_src=$3 ip_dst=$4 ip_len=$5 ip_ttl=$6 ip_chksum=$7 proto=$8
+    local data=$9 outfile=${10}
+
+    local eth=${eth_dst}${eth_src}0800
+    local ip=450000${ip_len}95f14000${ip_ttl}${proto}${ip_chksum}${ip_src}${ip_dst}
+    local packet=${eth}${ip}${data}
+
+    echo ${packet} >> ${outfile}
+}
+
+# send_mld_v2_report INPORT HV ETH_SRC IP_SRC GROUP REC_TYPE
+#                    MLD_CSUM OUTFILE
+#
+# This shell function causes an MLDv2 report to be received on INPORT of HV.
+# The packet's content has Ethernet destination 33:33:00:00:00:16 and source
+# ETH_SRC (exactly 12 hex digits). Ethernet type is set to IPv6.
+# GROUP is the IPv6 multicast group to be joined/to leave (based on REC_TYPE).
+# REC_TYPE == 04: join GROUP
+# REC_TYPE == 03: leave GROUP
+# The packet hexdump is also stored in OUTFILE.
+#
+send_mld_v2_report() {
+    local inport=$1 hv=$2 eth_src=$3 ip_src=$4 group=$5
+    local rec_type=$6 mld_chksum=$7 outfile=$8
+
+    local eth_dst=333300000016
+    local ip_dst=ff020000000000000000000000000016
+    local ip_ttl=01
+    local ip_ra_opt=3a00050200000100
+
+    local mld_type=8f
+    local mld_code=00
+    local num_rec=0001
+    local aux_dlen=00
+    local num_src=0000
+
+    local eth=${eth_dst}${eth_src}86dd
+    local ip=60000000002400${ip_ttl}${ip_src}${ip_dst}${ip_ra_opt}
+    local mld=${mld_type}${mld_code}${mld_chksum}0000${num_rec}${rec_type}${aux_dlen}${num_src}${group}
+    local packet=${eth}${ip}${mld}
+
+    echo ${packet} >> ${outfile}
+    check as $hv ovs-appctl netdev-dummy/receive ${inport} ${packet}
+}
+
+# store_mld_query ETH_SRC IP_SRC OUTFILE
+#
+# This shell function builds an MLD general query from ETH_SRC and IP_SRC
+# and stores the hexdump of the packet in OUTFILE.
+#
+store_mld_query() {
+    local eth_src=$1 ip_src=$2 outfile=$3
+
+    local eth_dst=333300000000
+    local ip_dst=ff020000000000000000000000000001
+    local ip_ttl=01
+    local ip_ra_opt=3a00050200000000
+
+    local mld_type=82
+    local mld_code=00
+    local max_resp=03e8
+    local mld_chksum=7b3d
+    local addr=00000000000000000000000000000000
+
+    local eth=${eth_dst}${eth_src}86dd
+    local ip=60000000002400${ip_ttl}${ip_src}${ip_dst}${ip_ra_opt}
+    local mld=${mld_type}${mld_code}${mld_chksum}${max_resp}0000${addr}00010000
+    local packet=${eth}${ip}${mld}
+
+    echo ${packet} >> ${outfile}
+}
+
+# send_ip6_multicast_pkt INPORT HV ETH_SRC ETH_DST IP_SRC IP_DST IP_LEN TTL
+#    IP_PROTO DATA
+#
+# This shell function causes an IP multicast packet to be received on INPORT
+# of HV.
+#
+send_ip6_multicast_pkt() {
+    local inport=$1 hv=$2 eth_src=$3 eth_dst=$4
+    local ip_src=$5 ip_dst=$6 ip_len=$7 ip_ttl=$8 proto=$9
+    local data=${10}
+
+    local eth=${eth_dst}${eth_src}86dd
+    local ip=60000000${ip_len}${proto}${ip_ttl}${ip_src}${ip_dst}
+    local packet=${eth}${ip}${data}
+
+    check as $hv ovs-appctl netdev-dummy/receive ${inport} ${packet}
+}
+
+# store_ip6_multicast_pkt ETH_SRC ETH_DST IP_SRC IP_DST IP_LEN TTL
+#    IP_PROTO DATA OUTFILE
+#
+# This shell function builds an IP multicast packet and stores the hexdump of
+# the packet in OUTFILE.
+#
+store_ip6_multicast_pkt() {
+    local eth_src=$1 eth_dst=$2
+    local ip_src=$3 ip_dst=$4 ip_len=$5 ip_ttl=$6 proto=$7
+    local data=$8 outfile=$9
+
+    local eth=${eth_dst}${eth_src}86dd
+    local ip=60000000${ip_len}${proto}${ip_ttl}${ip_src}${ip_dst}
+    local packet=${eth}${ip}${data}
+
+    echo ${packet} >> ${outfile}
+}
+
+hex_to_mac() {
+    mac_hex=$1
+    echo $mac_hex | sed 's/../&:/g;s/:$//'
+}
+
+send_garp() {
+    AT_SKIP_IF([test $HAVE_SCAPY = no])
+    local hv=$1 inport=$2 op=$3 eth_src=$4 eth_dst=$5 spa=$6 tpa=$7
+
+    local packet=$(fmt_pkt "Ether(dst='${eth_dst}', src='${eth_src}')/ \
+                      ARP(op=$op, hwsrc='${eth_src}', hwdst='${eth_src}', \
+                      psrc='${spa}', pdst='${tpa}')")
+    echo "Sending GARP($op) $eth_src $eth_dst $spa $tpa packet=$packet on $hv"
+    check as $hv ovs-appctl netdev-dummy/receive $inport $packet
+}
+
+send_na() {
+    local hv=$1 dev=$2 hsrc=$3 hdst=$4 isrc=$5 idst=$6
+    local packet=$(fmt_pkt "Ether(dst='${hdst}', src='${hsrc}')/ \
+                            IPv6(dst='${idst}', src='${isrc}')/ \
+                            ICMPv6ND_NA(tgt='${isrc}')/ \
+                            ICMPv6NDOptDstLLAddr(lladdr='${hsrc}')")
+    echo "${packet}"
+    check as $hv ovs-appctl netdev-dummy/receive $dev $packet >&2
+}
+
+# Wrapper on top of ovn-trace, stripping some things and storing the trace
+# output to a file called 'trace'.  For now it strips the rows starting
+# with a '#'.  This should correspond to the flow key and might be displayed
+# differently by different OVS library versions.
+ovn_trace() {
+    AT_CAPTURE_FILE([trace])
+    ovn-trace "$@" | tee trace | sed '/^# /d'
+}
+
+# Same as ovn_trace() except that it connects to an ovn-trace daemon.
+ovn_trace_client() {
+    target=$1; shift
+    AT_CAPTURE_FILE([trace])
+    ovn-appctl -t $target trace "$@" | tee trace | sed '/^# /d'
+}
+
+# Receives a string with scapy python code that represents a packet.
+# Returns a hex-string that contains bytes that reflect the packet symbolic
+# description.
+#
+# Scapy docs: https://scapy.readthedocs.io/en/latest/usage.html
+#
+# Example of usage:
+#
+# packet=$(fmt_pkt "
+#     Ether(dst='ff:ff:ff:ff:ff:ff', src='50:64:00:00:00:01') /
+#     IPv6(src='abed::1', dst='ff02::1:ff00:2') /
+#     ICMPv6ND_NS(tgt='abed::2')
+# ")
+#
+# ovs-appctl netdev-dummy/receive $vif $packet
+#
+fmt_pkt() {
+    ctlfile=$ovs_base/scapy.ctl
+    if [[ ! -S $ctlfile ]]; then
+        start_scapy_server
+    fi
+    while [[ ! -S $ctlfile ]]; do sleep 0.1; done
+    ovs-appctl -t $ctlfile payload "$1"
+}
+
+start_scapy_server() {
+    pidfile=$ovs_base/scapy.pid
+    ctlfile=$ovs_base/scapy.ctl
+    logfile=$ovs_base/scapy.log
+    lockfile=$ovs_base/scapy.lock
+
+    flock -n $lockfile "$top_srcdir"/tests/scapy-server.py \
+        --pidfile=$pidfile --unixctl=$ctlfile --log-file=$logfile --detach \
+    && on_exit "test -e \"$pidfile\" && ovs-appctl -t $ctlfile exit"
+}
+
+sleep_northd() {
+  echo Northd going to sleep
+  AT_CHECK([kill -STOP $(cat northd/ovn-northd.pid)])
+  on_exit "test -e northd/ovn-northd.pid && kill -CONT $(cat northd/ovn-northd.pid)"
+}
+
+wake_up_northd() {
+  echo Northd waking up
+  AT_CHECK([kill -CONT $(cat northd/ovn-northd.pid)])
+}
+
+sleep_sb() {
+  echo SB going to sleep
+  AT_CHECK([kill -STOP $(cat ovn-sb/ovsdb-server.pid)])
+  on_exit "test -e ovn-sb/ovsdb-server.pid && kill -CONT $(cat ovn-sb/ovsdb-server.pid)"
+}
+wake_up_sb() {
+  echo SB waking up
+  AT_CHECK([kill -CONT $(cat ovn-sb/ovsdb-server.pid)])
+}
+sleep_controller() {
+  hv=$1
+  echo Controller $hv going to sleep
+  as $hv
+  check ovn-appctl debug/pause
+  OVS_WAIT_UNTIL([test x$(ovn-appctl -t ovn-controller debug/status) = "xpaused"])
+}
+wake_up_controller() {
+  hv=$1
+  as $hv
+  echo Controller $hv waking up
+  ovn-appctl debug/resume
+  OVS_WAIT_UNTIL([test x$(ovn-appctl -t ovn-controller debug/status) = "xrunning"])
+}
+sleep_ovs() {
+  hv=$1
+  echo ovs $hv going to sleep
+  AT_CHECK([kill -STOP $(cat $hv/ovs-vswitchd.pid)])
+  on_exit "test -e $hv/ovs-vswitchd.pid && kill -CONT $(cat $hv/ovs-vswitchd.pid)"
+}
+
+wake_up_ovs() {
+  hv=$1
+  echo ovs $hv going to wake-up
+  AT_CHECK([kill -CONT $(cat $hv/ovs-vswitchd.pid)])
+}
+
+sleep_ovsdb() {
+  echo OVSDB $1 going to sleep
+  AT_CHECK([kill -STOP $(cat $1/ovsdb-server.pid)])
+  on_exit "test -e $1/ovsdb-server.pid && kill -CONT $(cat $1/ovsdb-server.pid)"
+}
+wake_up_ovsdb() {
+  echo OVSDB $1 waking up
+  AT_CHECK([kill -CONT $(cat $1/ovsdb-server.pid)])
+}
+
+stop_ovsdb_controller_updates() {
+  TCP_PORT=$1
+  echo Stopping updates from ovn-controller to ovsdb using port $TCP_PORT
+  on_exit 'nft list tables | grep ovn-test && nft delete table ip ovn-test'
+  # Report the test as skipped if proper nft related packages are not installed.
+  AT_SKIP_IF([test $HAVE_NFT = no])
+  AT_CHECK([nft add table ip ovn-test])
+  AT_CHECK([nft 'add chain ip ovn-test INPUT { type filter hook input priority 0; policy accept; }'])
+  AT_CHECK([nft add rule ip ovn-test INPUT tcp dport $TCP_PORT counter drop])
+}
+
+restart_ovsdb_controller_updates() {
+  TCP_PORT=$1
+  echo Restarting updates from ovn-controller to ovsdb
+  AT_CHECK([nft list ruleset | grep $TCP_PORT], [0], [ignore])
+  AT_CHECK([nft delete table ip ovn-test])
+}
+
+sleep_nb() {
+  echo NB going to sleep
+  AT_CHECK([kill -STOP $(cat ovn-nb/ovsdb-server.pid)])
+  on_exit "test -e ovn-nb/ovsdb-server.pid && kill -CONT $(cat ovn-nb/ovsdb-server.pid)"
+}
+
+wake_up_nb() {
+  echo NB waking up
+  AT_CHECK([kill -CONT $(cat ovn-nb/ovsdb-server.pid)])
+}
+
+trim_zeros() {
+    sed 's/\(00\)\{1,\}$//'
+}
+
+ovn_strip_lflows() {
+     sed 's/table=[[0-9]]\{1,2\}\s\?/table=??/g' | sort
+}
+
+ovn_strip_collector_set() {
+    sed 's/collector_set=[[0-9]]*,\?/collector_set=??,/g'
+}
+
+netlink_if_index() {
+    ip -o link show dev $1 | awk -F: '{print $1}'
+}
+
+OVS_END_SHELL_HELPERS
+
+m4_define([OVN_POPULATE_ARP], [AT_CHECK(ovn_populate_arp__, [0], [ignore])])
+
+# Defines versions of the test with all combinations of northd,
+# parallelization enabled and conditional monitoring on/off.
+m4_define([OVN_FOR_EACH_NORTHD],
+  [m4_foreach([NORTHD_USE_PARALLELIZATION], [yes],
+     [m4_foreach([OVN_MONITOR_ALL], [yes, no], [$1
+])])])
+
+# Defines versions of the test with all combinations of northd and
+# parallelization enabled. To be used when the ovn-controller configuration
+# is not relevant.
+m4_define([OVN_FOR_EACH_NORTHD_NO_HV],
+  [m4_foreach([NORTHD_USE_PARALLELIZATION], [yes], [$1
+])])
+
+# Defines versions of the test with all combinations of northd and
+# parallelization on/off. To be used when the ovn-controller configuration
+# is not relevant and we want to test parallelization permutations.
+m4_define([OVN_FOR_EACH_NORTHD_NO_HV_PARALLELIZATION],
+  [m4_foreach([NORTHD_USE_PARALLELIZATION], [yes, no], [$1
+])])
+
+# Defines versions of the test with all combinations of northd,
+# parallelization enabled, conditional monitoring on/off, and flow-based
+# tunnels on/off. Use this for tests that need to verify behavior with both
+# port-based and flow-based tunnel implementations.
+m4_define([OVN_FOR_EACH_NORTHD_FLOW_TUNNEL],
+  [m4_foreach([NORTHD_USE_PARALLELIZATION], [yes],
+     [m4_foreach([OVN_MONITOR_ALL], [yes, no],
+        [m4_foreach([OVN_ENABLE_FLOW_BASED_TUNNELS], [yes, no], [$1
+])])])])
+
+# OVN_NBCTL(NBCTL_COMMAND) adds NBCTL_COMMAND to list of commands to be run by RUN_OVN_NBCTL().
+m4_define([OVN_NBCTL], [
+    command="${command} -- $1"
+])
+
+# RUN_OVN_NBCTL() executes list of commands built by the OVN_NBCTL() macro.
+m4_define([RUN_OVN_NBCTL], [
+    check ovn-nbctl ${command}
+    unset command
+])
+
+# OVS_VSCTL(VSCTL_COMMAND) adds VSCTL_COMMAND to list of commands to be run by RUN_OVS_VSCTL().
+m4_define([OVS_VSCTL], [
+    command="${command} -- $1"
+])
+
+# RUN_OVS_VSCTL() executes list of commands built by the OVS_VSCTL() macro.
+m4_define([RUN_OVS_VSCTL], [
+    check ovs-vsctl ${command}
+    unset command
+])
+
+m4_define([TAG_UNSTABLE], [
+    AT_KEYWORDS([unstable])
+    AT_SKIP_IF([test X"$SKIP_UNSTABLE" = Xyes])
+])
+
+# TAG_TEST_NOT_UPGRADABLE tag indicates that the test would fail
+# "upgrade" test (i.e. running old ovn-northd and new ovn-controller)
+m4_define([TAG_TEST_NOT_UPGRADABLE], [
+    AT_SKIP_IF([test X"$UPGRADE_TEST" = Xyes])
+])
+
+m4_define([OVN_CHECK_SCAPY_EDNS_CLIENT_SUBNET_SUPPORT],
+[
+    AT_SKIP_IF([test $HAVE_SCAPY = no])
+    AT_SKIP_IF([! echo "from scapy.layers.dns import EDNS0ClientSubnet" | python 2>&1 > /dev/null])
+])
+
+# OVN_CONTROLLER_EXIT exits ovn-controller running on $1, with option $2 (e.g. --restart)
+m4_define([OVN_CONTROLLER_EXIT],
+  [TMPPID=$(cat ./$1/ovn-controller.pid)
+   AT_CHECK([as $1
+check ovn-appctl -t ovn-controller exit $2])
+   # Make sure ovn-controller stopped so that a future restart will not fail.
+   # Checking debug/status is running is not enough as there might be a small race condition.
+   echo "Waiting for pid $TMPPID"
+   OVS_WAIT_WHILE([kill -0 $TMPPID 2>/dev/null])
+])
+
+# OVN_SKIP_MEM_LEAK([leak ...])
+#
+# Skip memory leak, it can be function name, file path etc.
+m4_define([OVN_SKIP_MEM_LEAK],[
+    m4_foreach([def], [$@], [
+        echo "leak:def" >> ovn_leak_suppression.txt
+    ])
+
+    LSAN_OPTIONS=$LSAN_OPTIONS:suppressions=ovn_leak_suppression.txt
+    LSAN_OPTIONS=$LSAN_OPTIONS:print_suppressions=0
+    export LSAN_OPTIONS
+])
+
+m4_define([OFTABLE_PHY_TO_LOG], [0])
+m4_define([OFTABLE_LOG_INGRESS_PIPELINE], [8])
+m4_define([OFTABLE_OUTPUT_LARGE_PKT_DETECT], [42])
+m4_define([OFTABLE_OUTPUT_LARGE_PKT_PROCESS], [43])
+m4_define([OFTABLE_REMOTE_OUTPUT], [44])
+m4_define([OFTABLE_REMOTE_VTEP_OUTPUT], [45])
+m4_define([OFTABLE_LOCAL_OUTPUT], [46])
+m4_define([OFTABLE_LOG_EGRESS_PIPELINE], [48])
+m4_define([OFTABLE_SAVE_INPORT], [64])
+m4_define([OFTABLE_LOG_TO_PHY], [65])
+m4_define([OFTABLE_MAC_BINDING], [66])
+m4_define([OFTABLE_MAC_LOOKUP], [67])
+m4_define([OFTABLE_CHK_LB_HAIRPIN], [68])
+m4_define([OFTABLE_CHK_LB_HAIRPIN_REPLY], [69])
+m4_define([OFTABLE_CT_SNAT_HAIRPIN], [70])
+m4_define([OFTABLE_GET_FDB], [71])
+m4_define([OFTABLE_LOOKUP_FDB], [72])
+m4_define([OFTABLE_CHK_IN_PORT_SEC], [73])
+m4_define([OFTABLE_CHK_IN_PORT_SEC_ND], [74])
+m4_define([OFTABLE_CHK_OUT_PORT_SEC], [75])
+m4_define([OFTABLE_ECMP_NH_MAC], [76])
+m4_define([OFTABLE_ECMP_NH], [77])
+m4_define([OFTABLE_CHK_LB_AFFINITY], [78])
+m4_define([OFTABLE_MAC_CACHE_USE], [79])
+m4_define([OFTABLE_CT_ZONE_LOOKUP], [80])
+m4_define([OFTABLE_CT_ORIG_NW_DST_LOAD], [81])
+m4_define([OFTABLE_CT_ORIG_IP6_DST_LOAD], [82])
+m4_define([OFTABLE_CT_ORIG_TP_DST_LOAD], [83])
+m4_define([OFTABLE_FLOOD_REMOTE_CHASSIS], [84])
+m4_define([OFTABLE_CT_STATE_SAVE], [85])
+m4_define([OFTABLE_CT_ORIG_PROTO_LOAD], [86])
+m4_define([OFTABLE_GET_REMOTE_FDB], [87])
+m4_define([OFTABLE_LEARN_REMOTE_FDB], [88])
+
+m4_define([OFTABLE_SAVE_INPORT_HEX], [m4_eval(OFTABLE_SAVE_INPORT, 16)])

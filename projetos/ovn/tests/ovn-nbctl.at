@@ -1,0 +1,3713 @@
+AT_BANNER([ovn-nbctl])
+
+OVS_START_SHELL_HELPERS
+# OVN_NBCTL_TEST_START
+m4_define([OVN_NBCTL_TEST_START],
+  [AT_KEYWORDS([ovn])
+   AT_CAPTURE_FILE([ovsdb-server.log])
+   ovn_nbctl_test_start $1])
+ovn_nbctl_test_start() {
+   dnl Create ovn-nb database.
+   AT_CHECK([ovsdb-tool create ovn-nb.db $abs_top_srcdir/ovn-nb.ovsschema])
+
+   dnl Start ovsdb-server.
+   AT_CHECK([ovsdb-server --detach --no-chdir --pidfile --log-file --remote=punix:$OVS_RUNDIR/ovnnb_db.sock ovn-nb.db], [0], [], [stderr])
+   on_exit "kill `cat ovsdb-server.pid`"
+   AS_CASE([$1],
+     [daemon],
+       [export OVN_NB_DAEMON=$(ovn-nbctl --pidfile --detach --no-chdir --log-file -vsocket_util:off)
+        on_exit "kill `cat ovn-nbctl.pid`"],
+     [direct], [],
+     [*], [AT_FAIL_IF(:)])
+   AT_CHECK([ovn-nbctl init])
+   AT_CHECK([[sed < stderr '
+/vlog|INFO|opened log file/d
+/ovsdb_server|INFO|ovsdb-server (Open vSwitch)/d']])
+}
+
+# OVN_NBCTL_TEST_STOP
+m4_define([OVN_NBCTL_TEST_STOP], [ovn_nbctl_test_stop])
+ovn_nbctl_test_stop() {
+   AT_CHECK([check_logs "$1"])
+   OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+}
+OVS_END_SHELL_HELPERS
+
+# OVN_NBCTL_TEST(NAME, TITLE, COMMANDS)
+m4_define([OVN_NBCTL_TEST],
+   [OVS_START_SHELL_HELPERS
+    $1() {
+      $3
+    }
+    OVS_END_SHELL_HELPERS
+
+    AT_SETUP([ovn-nbctl - $2 - direct])
+    OVN_NBCTL_TEST_START direct
+    $1
+    OVN_NBCTL_TEST_STOP
+    AT_CLEANUP
+
+    AT_SETUP([ovn-nbctl - $2 - daemon])
+    OVN_NBCTL_TEST_START daemon
+    $1
+    OVN_NBCTL_TEST_STOP
+    AT_CLEANUP])
+
+OVN_NBCTL_TEST([ovn_nbctl_basic_switch], [basic switch commands], [
+AT_CHECK([ovn-nbctl ls-add ls0])
+AT_CHECK([ovn-nbctl ls-list | uuidfilt], [0], [dnl
+<0> (ls0)
+])
+
+AT_CHECK([ovn-nbctl ls-add ls1])
+AT_CHECK([ovn-nbctl ls-list | uuidfilt], [0], [dnl
+<0> (ls0)
+<1> (ls1)
+])
+
+AT_CHECK([ovn-nbctl ls-del ls0])
+AT_CHECK([ovn-nbctl ls-list | uuidfilt], [0], [dnl
+<0> (ls1)
+])
+
+AT_CHECK([ovn-nbctl show ls0])
+AT_CHECK([ovn-nbctl ls-add ls0])
+AT_CHECK([ovn-nbctl show ls0 | uuidfilt], [0],
+  [switch <0> (ls0)
+])
+AT_CHECK([ovn-nbctl ls-add ls0], [1], [],
+  [ovn-nbctl: ls0: a switch with this name already exists
+])
+AT_CHECK([ovn-nbctl --may-exist ls-add ls0])
+AT_CHECK([ovn-nbctl show ls0 | uuidfilt], [0],
+  [switch <0> (ls0)
+])
+AT_CHECK([ovn-nbctl --add-duplicate ls-add ls0])
+AT_CHECK([ovn-nbctl --may-exist --add-duplicate ls-add ls0], [1], [],
+  [ovn-nbctl: --may-exist and --add-duplicate may not be used together
+])
+AT_CHECK([ovn-nbctl ls-del ls0], [1], [],
+  [ovn-nbctl: Multiple logical switches named 'ls0'.  Use a UUID.
+])
+
+AT_CHECK([ovn-nbctl ls-del ls2], [1], [],
+  [ovn-nbctl: ls2: switch name not found
+])
+AT_CHECK([ovn-nbctl --if-exists ls-del ls2])
+
+AT_CHECK([ovn-nbctl ls-add])
+AT_CHECK([ovn-nbctl ls-add])
+AT_CHECK([ovn-nbctl --add-duplicate ls-add], [1], [],
+  [ovn-nbctl: --add-duplicate requires specifying a name
+])
+AT_CHECK([ovn-nbctl --may-exist ls-add], [1], [],
+  [ovn-nbctl: --may-exist requires specifying a name
+])])
+
+dnl ---------------------------------------------------------------------
+
+OVN_NBCTL_TEST([ovn_nbctl_basic_lsp], [basic logical switch port commands], [
+AT_CHECK([ovn-nbctl ls-add ls0])
+AT_CHECK([ovn-nbctl lsp-add ls0 lp0])
+AT_CHECK([ovn-nbctl lsp-add ls0 lp0], [1], [],
+  [ovn-nbctl: lp0: a port with this name already exists
+])
+AT_CHECK([ovn-nbctl --may-exist lsp-add ls0 lp0])
+AT_CHECK([ovn-nbctl lsp-list ls0 | uuidfilt], [0], [dnl
+<0> (lp0)
+])
+
+AT_CHECK([ovn-nbctl lsp-add ls0 lp1])
+AT_CHECK([ovn-nbctl lsp-list ls0 | uuidfilt], [0], [dnl
+<0> (lp0)
+<1> (lp1)
+])
+
+AT_CHECK([ovn-nbctl ls-add ls1])
+AT_CHECK([ovn-nbctl lsp-add ls0 lp1], [1], [],
+  [ovn-nbctl: lp1: a port with this name already exists
+])
+AT_CHECK([ovn-nbctl --may-exist lsp-add ls1 lp1], [1], [],
+  [ovn-nbctl: lp1: port already exists but in switch ls0
+])
+AT_CHECK([ovn-nbctl --may-exist lsp-add ls0 lp1 lp0 5], [1], [],
+  [ovn-nbctl: lp1: port already exists but has no parent
+])
+
+AT_CHECK([ovn-nbctl lsp-del lp1])
+AT_CHECK([ovn-nbctl lsp-list ls0 | uuidfilt], [0], [dnl
+<0> (lp0)
+])
+
+AT_CHECK([ovn-nbctl lsp-add ls0 lp2 lp3 5])
+AT_CHECK([ovn-nbctl --may-exist lsp-add ls0 lp2 lp4 5], [1], [],
+  [ovn-nbctl: lp2: port already exists with different parent lp3
+])
+AT_CHECK([ovn-nbctl --may-exist lsp-add ls0 lp2 lp3 10], [1], [],
+  [ovn-nbctl: lp2: port already exists with different tag_request 5
+])
+AT_CHECK([ovn-nbctl clear Logical_Switch_Port lp2 tag_request])
+AT_CHECK([ovn-nbctl --may-exist lsp-add ls0 lp2 lp3 5], [1], [],
+  [ovn-nbctl: lp2: port already exists but has no tag_request
+])])
+
+dnl ---------------------------------------------------------------------
+
+OVN_NBCTL_TEST([ovn_nbctl_lsp_get_ls], [lsp get ls], [
+AT_CHECK([ovn-nbctl ls-add ls0])
+AT_CHECK([ovn-nbctl lsp-add ls0 lp0])
+
+AT_CHECK([ovn-nbctl lsp-get-ls lp0 | uuidfilt], [0], [dnl
+<0> (ls0)
+])
+
+AT_CHECK([ovn-nbctl lsp-get-ls lp1], [1], [],
+  [ovn-nbctl: lp1: port name not found
+])])
+
+dnl ---------------------------------------------------------------------
+
+OVN_NBCTL_TEST([ovn_nbctl_lport_addresses], [lport addresses], [
+AT_CHECK([ovn-nbctl ls-add ls0])
+AT_CHECK([ovn-nbctl lsp-add ls0 lp0])
+AT_CHECK([ovn-nbctl lsp-get-addresses lp0], [0], [dnl
+])
+
+AT_CHECK([ovn-nbctl lsp-set-addresses lp0 00:11:22:33:44:55 unknown])
+AT_CHECK([ovn-nbctl lsp-get-addresses lp0], [0], [dnl
+00:11:22:33:44:55
+unknown
+])
+
+AT_CHECK([ovn-nbctl lsp-set-addresses lp0])
+AT_CHECK([ovn-nbctl lsp-get-addresses lp0], [0], [dnl
+])
+
+AT_CHECK([ovn-nbctl lr-add lr0])
+AT_CHECK([ovn-nbctl lrp-add lr0 rp-ls0 aa:bb:bb:00:00:01 192.168.0.1/24])
+AT_CHECK([ovn-nbctl lsp-add ls0 ls0-rp])
+AT_CHECK([ovn-nbctl lsp-set-addresses ls0-rp router])
+AT_CHECK([ovn-nbctl lsp-set-type ls0-rp router])
+AT_CHECK([ovn-nbctl lsp-set-options ls0-rp router-port=rp-ls0])
+AT_CHECK([ovn-nbctl lsp-get-addresses ls0-rp], [0], [dnl
+aa:bb:bb:00:00:01 192.168.0.1/24
+])])
+
+dnl ---------------------------------------------------------------------
+
+OVN_NBCTL_TEST([ovn_nbctl_port_security], [port security], [
+AT_CHECK([ovn-nbctl ls-add ls0])
+AT_CHECK([ovn-nbctl lsp-add ls0 lp0])
+AT_CHECK([ovn-nbctl lsp-get-addresses lp0], [0], [dnl
+])
+
+AT_CHECK([ovn-nbctl lsp-set-port-security lp0 aa:bb:cc:dd:ee:ff 00:11:22:33:44:55])
+AT_CHECK([ovn-nbctl lsp-get-port-security lp0], [0], [dnl
+00:11:22:33:44:55
+aa:bb:cc:dd:ee:ff
+])
+
+AT_CHECK([ovn-nbctl lsp-set-port-security lp0])
+AT_CHECK([ovn-nbctl lsp-get-port-security lp0], [0], [dnl
+])])
+
+dnl ---------------------------------------------------------------------
+
+OVN_NBCTL_TEST([ovn_nbctl_acls], [ACLs], [
+ovn_nbctl_test_acl() {
+   AT_CHECK([ovn-nbctl $2 --log acl-add $1 from-lport 600 udp drop])
+   AT_CHECK([ovn-nbctl $2 --log --name=test --severity=info acl-add $1 to-lport 500 udp drop])
+   AT_CHECK([ovn-nbctl $2 acl-add $1 from-lport 400 tcp drop])
+   AT_CHECK([ovn-nbctl $2 acl-add $1 to-lport 300 tcp drop])
+   AT_CHECK([ovn-nbctl $2 acl-add $1 from-lport 200 ip drop])
+   AT_CHECK([ovn-nbctl $2 acl-add $1 to-lport 100 ip drop])
+   AT_CHECK([ovn-nbctl $2 --label=1234 acl-add $1 from-lport 70 icmp allow-related])
+   AT_CHECK([ovn-nbctl $2 --label=1235 acl-add $1 to-lport 70 icmp allow-related])
+   AT_CHECK([ovn-nbctl $2 --apply-after-lb acl-add $1 from-lport 500 tcp allow])
+   AT_CHECK([ovn-nbctl $2 --apply-after-lb acl-add $1 from-lport 300 tcp drop])
+   AT_CHECK([ovn-nbctl $2 --apply-after-lb acl-add $1 from-lport 300 udp allow])
+
+   dnl Add duplicated ACL
+   AT_CHECK([ovn-nbctl $2 acl-add $1 to-lport 100 ip drop], [1], [], [stderr])
+   AT_CHECK([grep 'already existed' stderr], [0], [ignore])
+   AT_CHECK([ovn-nbctl $2 --may-exist acl-add $1 to-lport 100 ip drop])
+
+   dnl Add invalid ACL label
+   AT_CHECK([ovn-nbctl $2 --label=1234 acl-add $1 to-lport 50 ip drop], [1], [], [stderr])
+   AT_CHECK([grep 'can only be set with actions' stderr], [0], [ignore])
+
+   AT_CHECK([ovn-nbctl $2 --label=abcd acl-add $1 to-lport 50 ip allow-related], [1], [], [stderr])
+   AT_CHECK([grep 'label must in range 0...4294967295' stderr], [0], [ignore])
+
+   AT_CHECK([ovn-nbctl $2 --label=-1 acl-add $1 to-lport 50 ip allow-related], [1], [], [stderr])
+   AT_CHECK([grep 'label must in range 0...4294967295' stderr], [0], [ignore])
+
+   AT_CHECK([ovn-nbctl $2 --label=4294967296 acl-add $1 to-lport 50 ip allow-related], [1], [], [stderr])
+   AT_CHECK([grep 'label must in range 0...4294967295' stderr], [0], [ignore])
+
+   AT_CHECK([ovn-nbctl $2 acl-list $1], [0], [dnl
+from-lport   600 (udp) drop log()
+from-lport   400 (tcp) drop
+from-lport   200 (ip) drop
+from-lport    70 (icmp) allow-related label=1234
+from-lport   500 (tcp) allow [[after-lb]]
+from-lport   300 (tcp) drop [[after-lb]]
+from-lport   300 (udp) allow [[after-lb]]
+  to-lport   500 (udp) drop log(name=test,severity=info)
+  to-lport   300 (tcp) drop
+  to-lport   100 (ip) drop
+  to-lport    70 (icmp) allow-related label=1235
+])
+
+   dnl Delete in one direction.
+   AT_CHECK([ovn-nbctl $2 acl-del $1 to-lport])
+   AT_CHECK([ovn-nbctl $2 acl-list $1], [0], [dnl
+from-lport   600 (udp) drop log()
+from-lport   400 (tcp) drop
+from-lport   200 (ip) drop
+from-lport    70 (icmp) allow-related label=1234
+from-lport   500 (tcp) allow [[after-lb]]
+from-lport   300 (tcp) drop [[after-lb]]
+from-lport   300 (udp) allow [[after-lb]]
+])
+
+   dnl Delete all ACLs.
+   AT_CHECK([ovn-nbctl $2 acl-del $1])
+   AT_CHECK([ovn-nbctl $2 acl-list $1], [0], [dnl
+])
+
+   AT_CHECK([ovn-nbctl $2 acl-add $1 from-lport 600 udp drop])
+   AT_CHECK([ovn-nbctl $2 acl-add $1 from-lport 400 tcp drop])
+   AT_CHECK([ovn-nbctl $2 acl-add $1 from-lport 200 ip drop])
+
+   dnl Delete a single flow.
+   AT_CHECK([ovn-nbctl $2 acl-del $1 from-lport 400 tcp])
+   AT_CHECK([ovn-nbctl $2 acl-list $1], [0], [dnl
+from-lport   600 (udp) drop
+from-lport   200 (ip) drop
+])
+}
+
+AT_CHECK([ovn-nbctl ls-add ls0])
+ovn_nbctl_test_acl ls0
+AT_CHECK([ovn-nbctl ls-add ls1])
+ovn_nbctl_test_acl ls1 --type=switch
+AT_CHECK([ovn-nbctl create port_group name=pg0], [0], [ignore])
+ovn_nbctl_test_acl pg0 --type=port-group
+
+dnl Test when port group doesn't exist
+AT_CHECK([ovn-nbctl --type=port-group acl-add pg1 to-lport 100 ip drop], [1], [], [dnl
+ovn-nbctl: pg1: port group name not found
+])
+
+dnl Test when same name exists in logical switches and portgroups
+AT_CHECK([ovn-nbctl create port_group name=ls0], [0], [ignore])
+AT_CHECK([ovn-nbctl acl-add ls0 to-lport 100 ip drop], [1], [], [stderr])
+AT_CHECK([grep 'exists in both' stderr], [0], [ignore])
+AT_CHECK([ovn-nbctl --type=port-group acl-add ls0 to-lport 100 ip drop], [0], [ignore])
+
+dnl Test using --all option to show port group acls for a logical switch.
+check ovn-nbctl ls-del ls1
+check ovn-nbctl ls-add ls1
+check ovn-nbctl lsp-add ls1 lp0
+check ovn-nbctl lsp-add ls1 lp1
+check ovn-nbctl lsp-add ls1 lp2
+check ovn-nbctl pg-del pg0
+check ovn-nbctl pg-add pg0
+check ovn-nbctl pg-set-ports pg0 lp0
+check ovn-nbctl pg-add pg1
+check ovn-nbctl pg-set-ports pg1 lp1
+check ovn-nbctl pg-add pg2
+check ovn-nbctl pg-set-ports pg2 lp0 lp2 lp1
+check ovn-nbctl --type=switch acl-add ls1 to-lport 100 ip drop
+check ovn-nbctl --type=switch acl-add ls1 from-lport 500 ip drop
+check ovn-nbctl --type=port-group acl-add pg0 to-lport 144 ip drop
+check ovn-nbctl --type=port-group acl-add pg0 to-lport 11 ip drop
+check ovn-nbctl --type=port-group acl-add pg1 to-lport 12 ip drop
+check ovn-nbctl --type=port-group acl-add pg2 to-lport 99 ip drop
+check ovn-nbctl --type=port-group acl-add pg2 from-lport 100 ip drop
+check ovn-nbctl --type=port-group acl-add pg2 from-lport 98 ip drop
+
+AT_CHECK([ovn-nbctl --all acl-list ls1], [0], [dnl
+from-lport   500 (ip) drop
+  to-lport   100 (ip) drop
+  to-lport   144 (ip) drop [[pg0]]
+  to-lport    11 (ip) drop [[pg0]]
+  to-lport    12 (ip) drop [[pg1]]
+from-lport   100 (ip) drop [[pg2]]
+from-lport    98 (ip) drop [[pg2]]
+  to-lport    99 (ip) drop [[pg2]]
+])
+
+check ovn-nbctl acl-del ls1
+check ovn-nbctl acl-del pg0
+check ovn-nbctl acl-del pg1
+check ovn-nbctl acl-del pg2
+check ovn-nbctl pg-del pg0
+check ovn-nbctl pg-del pg1
+check ovn-nbctl pg-del pg2
+check ovn-nbctl ls-del ls1])
+
+dnl ---------------------------------------------------------------------
+
+OVN_NBCTL_TEST([ovn_nbctl_qos], [QoS], [
+AT_CHECK([ovn-nbctl ls-add ls0])
+AT_CHECK([ovn-nbctl qos-add ls0 from-lport 600 tcp dscp=63])
+AT_CHECK([ovn-nbctl qos-add ls0 from-lport 500 udp rate=100 burst=1000])
+AT_CHECK([ovn-nbctl qos-add ls0 from-lport 400 tcp dscp=0 rate=300 burst=3000])
+AT_CHECK([ovn-nbctl qos-add ls0 to-lport 300 tcp dscp=48])
+AT_CHECK([ovn-nbctl qos-add ls0 to-lport 200 ip rate=101])
+AT_CHECK([ovn-nbctl qos-add ls0 to-lport 100 ip4 dscp=13 rate=301 burst=30000])
+AT_CHECK([ovn-nbctl qos-add ls0 to-lport 101 ip4 mark=15])
+AT_CHECK([ovn-nbctl qos-add ls0 to-lport 102 ip4 dscp=16 mark=17])
+
+dnl Add duplicated qos
+AT_CHECK([ovn-nbctl qos-add ls0 to-lport 100 ip4 dscp=11 rate=302 burst=30002], [1], [], [stderr])
+AT_CHECK([grep 'already existed' stderr], [0], [ignore])
+AT_CHECK([ovn-nbctl --may-exist qos-add ls0 to-lport 100 ip4 dscp=11 rate=302 burst=30002])
+
+AT_CHECK([ovn-nbctl qos-list ls0], [0], [dnl
+from-lport   600 (tcp) dscp=63
+from-lport   500 (udp) rate=100 burst=1000
+from-lport   400 (tcp) rate=300 burst=3000 dscp=0
+  to-lport   300 (tcp) dscp=48
+  to-lport   200 (ip) rate=101
+  to-lport   102 (ip4) dscp=16 mark=17
+  to-lport   101 (ip4) mark=15
+  to-lport   100 (ip4) rate=301 burst=30000 dscp=13
+])
+
+dnl Delete in one direction.
+AT_CHECK([ovn-nbctl qos-del ls0 to-lport])
+AT_CHECK([ovn-nbctl qos-list ls0], [0], [dnl
+from-lport   600 (tcp) dscp=63
+from-lport   500 (udp) rate=100 burst=1000
+from-lport   400 (tcp) rate=300 burst=3000 dscp=0
+])
+
+dnl Delete all qos_rules.
+AT_CHECK([ovn-nbctl qos-del ls0])
+AT_CHECK([ovn-nbctl qos-list ls0], [0], [dnl
+])
+
+AT_CHECK([ovn-nbctl qos-add ls0 from-lport 600 ip rate=1000101])
+AT_CHECK([ovn-nbctl qos-add ls0 from-lport 400 tcp dscp=44])
+
+dnl Delete a single flow.
+AT_CHECK([ovn-nbctl qos-del ls0 from-lport 400 tcp])
+AT_CHECK([ovn-nbctl qos-list ls0], [0], [dnl
+from-lport   600 (ip) rate=1000101
+])
+
+dnl Delete QoS rule by specified uuid
+AT_CHECK([ovn-nbctl qos-del ls0 $(ovn-nbctl --bare --column _uuid list qos)])
+AT_CHECK([ovn-nbctl list qos], [0], [dnl
+])
+
+AT_CHECK([ovn-nbctl qos-add ls0 from-lport 600 ip rate=100010111111], [1], [],
+[ovn-nbctl: 100010111111: rate must be in the range 1...4294967295
+])
+
+AT_CHECK([ovn-nbctl qos-add ls0 from-lport 600 ip burst=100010111112 rate=100010], [1], [],
+[ovn-nbctl: 100010111112: burst must be in the range 1...4294967295
+])
+
+AT_CHECK([ovn-nbctl qos-add ls0 from-lport 600 ip dscp=-1], [1], [],
+[ovn-nbctl: -1: dscp must be in the range 0...63
+])
+
+AT_CHECK([ovn-nbctl qos-add ls0 from-lport 600 ip dscpa=-1], [1], [],
+[ovn-nbctl: dscpa=-1: supported arguments are "dscp=", "rate=", "burst=" and "mark="
+])
+
+AT_CHECK([ovn-nbctl qos-add ls0 from-lport 600 ip burst=123], [1], [],
+[ovn-nbctl: Either "mark", "rate" and/or "dscp" must be specified
+])])
+
+dnl ---------------------------------------------------------------------
+
+OVN_NBCTL_TEST([ovn_nbctl_meters], [meters], [
+AT_CHECK([ovn-nbctl meter-add meter1 drop 10 kbps])
+AT_CHECK([ovn-nbctl meter-add meter2 drop 3 kbps 2])
+AT_CHECK([ovn-nbctl meter-add meter3 drop 100 kbps 200])
+AT_CHECK([ovn-nbctl --fair meter-add meter4 drop 10 pktps 30])
+
+dnl Add duplicate meter name
+AT_CHECK([ovn-nbctl meter-add meter1 drop 10 kbps], [1], [], [stderr])
+AT_CHECK([grep 'already exists' stderr], [0], [ignore])
+
+AT_CHECK([ovn-nbctl --may-exist meter-add meter1 drop 11 kbps])
+
+dnl Add reserved meter name
+AT_CHECK([ovn-nbctl meter-add __meter1 drop 10 kbps], [1], [], [stderr])
+AT_CHECK([grep 'reserved' stderr], [0], [ignore])
+
+dnl Add meter with invalid rates
+AT_CHECK([ovn-nbctl meter-add meter5 drop 100010111111 kbps], [1], [],
+[ovn-nbctl: rate must be in the range 1...4294967295
+])
+
+dnl Add meter with invalid rates
+AT_CHECK([ovn-nbctl meter-add meter5 drop 100010111111 foo], [1], [],
+[ovn-nbctl: rate must be in the range 1...4294967295
+])
+
+AT_CHECK([ovn-nbctl meter-add meter5 drop 0 kbps], [1], [],
+[ovn-nbctl: rate must be in the range 1...4294967295
+])
+
+dnl Add meter with invalid burst
+AT_CHECK([ovn-nbctl meter-add meter5 drop 10 100010111111 kbps], [1], [],
+[ovn-nbctl: unit must be "kbps" or "pktps"
+])
+
+AT_CHECK([ovn-nbctl meter-list], [0], [dnl
+meter1: bands:
+  drop: 11 kbps
+meter2: bands:
+  drop: 3 kbps, 2 kb burst
+meter3: bands:
+  drop: 100 kbps, 200 kb burst
+meter4: (fair) bands:
+  drop: 10 pktps, 30 packet burst
+])
+
+dnl Delete a single meter.
+AT_CHECK([ovn-nbctl meter-del meter2])
+AT_CHECK([ovn-nbctl meter-list], [0], [dnl
+meter1: bands:
+  drop: 11 kbps
+meter3: bands:
+  drop: 100 kbps, 200 kb burst
+meter4: (fair) bands:
+  drop: 10 pktps, 30 packet burst
+])
+
+dnl Delete all meters.
+AT_CHECK([ovn-nbctl meter-del])
+AT_CHECK([ovn-nbctl meter-list], [0], [dnl
+])])
+
+dnl ---------------------------------------------------------------------
+
+OVN_NBCTL_TEST([ovn_nbctl_mirrors], [mirrors], [
+check ovn-nbctl mirror-add mirror1 gre 0 from-lport 10.10.10.1
+check ovn-nbctl mirror-add mirror2 erspan 1 to-lport 10.10.10.2
+check ovn-nbctl mirror-add mirror3 gre 2 to-lport 10.10.10.3
+check ovn-nbctl mirror-add mirror-local local both 10.10.10.3
+check ovn-nbctl ls-add sw0
+check ovn-nbctl lsp-add sw0 sw0-port1
+check ovn-nbctl lsp-add sw0 sw0-port2
+check ovn-nbctl lsp-add sw0 sw0-port3
+check ovn-nbctl lsp-add sw0 sw0-port4
+check ovn-nbctl mirror-add mirror-lport lport to-lport sw0-port1
+
+dnl Add duplicate mirror name
+AT_CHECK([ovn-nbctl mirror-add mirror1 gre 0 from-lport 10.10.10.5], [1], [], [stderr])
+AT_CHECK([grep 'already exists' stderr], [0], [ignore])
+
+dnl Attach invalid source port to mirror
+AT_CHECK([ovn-nbctl lsp-attach-mirror sw0-port5 mirror3], [1], [], [stderr])
+AT_CHECK([grep 'port name not found' stderr], [0], [ignore])
+
+dnl Attach source port to invalid mirror
+AT_CHECK([ovn-nbctl lsp-attach-mirror sw0-port3 mirror4], [1], [], [stderr])
+AT_CHECK([grep 'mirror name not found' stderr], [0], [ignore])
+
+mirror3uuid=$(fetch_column nb:Mirror _uuid name=mirror3)
+dnl Attach source port to mirror
+check ovn-nbctl lsp-attach-mirror sw0-port1 mirror3
+check_column "$mirror3uuid" nb:Logical_Switch_Port mirror_rules name=sw0-port1
+
+dnl Attach one more source port to mirror
+check ovn-nbctl lsp-attach-mirror sw0-port3 mirror3
+check_column "$mirror3uuid" nb:Logical_Switch_Port mirror_rules name=sw0-port3
+
+mirror_lportuuid=$(fetch_column nb:Mirror _uuid name=mirror-lport)
+dnl Attach source port to lport mirror
+check ovn-nbctl lsp-attach-mirror sw0-port4 mirror-lport
+check_column "$mirror_lportuuid" nb:Logical_Switch_Port mirror_rules name=sw0-port4
+
+dnl Verify if multiple ports are attached to the same mirror properly
+AT_CHECK([ovn-nbctl mirror-list], [0], [dnl
+mirror-local:
+  Type     :  local
+  Sink     :  10.10.10.3
+  Filter   :  both
+
+mirror-lport:
+  Type     :  lport
+  Sink     :  sw0-port1
+  Filter   :  to-lport
+
+mirror1:
+  Type     :  gre
+  Sink     :  10.10.10.1
+  Filter   :  from-lport
+  Index/Key:  0
+
+mirror2:
+  Type     :  erspan
+  Sink     :  10.10.10.2
+  Filter   :  to-lport
+  Index/Key:  1
+
+mirror3:
+  Type     :  gre
+  Sink     :  10.10.10.3
+  Filter   :  to-lport
+  Index/Key:  2
+
+])
+
+dnl Remove the local mirror
+check ovn-nbctl mirror-del mirror-local
+
+dnl Detach one source port from mirror
+check ovn-nbctl lsp-detach-mirror sw0-port3 mirror3
+
+dnl Check if the detach happened from source properly
+check_column "" nb:Logical_Switch_Port mirror_rules name=sw0-port3
+
+dnl Delete a single mirror which has source attached.
+check ovn-nbctl mirror-del mirror3
+
+dnl Check if the detach happened from source properly
+check_column "" nb:Logical_Switch_Port mirror_rules name=sw0-port1
+
+dnl Check if the mirror deleted properly
+AT_CHECK([ovn-nbctl mirror-list], [0], [dnl
+mirror-lport:
+  Type     :  lport
+  Sink     :  sw0-port1
+  Filter   :  to-lport
+
+mirror1:
+  Type     :  gre
+  Sink     :  10.10.10.1
+  Filter   :  from-lport
+  Index/Key:  0
+
+mirror2:
+  Type     :  erspan
+  Sink     :  10.10.10.2
+  Filter   :  to-lport
+  Index/Key:  1
+
+])
+
+dnl Delete mirrors one more mirror
+check ovn-nbctl mirror-del mirror2
+
+dnl Delete one more mirror
+check ovn-nbctl mirror-del mirror-lport
+
+dnl Update the Sink address
+check ovn-nbctl set mirror . sink=192.168.1.13
+
+AT_CHECK([ovn-nbctl mirror-list], [0], [dnl
+mirror1:
+  Type     :  gre
+  Sink     :  192.168.1.13
+  Filter   :  from-lport
+  Index/Key:  0
+
+])
+
+dnl Delete all mirrors
+check ovn-nbctl mirror-del
+AT_CHECK([ovn-nbctl mirror-list], [0], [dnl
+])])
+
+dnl ---------------------------------------------------------------------
+
+OVN_NBCTL_TEST([ovn_nbctl_mirrors_rules], [mirror_rules], [
+check ovn-nbctl ls-add sw0
+check ovn-nbctl lsp-add sw0 sw0-p1
+check ovn-nbctl mirror-add mirror1 lport from-lport sw0-p1
+check ovn-nbctl mirror-add mirror2 lport to-lport sw0-p1
+
+check ovn-nbctl mirror-rule-add mirror1 100 '1' mirror
+check ovn-nbctl mirror-rule-add mirror2 150 'ip' mirror
+
+dnl Add mirror rule for non-exist mirror name
+AT_CHECK([ovn-nbctl mirror-rule-add mirror5 150 'ip' allow], [1], [], [stderr])
+AT_CHECK([grep 'not found' stderr], [0], [ignore])
+
+dnl Add same mirror rule for mirror
+AT_CHECK([ovn-nbctl mirror-rule-add mirror2 150 'ip' mirror], [1], [], [stderr])
+AT_CHECK([grep 'exists' stderr], [0], [ignore])
+
+check ovn-nbctl mirror-rule-add mirror2 200 'icmp' skip
+check ovn-nbctl mirror-rule-add mirror2 250 'tcp' mirror
+
+AT_CHECK([ovn-nbctl mirror-list], [0], [dnl
+mirror1:
+  Type     :  lport
+  Sink     :  sw0-p1
+  Filter   :  from-lport
+  Rules    :
+         100                              1          mirror
+
+mirror2:
+  Type     :  lport
+  Sink     :  sw0-p1
+  Filter   :  to-lport
+  Rules    :
+         150                             ip          mirror
+         200                           icmp            skip
+         250                            tcp          mirror
+
+])
+
+dnl Add one more mirror rule to mirror
+check ovn-nbctl mirror-rule-add mirror2 350 'icmp' mirror
+
+check ovn-nbctl mirror-rule-add mirror2 300 'icmp' skip
+
+dnl Mirror rule attach mirror
+mirrorrule1uuid=$(fetch_column nb:Mirror_rule _uuid name=mirror1)
+check_column "$mirrorrule1uuid" nb:Mirror mirror_rule mirror_rule="$mirrorrule1uuid"
+
+dnl Remove the mirror rule by name
+check ovn-nbctl mirror-rule-del mirror1
+
+dnl Mirror rule dettach mirror
+mirrorr1uuid=$(fetch_column nb:Mirror _uuid name=mirror1)
+check_column "" nb:Mirror mirror_rule mirror_rule="mirrorr1uuid"
+
+dnl Delete mirror rule by priority
+check ovn-nbctl mirror-rule-del mirror2 350
+
+dnl Remove the mirror rule by priority and match
+check ovn-nbctl mirror-rule-del mirror2 300 'icmp'
+
+AT_CHECK([ovn-nbctl mirror-list], [0], [dnl
+mirror1:
+  Type     :  lport
+  Sink     :  sw0-p1
+  Filter   :  from-lport
+
+mirror2:
+  Type     :  lport
+  Sink     :  sw0-p1
+  Filter   :  to-lport
+  Rules    :
+         150                             ip          mirror
+         200                           icmp            skip
+         250                            tcp          mirror
+
+])
+
+])
+
+dnl ---------------------------------------------------------------------
+
+OVN_NBCTL_TEST([ovn_nbctl_nats], [NATs], [
+AT_CHECK([ovn-nbctl lr-add lr0])
+AT_CHECK([ovn-nbctl lr-nat-add lr0 snatt 30.0.0.2 192.168.1.2], [1], [],
+[ovn-nbctl: snatt: type must be one of "dnat", "snat" and "dnat_and_snat".
+])
+AT_CHECK([ovn-nbctl lr-nat-add lr0 snat 30.0.0.2a 192.168.1.2], [1], [],
+[ovn-nbctl: 30.0.0.2a: Not a valid IPv4 or IPv6 address.
+])
+AT_CHECK([ovn-nbctl lr-nat-add lr0 snat 30.0.0 192.168.1.2], [1], [],
+[ovn-nbctl: 30.0.0: Not a valid IPv4 or IPv6 address.
+])
+AT_CHECK([ovn-nbctl lr-nat-add lr0 snat 30.0.0.2/24 192.168.1.2], [1], [],
+[ovn-nbctl: 30.0.0.2/24: Not a valid IPv4 or IPv6 address.
+])
+AT_CHECK([ovn-nbctl lr-nat-add lr0 snat 30.0.0.2:80 192.168.1.2], [1], [],
+[ovn-nbctl: 30.0.0.2:80: Not a valid IPv4 or IPv6 address.
+])
+AT_CHECK([ovn-nbctl lr-nat-add lr0 snat 30.0.0.2 192.168.1.2a], [1], [],
+[ovn-nbctl: 192.168.1.2a: should be an IPv4 address or network.
+])
+AT_CHECK([ovn-nbctl lr-nat-add lr0 snat 30.0.0.2 192.168.1], [1], [],
+[ovn-nbctl: 192.168.1: should be an IPv4 address or network.
+])
+AT_CHECK([ovn-nbctl lr-nat-add lr0 snat 30.0.0.2 192.168.1.2:80], [1], [],
+[ovn-nbctl: 192.168.1.2:80: should be an IPv4 address or network.
+])
+AT_CHECK([ovn-nbctl lr-nat-add lr0 snat 30.0.0.2 192.168.1.2/a], [1], [],
+[ovn-nbctl: 192.168.1.2/a: should be an IPv4 address or network.
+])
+AT_CHECK([ovn-nbctl lr-nat-add lr0 dnat 30.0.0.2 192.168.1.2a], [1], [],
+[ovn-nbctl: 192.168.1.2a: Not a valid IPv4 address.
+])
+AT_CHECK([ovn-nbctl lr-nat-add lr0 dnat 30.0.0.2 192.168.1], [1], [],
+[ovn-nbctl: 192.168.1: Not a valid IPv4 address.
+])
+AT_CHECK([ovn-nbctl lr-nat-add lr0 dnat 30.0.0.2 192.168.1.2:80], [1], [],
+[ovn-nbctl: 192.168.1.2:80: Not a valid IPv4 address.
+])
+AT_CHECK([ovn-nbctl lr-nat-add lr0 dnat 30.0.0.2 192.168.1.2/24], [1], [],
+[ovn-nbctl: 192.168.1.2/24: Not a valid IPv4 address.
+])
+AT_CHECK([ovn-nbctl lr-nat-add lr0 dnat_and_snat 30.0.0.2 192.168.1.2/24], [1], [],
+[ovn-nbctl: 192.168.1.2/24: Not a valid IPv4 address.
+])
+AT_CHECK([ovn-nbctl lr-nat-add lr0 dnat_and_snat 30.0.0.2 192.168.1.2 lp0], [1], [],
+[ovn-nbctl: lr-nat-add with logical_port must also specify external_mac.
+])
+AT_CHECK([ovn-nbctl lr-nat-add lr0 dnat 30.0.0.2 192.168.1.2 lp0 00:00:00:01:02:03], [1], [],
+[ovn-nbctl: logical_port and external_mac are only valid when type is "dnat_and_snat".
+])
+AT_CHECK([ovn-nbctl lr-nat-add lr0 snat 30.0.0.2 192.168.1.2 lp0 00:00:00:01:02:03], [1], [],
+[ovn-nbctl: logical_port and external_mac are only valid when type is "dnat_and_snat".
+])
+AT_CHECK([ovn-nbctl lr-nat-add lr0 dnat_and_snat 30.0.0.2 192.168.1.2 lp0 00:00:00:01:02:03], [1], [],
+[ovn-nbctl: lp0: port name not found
+])
+AT_CHECK([ovn-nbctl ls-add ls0])
+AT_CHECK([ovn-nbctl lsp-add ls0 lp0])
+AT_CHECK([ovn-nbctl lr-nat-add lr0 dnat_and_snat 30.0.0.2 192.168.1.2 lp0 00:00:00:01:02], [1], [],
+[ovn-nbctl: invalid mac address 00:00:00:01:02.
+])
+AT_CHECK([ovn-nbctl --add-route lr-nat-add lr0 snat 30.0.0.2 192.168.1.2], [1], [],
+[ovn-nbctl: routes cannot be added for snat types.
+])
+
+dnl Add snat and dnat
+AT_CHECK([ovn-nbctl lr-nat-add lr0 snat 30.0.0.1 192.168.1.0/24])
+AT_CHECK([ovn-nbctl lr-nat-add lr0 snat fd01::1 fd11::/64])
+AT_CHECK([ovn-nbctl lr-nat-add lr0 dnat 30.0.0.1 192.168.1.2])
+AT_CHECK([ovn-nbctl lr-nat-add lr0 dnat fd01::1 fd11::2])
+AT_CHECK([ovn-nbctl lr-nat-add lr0 dnat_and_snat 30.0.0.1 192.168.1.2])
+AT_CHECK([ovn-nbctl lr-nat-add lr0 dnat_and_snat fd01::1 fd11::2])
+AT_CHECK([ovn-nbctl lr-nat-add lr0 dnat_and_snat 30.0.0.2 192.168.1.3 lp0 00:00:00:01:02:03])
+AT_CHECK([ovn-nbctl lr-nat-add lr0 dnat_and_snat fd01::2 fd11::3 lp0 00:00:00:01:02:03])
+AT_CHECK([ovn-nbctl lr-nat-list lr0], [0], [dnl
+TYPE             GATEWAY_PORT          MATCH                 EXTERNAL_IP        EXTERNAL_PORT    LOGICAL_IP          EXTERNAL_MAC         LOGICAL_PORT
+dnat                                                         30.0.0.1                            192.168.1.2
+dnat                                                         fd01::1                             fd11::2
+dnat_and_snat                                                30.0.0.1                            192.168.1.2
+dnat_and_snat                                                30.0.0.2                            192.168.1.3         00:00:00:01:02:03    lp0
+dnat_and_snat                                                fd01::1                             fd11::2
+dnat_and_snat                                                fd01::2                             fd11::3             00:00:00:01:02:03    lp0
+snat                                                         30.0.0.1                            192.168.1.0/24
+snat                                                         fd01::1                             fd11::/64
+])
+AT_CHECK([ovn-nbctl lr-nat-add lr0 snat 30.0.0.1 192.168.1.0/24], [1], [],
+[ovn-nbctl: 30.0.0.1, 192.168.1.0/24: a NAT with this external_ip and logical_ip already exists
+])
+AT_CHECK([ovn-nbctl lr-nat-add lr0 snat 30.0.0.1 192.168.1.10/24], [1], [],
+[ovn-nbctl: 30.0.0.1, 192.168.1.0/24: a NAT with this external_ip and logical_ip already exists
+])
+AT_CHECK([ovn-nbctl --may-exist lr-nat-add lr0 snat 30.0.0.1 192.168.1.0/24])
+AT_CHECK([ovn-nbctl lr-nat-add lr0 snat 30.0.0.2 192.168.1.0/24], [1], [],
+[ovn-nbctl: a NAT with this type (snat), logical_ip (192.168.1.0/24) already exists
+])
+AT_CHECK([ovn-nbctl lr-nat-add lr0 dnat 30.0.0.1 192.168.1.2], [1], [],
+[ovn-nbctl: 30.0.0.1, 192.168.1.2: a NAT with this external_ip and logical_ip already exists
+])
+AT_CHECK([ovn-nbctl --may-exist lr-nat-add lr0 dnat 30.0.0.1 192.168.1.2])
+AT_CHECK([ovn-nbctl lr-nat-add lr0 dnat 30.0.0.1 192.168.1.3], [1], [],
+[ovn-nbctl: a NAT with this type (dnat), external_ip (30.0.0.1) already exists
+])
+AT_CHECK([ovn-nbctl lr-nat-add lr0 dnat_and_snat 30.0.0.1 192.168.1.2], [1], [],
+[ovn-nbctl: 30.0.0.1, 192.168.1.2: a NAT with this external_ip and logical_ip already exists
+])
+AT_CHECK([ovn-nbctl --may-exist lr-nat-add lr0 dnat_and_snat 30.0.0.1 192.168.1.2])
+AT_CHECK([ovn-nbctl lr-nat-add lr0 dnat_and_snat 30.0.0.1 192.168.1.3], [1], [],
+[ovn-nbctl: a NAT with this type (dnat_and_snat), external_ip (30.0.0.1) already exists
+])
+AT_CHECK([ovn-nbctl --may-exist lr-nat-add lr0 dnat_and_snat 30.0.0.2 192.168.1.3 lp0 00:00:00:04:05:06])
+AT_CHECK([ovn-nbctl lr-nat-list lr0], [0], [dnl
+TYPE             GATEWAY_PORT          MATCH                 EXTERNAL_IP        EXTERNAL_PORT    LOGICAL_IP          EXTERNAL_MAC         LOGICAL_PORT
+dnat                                                         30.0.0.1                            192.168.1.2
+dnat                                                         fd01::1                             fd11::2
+dnat_and_snat                                                30.0.0.1                            192.168.1.2
+dnat_and_snat                                                30.0.0.2                            192.168.1.3         00:00:00:04:05:06    lp0
+dnat_and_snat                                                fd01::1                             fd11::2
+dnat_and_snat                                                fd01::2                             fd11::3             00:00:00:01:02:03    lp0
+snat                                                         30.0.0.1                            192.168.1.0/24
+snat                                                         fd01::1                             fd11::/64
+])
+AT_CHECK([ovn-nbctl --may-exist lr-nat-add lr0 dnat_and_snat 30.0.0.2 192.168.1.3])
+AT_CHECK([ovn-nbctl --may-exist lr-nat-add lr0 dnat_and_snat fd01::2 fd11::3])
+AT_CHECK([ovn-nbctl lr-nat-list lr0], [0], [dnl
+TYPE             GATEWAY_PORT          MATCH                 EXTERNAL_IP        EXTERNAL_PORT    LOGICAL_IP          EXTERNAL_MAC         LOGICAL_PORT
+dnat                                                         30.0.0.1                            192.168.1.2
+dnat                                                         fd01::1                             fd11::2
+dnat_and_snat                                                30.0.0.1                            192.168.1.2
+dnat_and_snat                                                30.0.0.2                            192.168.1.3
+dnat_and_snat                                                fd01::1                             fd11::2
+dnat_and_snat                                                fd01::2                             fd11::3
+snat                                                         30.0.0.1                            192.168.1.0/24
+snat                                                         fd01::1                             fd11::/64
+])
+
+check_row_count nb:NAT 0 options:stateless=true
+AT_CHECK([ovn-nbctl --stateless lr-nat-add lr0 dnat_and_snat 40.0.0.2 192.168.1.4])
+check_row_count nb:NAT 1 options:stateless=true
+
+AT_CHECK([ovn-nbctl --stateless lr-nat-add lr0 dnat_and_snat fd21::1 fd11::2])
+check_row_count nb:NAT 2 options:stateless=true
+
+AT_CHECK([ovn-nbctl lr-nat-del lr0 dnat_and_snat fd21::1])
+
+AT_CHECK([ovn-nbctl --stateless lr-nat-add lr0 dnat 40.0.0.2 192.168.1.4], [1], [],
+[ovn-nbctl: stateless is not applicable to dnat or snat types
+])
+AT_CHECK([ovn-nbctl --stateless lr-nat-add lr0 snat 40.0.0.2 192.168.1.4], [1], [],
+[ovn-nbctl: stateless is not applicable to dnat or snat types
+])
+AT_CHECK([ovn-nbctl lr-nat-add lr0 snat 40.0.0.2 192.168.1.5], [1], [],
+[ovn-nbctl: 40.0.0.2, 192.168.1.5: External ip cannot be shared across stateless and stateful NATs
+])
+AT_CHECK([ovn-nbctl lr-nat-add lr0 dnat 40.0.0.2 192.168.1.5], [1], [],
+[ovn-nbctl: 40.0.0.2, 192.168.1.5: External ip cannot be shared across stateless and stateful NATs
+])
+
+AT_CHECK([ovn-nbctl lr-nat-add lr0 snat 40.0.0.3 192.168.1.6])
+AT_CHECK([ovn-nbctl --stateless lr-nat-add lr0 dnat_and_snat 40.0.0.3 192.168.1.7], [1], [],
+[ovn-nbctl: 40.0.0.3, 192.168.1.7: External ip cannot be shared across stateless and stateful NATs
+])
+
+AT_CHECK([ovn-nbctl --stateless --may-exist lr-nat-add lr0 dnat_and_snat 40.0.0.3 192.168.1.7])
+
+dnl Deletes the NATs
+AT_CHECK([ovn-nbctl lr-nat-del lr0 dnat_and_snat 30.0.0.3])
+
+AT_CHECK([ovn-nbctl lr-nat-del lr0 dnat_and_snat 30.0.0.1])
+AT_CHECK([ovn-nbctl lr-nat-del lr0 dnat_and_snat fd01::1])
+AT_CHECK([ovn-nbctl lr-nat-list lr0], [0], [dnl
+TYPE             GATEWAY_PORT          MATCH                 EXTERNAL_IP        EXTERNAL_PORT    LOGICAL_IP          EXTERNAL_MAC         LOGICAL_PORT
+dnat                                                         30.0.0.1                            192.168.1.2
+dnat                                                         fd01::1                             fd11::2
+dnat_and_snat                                                30.0.0.2                            192.168.1.3
+dnat_and_snat                                                40.0.0.2                            192.168.1.4
+dnat_and_snat                                                fd01::2                             fd11::3
+snat                                                         30.0.0.1                            192.168.1.0/24
+snat                                                         40.0.0.3                            192.168.1.6
+snat                                                         fd01::1                             fd11::/64
+])
+
+AT_CHECK([ovn-nbctl lr-nat-del lr0 dnat])
+AT_CHECK([ovn-nbctl lr-nat-list lr0], [0], [dnl
+TYPE             GATEWAY_PORT          MATCH                 EXTERNAL_IP        EXTERNAL_PORT    LOGICAL_IP          EXTERNAL_MAC         LOGICAL_PORT
+dnat_and_snat                                                30.0.0.2                            192.168.1.3
+dnat_and_snat                                                40.0.0.2                            192.168.1.4
+dnat_and_snat                                                fd01::2                             fd11::3
+snat                                                         30.0.0.1                            192.168.1.0/24
+snat                                                         40.0.0.3                            192.168.1.6
+snat                                                         fd01::1                             fd11::/64
+])
+
+AT_CHECK([ovn-nbctl lr-nat-del lr0])
+AT_CHECK([ovn-nbctl --portrange lr-nat-add lr0 snat 40.0.0.3 192.168.1.6 21-65535])
+AT_CHECK([ovn-nbctl --portrange lr-nat-add lr0 dnat 40.0.0.4 192.168.1.7 1-3000])
+AT_CHECK([ovn-nbctl --portrange lr-nat-add lr0 dnat 40.0.0.5 192.168.1.10 1])
+AT_CHECK([ovn-nbctl --portrange lr-nat-add lr0 dnat_and_snat 40.0.0.5 192.168.1.8 1-3000])
+AT_CHECK([ovn-nbctl --portrange lr-nat-add lr0 dnat_and_snat 40.0.0.6 192.168.1.9 lp0 00:00:00:04:05:06 1-3000])
+AT_CHECK([ovn-nbctl --portrange lr-nat-add lr0 dnat_and_snat 40.0.0.6 192.168.1.9 lp0 1-3000], [1], [],
+[ovn-nbctl: lr-nat-add with logical_port must also specify external_mac.
+])
+AT_CHECK([ovn-nbctl --portrange lr-nat-add lr0 dnat_and_snat 40.0.0.6 192.168.1.9 00:00:00:04:05:06 1-3000], [1], [],
+[ovn-nbctl: lr-nat-add with logical_port must also specify external_mac.
+])
+
+AT_CHECK([ovn-nbctl --portrange lr-nat-add lr0 dnat_and_snat 40.0.0.7 192.168.1.10 0], [1], [],
+[ovn-nbctl: invalid port range 0.
+])
+
+AT_CHECK([ovn-nbctl --portrange lr-nat-add lr0 dnat_and_snat 40.0.0.7 192.168.1.10 1-], [1], [],
+[ovn-nbctl: invalid port range 1-.
+])
+
+AT_CHECK([ovn-nbctl --portrange lr-nat-add lr0 dnat_and_snat 40.0.0.6 192.168.1.9 -300], [1], [],
+[ovn-nbctl: invalid port range -300.
+])
+
+AT_CHECK([ovn-nbctl --portrange lr-nat-add lr0 dnat_and_snat 40.0.0.7 192.168.1.10 1-2-3], [1], [],
+[ovn-nbctl: invalid port range 1-2-3.
+])
+
+AT_CHECK([ovn-nbctl --portrange lr-nat-add lr0 dnat_and_snat 40.0.0.6 192.168.1.9 300-300], [1], [],
+[ovn-nbctl: invalid port range 300-300.
+])
+
+AT_CHECK([ovn-nbctl --portrange lr-nat-add lr0 dnat_and_snat 40.0.0.6 192.168.1.9 500-300], [1], [],
+[ovn-nbctl: invalid port range 500-300.
+])
+
+AT_CHECK([ovn-nbctl --portrange lr-nat-add lr0 dnat_and_snat 40.0.0.6 192.168.1.9 a-300], [1], [],
+[ovn-nbctl: invalid port range a-300.
+])
+
+AT_CHECK([ovn-nbctl --portrange lr-nat-add lr0 dnat_and_snat 40.0.0.6 192.168.1.9 100-b], [1], [],
+[ovn-nbctl: invalid port range 100-b.
+])
+
+AT_CHECK([ovn-nbctl --portrange lr-nat-add lr0 dnat_and_snat 40.0.0.6 192.168.1.9 0-10], [1], [],
+[ovn-nbctl: invalid port range 0-10.
+])
+
+AT_CHECK([ovn-nbctl show lr0 | grep -c 'external port(s): "1-3000"'], [0], [dnl
+3
+])
+AT_CHECK([ovn-nbctl show lr0 | grep -C2 'external port(s): "21-65535"' | uuidfilt], [0], [dnl
+    nat <0>
+        external ip: "40.0.0.3"
+        external port(s): "21-65535"
+        logical ip: "192.168.1.6"
+        type: "snat"
+])
+AT_CHECK([ovn-nbctl show lr0 | grep -C2 'external port(s): "1"' | uuidfilt], [0], [dnl
+    nat <0>
+        external ip: "40.0.0.5"
+        external port(s): "1"
+        logical ip: "192.168.1.10"
+        type: "dnat"
+])
+
+AT_CHECK([ovn-nbctl lr-nat-list lr0], [0], [dnl
+TYPE             GATEWAY_PORT          MATCH                 EXTERNAL_IP        EXTERNAL_PORT    LOGICAL_IP          EXTERNAL_MAC         LOGICAL_PORT
+dnat                                                         40.0.0.4           1-3000           192.168.1.7
+dnat                                                         40.0.0.5           1                192.168.1.10
+dnat_and_snat                                                40.0.0.5           1-3000           192.168.1.8
+dnat_and_snat                                                40.0.0.6           1-3000           192.168.1.9         00:00:00:04:05:06    lp0
+snat                                                         40.0.0.3           21-65535         192.168.1.6
+])
+
+AT_CHECK([ovn-nbctl lr-nat-del lr0])
+AT_CHECK([ovn-nbctl lr-nat-list lr0], [0], [])
+AT_CHECK([ovn-nbctl lr-nat-del lr0])
+AT_CHECK([ovn-nbctl lr-nat-del lr0 dnat])
+
+AT_CHECK([ovn-nbctl lr-nat-del lr0])
+
+check_uuid ovn-nbctl create Address_Set name=allowed_range addresses=\"1.1.1.1\"
+check_uuid ovn-nbctl create Address_Set name=disallowed_range addresses=\"2.2.2.2\"
+AT_CHECK([ovn-nbctl lr-nat-add lr0 snat 40.0.0.3 192.168.1.6])
+AT_CHECK([ovn-nbctl lr-nat-update-ext-ip lr0 snat 192.168.1.6 allowed_range])
+AT_CHECK([ovn-nbctl --is-exempted lr-nat-update-ext-ip lr0 snat 192.168.1.6 disallowed_range])
+AT_CHECK([ovn-nbctl lr-nat-update-ext-ip lr0 snat 192.168.1.6 allowed_range_tmp], [1], [],
+[ovn-nbctl: allowed_range_tmp: Address Set name not found
+])
+AT_CHECK([ovn-nbctl --is-exempted lr-nat-update-ext-ip lr0 snat 192.168.1.6 disallowed_range_tmp], [1], [],
+[ovn-nbctl: disallowed_range_tmp: Address Set name not found
+])
+
+AT_CHECK([ovn-nbctl lr-nat-add lr0 dnat 40.0.0.4 192.168.1.7])
+AT_CHECK([ovn-nbctl lr-nat-update-ext-ip lr0 dnat 40.0.0.4 allowed_range])
+AT_CHECK([ovn-nbctl --is-exempted lr-nat-update-ext-ip lr0 dnat 40.0.0.4 disallowed_range])
+AT_CHECK([ovn-nbctl lr-nat-update-ext-ip lr0 dnat 40.0.0.4 allowed_range_tmp], [1], [],
+[ovn-nbctl: allowed_range_tmp: Address Set name not found
+])
+AT_CHECK([ovn-nbctl --is-exempted lr-nat-update-ext-ip lr0 dnat 40.0.0.4 disallowed_range_tmp], [1], [],
+[ovn-nbctl: disallowed_range_tmp: Address Set name not found
+])
+
+AT_CHECK([ovn-nbctl lr-nat-add lr0 dnat_and_snat 40.0.0.5 192.168.1.8])
+AT_CHECK([ovn-nbctl lr-nat-update-ext-ip lr0 dnat_and_snat 40.0.0.5 allowed_range])
+AT_CHECK([ovn-nbctl --is-exempted lr-nat-update-ext-ip lr0 dnat 40.0.0.4 disallowed_range])
+AT_CHECK([ovn-nbctl lr-nat-update-ext-ip lr0 dnat 40.0.0.4 allowed_range_tmp], [1], [],
+[ovn-nbctl: allowed_range_tmp: Address Set name not found
+])
+AT_CHECK([ovn-nbctl --is-exempted lr-nat-update-ext-ip lr0 dnat 40.0.0.4 disallowed_range_tmp], [1], [],
+[ovn-nbctl: disallowed_range_tmp: Address Set name not found
+])
+AT_CHECK([ovn-nbctl lr-nat-update-ext-ip lr0 snat 192.168.1.6], [1], [],
+[ovn-nbctl: 'lr-nat-update-ext-ip' command requires at least 4 arguments
+])
+AT_CHECK([ovn-nbctl lr-nat-update-ext-ip lr0 snat 192.168.16 allowed_range], [1], [],
+[ovn-nbctl: 192.168.16: Invalid IP address or CIDR
+])
+
+AT_CHECK([ovn-nbctl lr-nat-del lr0])
+
+AT_CHECK([ovn-nbctl lrp-add lr0 lrp00 00:00:00:01:02:03 172.64.0.10/24])
+AT_CHECK([ovn-nbctl lrp-add lr0 lrp01 00:00:00:01:02:04 172.64.1.10/24])
+AT_CHECK([ovn-nbctl lrp-set-gateway-chassis lrp00 chassis1])
+AT_CHECK([ovn-nbctl lr-add lr1])
+AT_CHECK([ovn-nbctl lrp-add lr1 lrp10 00:00:00:01:02:05 172.64.2.10/24])
+
+AT_CHECK([ovn-nbctl --gateway-port=lrp01 lr-nat-add lr0 dnat 172.64.1.10 20.0.0.10], [1], [],
+[ovn-nbctl: lrp01 is not a distributed gateway router port.
+])
+AT_CHECK([ovn-nbctl --gateway-port=lrp10 lr-nat-add lr0 dnat_and_snat 172.64.2.10 20.0.0.10], [1], [],
+[ovn-nbctl: lrp10 is not a router port of logical router: lr0.
+])
+
+AT_CHECK([ovn-nbctl lrp-set-gateway-chassis lrp01 chassis2])
+
+AT_CHECK([ovn-nbctl --gateway-port=lrp00 lr-nat-add lr0 snat 172.64.0.10 20.0.0.10])
+AT_CHECK([ovn-nbctl lr-nat-add lr0 snat 172.64.1.10 20.0.0.10])
+AT_CHECK([ovn-nbctl lr-nat-add lr0 dnat 30.0.0.10 20.0.0.10], [1], [],
+[ovn-nbctl: logical router: lr0 has multiple distributed gateway ports and gateway_port can not be determined from external IP of NAT rule.
+])
+AT_CHECK([ovn-nbctl --gateway-port=lrp00 lr-nat-add lr0 dnat 30.0.0.10 20.0.0.10])
+AT_CHECK([ovn-nbctl --gateway-port=lrp01 lr-nat-add lr0 snat 172.64.1.10 20.0.0.10], [1], [],
+[ovn-nbctl: 172.64.1.10, 20.0.0.10: a NAT with this external_ip and logical_ip already exists
+])
+AT_CHECK([ovn-nbctl --gateway-port=lrp00 lr-nat-add lr0 dnat 30.0.0.10 20.0.0.11], [1], [],
+[ovn-nbctl: a NAT with this type (dnat), external_ip (30.0.0.10) already exists
+])
+AT_CHECK([ovn-nbctl --gateway-port=lrp01 lr-nat-add lr0 dnat 30.0.0.10 20.0.0.10])
+
+AT_CHECK([ovn-nbctl lr-nat-list lr0], [0], [dnl
+TYPE             GATEWAY_PORT          MATCH                 EXTERNAL_IP        EXTERNAL_PORT    LOGICAL_IP          EXTERNAL_MAC         LOGICAL_PORT
+dnat             lrp00                                       30.0.0.10                           20.0.0.10
+dnat             lrp01                                       30.0.0.10                           20.0.0.10
+snat                                                         172.64.1.10                         20.0.0.10
+snat             lrp00                                       172.64.0.10                         20.0.0.10
+])
+
+AT_CHECK([ovn-nbctl lr-nat-del lr0 dnat 30.0.0.10])
+AT_CHECK([ovn-nbctl lr-nat-list lr0], [0], [dnl
+TYPE             GATEWAY_PORT          MATCH                 EXTERNAL_IP        EXTERNAL_PORT    LOGICAL_IP          EXTERNAL_MAC         LOGICAL_PORT
+snat                                                         172.64.1.10                         20.0.0.10
+snat             lrp00                                       172.64.0.10                         20.0.0.10
+])
+
+AT_CHECK([ovn-nbctl --gateway-port=lrp00 lr-nat-add lr0 snat 30.0.0.10 20.0.0.20])
+AT_CHECK([ovn-nbctl lr-nat-list lr0], [0], [dnl
+TYPE             GATEWAY_PORT          MATCH                 EXTERNAL_IP        EXTERNAL_PORT    LOGICAL_IP          EXTERNAL_MAC         LOGICAL_PORT
+snat                                                         172.64.1.10                         20.0.0.10
+snat             lrp00                                       172.64.0.10                         20.0.0.10
+snat             lrp00                                       30.0.0.10                           20.0.0.20
+])
+AT_CHECK([ovn-nbctl lr-nat-del lr0 dnat lrp11], [1], [],
+[ovn-nbctl: lrp11: port name not found
+])
+AT_CHECK([ovn-nbctl lr-nat-del lr0 snat lrp00])
+AT_CHECK([ovn-nbctl lr-nat-list lr0], [0], [dnl
+TYPE             GATEWAY_PORT          MATCH                 EXTERNAL_IP        EXTERNAL_PORT    LOGICAL_IP          EXTERNAL_MAC         LOGICAL_PORT
+snat                                                         172.64.1.10                         20.0.0.10
+])
+AT_CHECK([ovn-nbctl lr-nat-del lr0 snat lrp01])
+AT_CHECK([ovn-nbctl lr-nat-list lr0], [0], [dnl
+TYPE             GATEWAY_PORT          MATCH                 EXTERNAL_IP        EXTERNAL_PORT    LOGICAL_IP          EXTERNAL_MAC         LOGICAL_PORT
+snat                                                         172.64.1.10                         20.0.0.10
+])
+
+AT_CHECK([ovn-nbctl lr-nat-del lr0 snat 20.0.0 lrp01], [1], [],
+[ovn-nbctl: 20.0.0: Invalid IP address or CIDR
+])
+AT_CHECK([ovn-nbctl lr-nat-del lr0 snat 20.0.0.10 lrp01], [1], [],
+[ovn-nbctl: no matching NAT with the type (snat), logical_ip (20.0.0.10) and gateway_port (lrp01)
+])
+AT_CHECK([ovn-nbctl --if-exists lr-nat-del lr0 snat 20.0.0.10 lrp01])
+AT_CHECK([ovn-nbctl lr-nat-del lr0 snat])
+
+AT_CHECK([ovn-nbctl lr-nat-del lr0])
+AT_CHECK([ovn-nbctl lrp-del-gateway-chassis lrp00 chassis1])
+AT_CHECK([ovn-nbctl lrp-del-gateway-chassis lrp01 chassis2])
+
+AT_CHECK([ovn-nbctl lr-nat-add lr0 snat 10.0.0.1 192.168.0.0/24])
+AT_CHECK([ovn-nbctl --match="tcp" lr-nat-add lr0 snat 10.0.0.2 192.168.0.0/24])
+AT_CHECK([ovn-nbctl lr-nat-list lr0], [0], [dnl
+TYPE             GATEWAY_PORT          MATCH                 EXTERNAL_IP        EXTERNAL_PORT    LOGICAL_IP          EXTERNAL_MAC         LOGICAL_PORT
+snat                                                         10.0.0.1                            192.168.0.0/24
+snat                                   tcp                   10.0.0.2                            192.168.0.0/24
+])
+
+AT_CHECK([ovn-nbctl --match="tcp" lr-nat-add lr0 snat 10.0.0.3 192.168.0.0/24], [1], [],
+[ovn-nbctl: a NAT with this type (snat), logical_ip (192.168.0.0/24) and match "tcp" already exists
+])
+AT_CHECK([ovn-nbctl --match="tcp" lr-nat-add lr0 snat 10.0.0.2 192.168.0.0/24], [1], [],
+[ovn-nbctl: 10.0.0.2, 192.168.0.0/24: a NAT with this external_ip and logical_ip already exists
+])
+AT_CHECK([ovn-nbctl --may-exist --priority=5 --match="udp" lr-nat-add lr0 snat 10.0.0.2 192.168.0.0/24])
+AT_CHECK([ovn-nbctl lr-nat-list lr0], [0], [dnl
+TYPE             GATEWAY_PORT          MATCH                 EXTERNAL_IP        EXTERNAL_PORT    LOGICAL_IP          EXTERNAL_MAC         LOGICAL_PORT
+snat                                                         10.0.0.1                            192.168.0.0/24
+snat                                   udp                   10.0.0.2                            192.168.0.0/24
+])
+
+AT_CHECK([ovn-nbctl --match="udp" lr-nat-del lr0 snat 192.168.0.0/24])
+AT_CHECK([ovn-nbctl lr-nat-list lr0], [0], [dnl
+TYPE             GATEWAY_PORT          MATCH                 EXTERNAL_IP        EXTERNAL_PORT    LOGICAL_IP          EXTERNAL_MAC         LOGICAL_PORT
+snat                                                         10.0.0.1                            192.168.0.0/24
+])
+
+AT_CHECK([ovn-nbctl lr-nat-del lr0 snat 192.168.0.0/24])
+AT_CHECK([ovn-nbctl lr-nat-list lr0], [0])
+
+AT_CHECK([ovn-nbctl lr-nat-add lr0 dnat 10.0.0.1 192.168.0.1])
+AT_CHECK([ovn-nbctl --match="tcp" lr-nat-add lr0 dnat 10.0.0.1 192.168.0.2])
+AT_CHECK([ovn-nbctl lr-nat-list lr0], [0], [dnl
+TYPE             GATEWAY_PORT          MATCH                 EXTERNAL_IP        EXTERNAL_PORT    LOGICAL_IP          EXTERNAL_MAC         LOGICAL_PORT
+dnat                                                         10.0.0.1                            192.168.0.1
+dnat                                   tcp                   10.0.0.1                            192.168.0.2
+])
+
+AT_CHECK([ovn-nbctl --match="tcp" lr-nat-add lr0 dnat 10.0.0.1 192.168.0.3], [1], [],
+[ovn-nbctl: a NAT with this type (dnat), external_ip (10.0.0.1) and match "tcp" already exists
+])
+AT_CHECK([ovn-nbctl --match="tcp" lr-nat-add lr0 dnat 10.0.0.1 192.168.0.2], [1], [],
+[ovn-nbctl: 10.0.0.1, 192.168.0.2: a NAT with this external_ip and logical_ip already exists
+])
+AT_CHECK([ovn-nbctl --may-exist --priority=10 --match="udp" lr-nat-add lr0 dnat 10.0.0.1 192.168.0.2])
+AT_CHECK([ovn-nbctl lr-nat-list lr0], [0], [dnl
+TYPE             GATEWAY_PORT          MATCH                 EXTERNAL_IP        EXTERNAL_PORT    LOGICAL_IP          EXTERNAL_MAC         LOGICAL_PORT
+dnat                                                         10.0.0.1                            192.168.0.1
+dnat                                   udp                   10.0.0.1                            192.168.0.2
+])
+
+AT_CHECK([ovn-nbctl --match="udp" lr-nat-del lr0 dnat 10.0.0.1])
+AT_CHECK([ovn-nbctl lr-nat-list lr0], [0], [dnl
+TYPE             GATEWAY_PORT          MATCH                 EXTERNAL_IP        EXTERNAL_PORT    LOGICAL_IP          EXTERNAL_MAC         LOGICAL_PORT
+dnat                                                         10.0.0.1                            192.168.0.1
+])
+
+AT_CHECK([ovn-nbctl lr-nat-del lr0 dnat 10.0.0.1])
+AT_CHECK([ovn-nbctl lr-nat-list lr0], [0])
+
+AT_CHECK([ovn-nbctl lr-nat-add lr0 dnat_and_snat 10.0.0.1 192.168.0.1])
+AT_CHECK([ovn-nbctl --match="tcp" lr-nat-add lr0 dnat_and_snat 10.0.0.1 192.168.0.2])
+AT_CHECK([ovn-nbctl lr-nat-list lr0], [0], [dnl
+TYPE             GATEWAY_PORT          MATCH                 EXTERNAL_IP        EXTERNAL_PORT    LOGICAL_IP          EXTERNAL_MAC         LOGICAL_PORT
+dnat_and_snat                                                10.0.0.1                            192.168.0.1
+dnat_and_snat                          tcp                   10.0.0.1                            192.168.0.2
+])
+
+AT_CHECK([ovn-nbctl --match="tcp" lr-nat-add lr0 dnat_and_snat 10.0.0.1 192.168.0.3], [1], [],
+[ovn-nbctl: a NAT with this type (dnat_and_snat), external_ip (10.0.0.1) and match "tcp" already exists
+])
+AT_CHECK([ovn-nbctl --match="tcp" lr-nat-add lr0 dnat_and_snat 10.0.0.1 192.168.0.2], [1], [],
+[ovn-nbctl: 10.0.0.1, 192.168.0.2: a NAT with this external_ip and logical_ip already exists
+])
+AT_CHECK([ovn-nbctl --may-exist --priority=10 --match="udp" lr-nat-add lr0 dnat_and_snat 10.0.0.1 192.168.0.2])
+AT_CHECK([ovn-nbctl lr-nat-list lr0], [0], [dnl
+TYPE             GATEWAY_PORT          MATCH                 EXTERNAL_IP        EXTERNAL_PORT    LOGICAL_IP          EXTERNAL_MAC         LOGICAL_PORT
+dnat_and_snat                                                10.0.0.1                            192.168.0.1
+dnat_and_snat                          udp                   10.0.0.1                            192.168.0.2
+])
+
+AT_CHECK([ovn-nbctl --priority=5 lr-nat-add lr0 snat 10.0.0.2 192.168.0.0/24], [1], [],
+[ovn-nbctl: priority can be set only with --match option.
+])
+
+])
+
+dnl ---------------------------------------------------------------------
+
+OVN_NBCTL_TEST([ovn_nbctl_lbs], [LBs], [
+dnl Add two LBs.
+AT_CHECK([ovn-nbctl -vsocket_util:off lb-add lb0 30.0.0.10:80a 192.168.10.10:80,192.168.10.20:80 tcp], [1], [],
+[ovn-nbctl: 30.0.0.10:80a: should be an IP address (or an IP address and a port number with : as a separator).
+])
+
+AT_CHECK([ovn-nbctl -vsocket_util:off lb-add lb0 30.0.0.10:a80 192.168.10.10:80,192.168.10.20:80 tcp], [1], [],
+[ovn-nbctl: 30.0.0.10:a80: should be an IP address (or an IP address and a port number with : as a separator).
+])
+
+AT_CHECK([ovn-nbctl -vsocket_util:off lb-add lb0 30.0.0.10:80 192.168.10.10:80,192.168.10.20 tcp], [1], [],
+[ovn-nbctl: 192.168.10.20: should be an IP address and a port number with : as a separator.
+])
+
+AT_CHECK([ovn-nbctl -vsocket_util:off lb-add lb0 30.0.0.1a 192.168.10.10:80,192.168.10.20:80], [1], [],
+[ovn-nbctl: 30.0.0.1a: should be an IP address (or an IP address and a port number with : as a separator).
+])
+
+AT_CHECK([ovn-nbctl -vsocket_util:off lb-add lb0 30.0.0 192.168.10.10:80,192.168.10.20:80], [1], [],
+[ovn-nbctl: 30.0.0: should be an IP address (or an IP address and a port number with : as a separator).
+])
+
+AT_CHECK([ovn-nbctl -vsocket_util:off lb-add lb0 30.0.0.10 192.168.10.10,192.168.10.20:80], [1], [],
+[ovn-nbctl: 192.168.10.20:80: should be an IP address.
+])
+
+AT_CHECK([ovn-nbctl -vsocket_util:off lb-add lb0 30.0.0.10 192.168.10.10:a80], [1], [],
+[ovn-nbctl: 192.168.10.10:a80: should be an IP address.
+])
+
+AT_CHECK([ovn-nbctl -vsocket_util:off lb-add lb0 30.0.0.10 192.168.10.1a], [1], [],
+[ovn-nbctl: 192.168.10.1a: should be an IP address.
+])
+
+AT_CHECK([ovn-nbctl lb-add lb0 30.0.0.10: 192.168.10.10:80,192.168.10.20:80 tcp], [1], [],
+[ovn-nbctl: 192.168.10.10:80: should be an IP address, 192.168.10.20:80: should be an IP address.
+])
+
+AT_CHECK([ovn-nbctl lb-add lb0 30.0.0.10 192.168.10.10 tcp], [1], [],
+[ovn-nbctl: Protocol is unnecessary when no port of vip is given.
+])
+
+AT_CHECK([ovn-nbctl lb-add lb0 30.0.0.10 192.168.10.10 tcp], [1], [],
+[ovn-nbctl: Protocol is unnecessary when no port of vip is given.
+])
+
+dnl Add ips to lb
+AT_CHECK([ovn-nbctl lb-add lb0 30.0.0.10:80 ,,,192.168.10.10:80,,,,,])
+AT_CHECK([ovn-nbctl lb-add lb1 30.0.0.10:80 ,,,192.168.10.10:80,,,,192.168.10.20:80,,,,])
+AT_CHECK([ovn-nbctl lb-list | uuidfilt], [0], [dnl
+UUID                                    LB                  PROTO      VIP             IPs
+<0>    lb0                 tcp        30.0.0.10:80    192.168.10.10:80
+<1>    lb1                 tcp        30.0.0.10:80    192.168.10.10:80,192.168.10.20:80
+])
+AT_CHECK([ovn-nbctl lb-del lb0])
+AT_CHECK([ovn-nbctl lb-del lb1])
+
+AT_CHECK([ovn-nbctl lb-add lb0 30.0.0.10:80 192.168.10.10:80,192.168.10.20:80])
+AT_CHECK([ovn-nbctl lb-add lb1 30.0.0.10:80 192.168.10.10:80,192.168.10.20:80 tcp])
+AT_CHECK([ovn-nbctl lb-list | uuidfilt], [0], [dnl
+UUID                                    LB                  PROTO      VIP             IPs
+<0>    lb0                 tcp        30.0.0.10:80    192.168.10.10:80,192.168.10.20:80
+<1>    lb1                 tcp        30.0.0.10:80    192.168.10.10:80,192.168.10.20:80
+])
+
+dnl Update the VIP of the lb1.
+AT_CHECK([ovn-nbctl --may-exist lb-add lb1 30.0.0.10:80 192.168.10.10:80,192.168.10.20:8080])
+AT_CHECK([ovn-nbctl lb-list | uuidfilt], [0], [dnl
+UUID                                    LB                  PROTO      VIP             IPs
+<0>    lb0                 tcp        30.0.0.10:80    192.168.10.10:80,192.168.10.20:80
+<1>    lb1                 tcp        30.0.0.10:80    192.168.10.10:80,192.168.10.20:8080
+])
+
+AT_CHECK([ovn-nbctl --may-exist lb-add lb1 30.0.0.10:80 192.168.10.10:80,192.168.10.20:8080 udp])
+AT_CHECK([ovn-nbctl lb-list | uuidfilt], [0], [dnl
+UUID                                    LB                  PROTO      VIP             IPs
+<0>    lb0                 tcp        30.0.0.10:80    192.168.10.10:80,192.168.10.20:80
+<1>    lb1                 udp        30.0.0.10:80    192.168.10.10:80,192.168.10.20:8080
+])
+
+dnl Config lb1 with another VIP.
+AT_CHECK([ovn-nbctl lb-add lb1 30.0.0.20:80 192.168.10.10:80 udp])
+AT_CHECK([ovn-nbctl lb-list | uuidfilt], [0], [dnl
+UUID                                    LB                  PROTO      VIP             IPs
+<0>    lb0                 tcp        30.0.0.10:80    192.168.10.10:80,192.168.10.20:80
+<1>    lb1                 udp        30.0.0.10:80    192.168.10.10:80,192.168.10.20:8080
+                                                            udp        30.0.0.20:80    192.168.10.10:80
+])
+
+AT_CHECK([ovn-nbctl lb-del lb1 30.0.0.20:80])
+AT_CHECK([ovn-nbctl lb-list | uuidfilt], [0], [dnl
+UUID                                    LB                  PROTO      VIP             IPs
+<0>    lb0                 tcp        30.0.0.10:80    192.168.10.10:80,192.168.10.20:80
+<1>    lb1                 udp        30.0.0.10:80    192.168.10.10:80,192.168.10.20:8080
+])
+
+dnl Add LBs whose vip is just an IP address.
+AT_CHECK([ovn-nbctl lb-add lb2 30.0.0.30 192.168.10.10])
+AT_CHECK([ovn-nbctl lb-add lb3 30.0.0.30 192.168.10.10])
+AT_CHECK([ovn-nbctl lb-list | uuidfilt], [0], [dnl
+UUID                                    LB                  PROTO      VIP             IPs
+<0>    lb0                 tcp        30.0.0.10:80    192.168.10.10:80,192.168.10.20:80
+<1>    lb1                 udp        30.0.0.10:80    192.168.10.10:80,192.168.10.20:8080
+<2>    lb2                            30.0.0.30       192.168.10.10
+<3>    lb3                            30.0.0.30       192.168.10.10
+])
+AT_CHECK([ovn-nbctl lb-del lb2 30.0.0.30])
+AT_CHECK([ovn-nbctl lb-del lb3 30.0.0.30])
+
+AT_CHECK([ovn-nbctl lb-add lb2 30.0.0.10:8080 192.168.10.10:80,192.168.10.20:80 tcp])
+AT_CHECK([ovn-nbctl --add-duplicate lb-add lb2 30.0.0.10:8080 192.168.10.10:80,192.168.10.20:80 tcp])
+AT_CHECK([ovn-nbctl lb-list | uuidfilt], [0], [dnl
+UUID                                    LB                  PROTO      VIP               IPs
+<0>    lb0                 tcp        30.0.0.10:80      192.168.10.10:80,192.168.10.20:80
+<1>    lb1                 udp        30.0.0.10:80      192.168.10.10:80,192.168.10.20:8080
+<2>    lb2                 tcp        30.0.0.10:8080    192.168.10.10:80,192.168.10.20:80
+<3>    lb2                 tcp        30.0.0.10:8080    192.168.10.10:80,192.168.10.20:80
+])
+
+dnl If there are multiple load balancers with the same name, use a UUID to update/delete.
+AT_CHECK([ovn-nbctl lb-add lb2 30.0.0.10:8080 192.168.10.10:80,192.168.10.20:80 tcp], [1], [],
+[ovn-nbctl: Multiple load balancers named 'lb2'.  Use a UUID.
+])
+
+AT_CHECK([ovn-nbctl lb-del lb2], [1], [],
+[ovn-nbctl: Multiple load balancers named 'lb2'.  Use a UUID.
+])
+
+AT_CHECK([ovn-nbctl --may-exist lb-add lb1 30.0.0.10:80 192.168.10.10:8080,192.168.10.20:8080 udp])
+AT_CHECK([ovn-nbctl --may-exist lb-add lb1 30.0.0.10:8080 192.168.10.10:8080,192.168.10.20:8080 udp])
+AT_CHECK([ovn-nbctl --may-exist lb-add lb1 30.0.0.10:9090 192.168.10.10:8080,192.168.10.20:8080 udp])
+AT_CHECK([ovn-nbctl lb-del lb0 30.0.0.10:80])
+AT_CHECK([ovn-nbctl lb-del lb1])
+AT_CHECK([ovn-nbctl lb-list | uuidfilt], [0], [dnl
+UUID                                    LB                  PROTO      VIP               IPs
+<0>    lb2                 tcp        30.0.0.10:8080    192.168.10.10:80,192.168.10.20:80
+<1>    lb2                 tcp        30.0.0.10:8080    192.168.10.10:80,192.168.10.20:80
+])
+
+dnl Add load balancer to logical switch.
+AT_CHECK([ovn-nbctl ls-add ls0])
+AT_CHECK([ovn-nbctl lb-add lb0 30.0.0.10:80 192.168.10.10:80,192.168.10.20:80])
+AT_CHECK([ovn-nbctl lb-add lb1 30.0.0.10:80 192.168.10.10:80,192.168.10.20:80 udp])
+AT_CHECK([ovn-nbctl lb-add lb3 30.0.0.10 192.168.10.10,192.168.10.20])
+AT_CHECK([ovn-nbctl ls-lb-add ls0 lb0])
+AT_CHECK([ovn-nbctl ls-lb-add ls0 lb1])
+AT_CHECK([ovn-nbctl --may-exist ls-lb-add ls0 lb1])
+AT_CHECK([ovn-nbctl ls-lb-add ls0 lb2], [1], [],
+[ovn-nbctl: Multiple load balancers named 'lb2'.  Use a UUID.
+])
+AT_CHECK([ovn-nbctl ls-lb-add ls0 lb3])
+
+AT_CHECK([ovn-nbctl ls-lb-list ls0 | uuidfilt], [0], [dnl
+UUID                                    LB                  PROTO      VIP             IPs
+<0>    lb0                 tcp        30.0.0.10:80    192.168.10.10:80,192.168.10.20:80
+<1>    lb1                 udp        30.0.0.10:80    192.168.10.10:80,192.168.10.20:80
+<2>    lb3                            30.0.0.10       192.168.10.10,192.168.10.20
+])
+
+AT_CHECK([ovn-nbctl ls-lb-del ls0 lb0])
+AT_CHECK([ovn-nbctl ls-lb-list ls0 | uuidfilt], [0], [dnl
+UUID                                    LB                  PROTO      VIP             IPs
+<0>    lb1                 udp        30.0.0.10:80    192.168.10.10:80,192.168.10.20:80
+<1>    lb3                            30.0.0.10       192.168.10.10,192.168.10.20
+])
+
+AT_CHECK([ovn-nbctl ls-lb-del ls0 lb1])
+AT_CHECK([ovn-nbctl ls-lb-del ls0 lb3])
+AT_CHECK([ovn-nbctl ls-lb-list ls0 | uuidfilt], [0], [])
+AT_CHECK([ovn-nbctl --if-exists ls-lb-del ls0 lb1])
+
+AT_CHECK([ovn-nbctl lb-add lb4 40.0.0.10 162.168.10.10,162.168.10.20])
+AT_CHECK([ovn-nbctl lb-add lb5 50.0.0.10 172.168.10.10,172.168.10.20])
+AT_CHECK([ovn-nbctl lb-add lb6 60.0.0.10 182.168.10.10,182.168.10.20])
+
+lb4=$(fetch_column nb:load_balancer _uuid name=lb4)
+lb5=$(fetch_column nb:load_balancer _uuid name=lb5)
+lb6=$(fetch_column nb:load_balancer _uuid name=lb6)
+
+lbg=$(ovn-nbctl create load_balancer_group name=lbg -- \
+  add load_balancer_group lbg load_balancer $lb4 -- \
+  add load_balancer_group lbg load_balancer $lb5 -- \
+  add load_balancer_group lbg load_balancer $lb6)
+
+AT_CHECK([ovn-nbctl add logical_switch ls0 load_balancer_group $lbg])
+
+AT_CHECK([ovn-nbctl ls-lb-list ls0 | uuidfilt], [0], [dnl
+UUID                                    LB                  PROTO      VIP          IPs
+<0>    lb4                            40.0.0.10    162.168.10.10,162.168.10.20
+<1>    lb5                            50.0.0.10    172.168.10.10,172.168.10.20
+<2>    lb6                            60.0.0.10    182.168.10.10,182.168.10.20
+])
+
+AT_CHECK([ovn-nbctl remove logical_switch ls0 load_balancer_group $lbg])
+
+dnl Remove all load balancers from logical switch.
+AT_CHECK([ovn-nbctl ls-lb-add ls0 lb0])
+AT_CHECK([ovn-nbctl ls-lb-add ls0 lb1])
+AT_CHECK([ovn-nbctl ls-lb-add ls0 lb3])
+AT_CHECK([ovn-nbctl ls-lb-del ls0])
+AT_CHECK([ovn-nbctl ls-lb-list ls0 | uuidfilt], [0], [])
+
+dnl Add load balancer to logical router.
+AT_CHECK([ovn-nbctl lr-add lr0])
+AT_CHECK([ovn-nbctl lr-lb-add lr0 lb0])
+AT_CHECK([ovn-nbctl lr-lb-add lr0 lb1])
+AT_CHECK([ovn-nbctl --may-exist lr-lb-add lr0 lb1])
+AT_CHECK([ovn-nbctl lr-lb-add lr0 lb2], [1], [],
+[ovn-nbctl: Multiple load balancers named 'lb2'.  Use a UUID.
+])
+AT_CHECK([ovn-nbctl lr-lb-add lr0 lb3])
+
+AT_CHECK([ovn-nbctl lr-lb-list lr0 | uuidfilt], [0], [dnl
+UUID                                    LB                  PROTO      VIP             IPs
+<0>    lb0                 tcp        30.0.0.10:80    192.168.10.10:80,192.168.10.20:80
+<1>    lb1                 udp        30.0.0.10:80    192.168.10.10:80,192.168.10.20:80
+<2>    lb3                            30.0.0.10       192.168.10.10,192.168.10.20
+])
+
+AT_CHECK([ovn-nbctl lr-lb-del lr0 lb0])
+AT_CHECK([ovn-nbctl lr-lb-list lr0 | uuidfilt], [0], [dnl
+UUID                                    LB                  PROTO      VIP             IPs
+<0>    lb1                 udp        30.0.0.10:80    192.168.10.10:80,192.168.10.20:80
+<1>    lb3                            30.0.0.10       192.168.10.10,192.168.10.20
+])
+
+AT_CHECK([ovn-nbctl lr-lb-del lr0 lb1])
+AT_CHECK([ovn-nbctl lr-lb-del lr0 lb3])
+AT_CHECK([ovn-nbctl lr-lb-list lr0 | uuidfilt], [0], [])
+AT_CHECK([ovn-nbctl --if-exists lr-lb-del lr0 lb1])
+
+dnl Remove all load balancers from logical router.
+AT_CHECK([ovn-nbctl lr-lb-add lr0 lb0])
+AT_CHECK([ovn-nbctl lr-lb-add lr0 lb1])
+AT_CHECK([ovn-nbctl lr-lb-add lr0 lb3])
+AT_CHECK([ovn-nbctl lr-lb-del lr0])
+AT_CHECK([ovn-nbctl lr-lb-list lr0 | uuidfilt], [0], [])
+
+dnl Remove load balancers after adding them to a logical router/switch.
+AT_CHECK([ovn-nbctl lr-lb-add lr0 lb0])
+AT_CHECK([ovn-nbctl ls-lb-add ls0 lb1])
+AT_CHECK([ovn-nbctl lb-del lb0])
+AT_CHECK([ovn-nbctl lb-del lb1])
+AT_CHECK([ovn-nbctl lr-lb-list lr0 | uuidfilt], [0], [])
+AT_CHECK([ovn-nbctl ls-lb-list ls0 | uuidfilt], [0], [])
+
+AT_CHECK([ovn-nbctl add logical_router lr0 load_balancer_group $lbg])
+
+AT_CHECK([ovn-nbctl lr-lb-list lr0 | uuidfilt], [0], [dnl
+UUID                                    LB                  PROTO      VIP          IPs
+<0>    lb4                            40.0.0.10    162.168.10.10,162.168.10.20
+<1>    lb5                            50.0.0.10    172.168.10.10,172.168.10.20
+<2>    lb6                            60.0.0.10    182.168.10.10,182.168.10.20
+])])
+
+dnl ---------------------------------------------------------------------
+
+OVN_NBCTL_TEST([ovn_nbctl_lbs_ipv6], [LBs IPv6], [
+dnl A bunch of commands that should fail
+AT_CHECK([ovn-nbctl -vsocket_util:off lb-add lb0 [[ae0f::10]]:80a [[fd0f::10]]:80,[[fd0f::20]]:80 tcp], [1], [],
+[ovn-nbctl: [[ae0f::10]]:80a: should be an IP address (or an IP address and a port number with : as a separator).
+])
+
+
+AT_CHECK([ovn-nbctl -vsocket_util:off lb-add lb0 [[ae0f::10]]:a80 [[fd0f::10]]:80,[[fd0f::20]]:80 tcp], [1], [],
+[ovn-nbctl: [[ae0f::10]]:a80: should be an IP address (or an IP address and a port number with : as a separator).
+])
+
+
+AT_CHECK([ovn-nbctl -vsocket_util:off lb-add lb0 [[ae0f::10]]:80 [[fd0f::10]]:80,fd0f::20 tcp], [1], [],
+[ovn-nbctl: fd0f::20: should be an IP address and a port number with : as a separator.
+])
+
+
+AT_CHECK([ovn-nbctl -vsocket_util:off lb-add lb0 ae0f::10fff [[fd0f::10]]:80,fd0f::20 tcp], [1], [],
+[ovn-nbctl: ae0f::10fff: should be an IP address (or an IP address and a port number with : as a separator).
+])
+
+
+AT_CHECK([ovn-nbctl -vsocket_util:off lb-add lb0 ae0f::10 [[fd0f::10]]:80,[[fd0f::20]]:80], [1], [],
+[ovn-nbctl: [[fd0f::10]]:80: should be an IP address, [[fd0f::20]]:80: should be an IP address.
+])
+
+
+AT_CHECK([ovn-nbctl -vsocket_util:off lb-add lb0 ae0f::10 fd0f::10,[[fd0f::20]]:80], [1], [],
+[ovn-nbctl: [[fd0f::20]]:80: should be an IP address.
+])
+
+
+AT_CHECK([ovn-nbctl -vsocket_util:off lb-add lb0 ae0f::10 [[fd0f::10]]:a80], [1], [],
+[ovn-nbctl: [[fd0f::10]]:a80: should be an IP address.
+])
+
+
+AT_CHECK([ovn-nbctl -vsocket_util:off lb-add lb0 ae0f::10 fd0f::1001a], [1], [],
+[ovn-nbctl: fd0f::1001a: should be an IP address.
+])
+
+
+AT_CHECK([ovn-nbctl -vsocket_util:off lb-add lb0 [[ae0f::10]]: [[fd0f::10]]:80,[[fd0f::20]]:80 tcp], [1], [],
+[ovn-nbctl: [[fd0f::10]]:80: should be an IP address, [[fd0f::20]]:80: should be an IP address.
+])
+
+
+AT_CHECK([ovn-nbctl lb-add lb0 ae0f::10 fd0f::10 tcp], [1], [],
+[ovn-nbctl: Protocol is unnecessary when no port of vip is given.
+])
+
+
+AT_CHECK([ovn-nbctl lb-add lb0 ae0f::10 [[fd0f::10]]:900 tcp], [1], [],
+[ovn-nbctl: [[fd0f::10]]:900: should be an IP address.
+])
+
+AT_CHECK([ovn-nbctl lb-add lb0 ae0f::10 192.168.10.10], [1], [],
+[ovn-nbctl: 192.168.10.10: IP address family is different from VIP ae0f::10.
+])
+
+AT_CHECK([ovn-nbctl lb-add lb0 ae0f::10 192.168.10.10], [1], [],
+[ovn-nbctl: 192.168.10.10: IP address family is different from VIP ae0f::10.
+])
+
+AT_CHECK([ovn-nbctl lb-add lb0 [[ae0f::10]]:80 192.168.10.10:80], [1], [],
+[ovn-nbctl: 192.168.10.10:80: IP address family is different from VIP ae0f::10.
+])
+
+AT_CHECK([ovn-nbctl lb-add lb0 30.0.0.10 ae0f::10], [1], [],
+[ovn-nbctl: ae0f::10: IP address family is different from VIP 30.0.0.10.
+])
+
+AT_CHECK([ovn-nbctl lb-add lb0 30.0.0.10:80 [[ae0f::10]]:80], [1], [],
+[ovn-nbctl: [[ae0f::10]]:80: IP address family is different from VIP 30.0.0.10.
+])
+
+AT_CHECK([ovn-nbctl lb-add lb0 ae0f::10 fd0f::10])
+AT_CHECK([ovn-nbctl lb-add lb0 ae0f:0000:0000:0000:0000:0000:0000:0010 fd0f::20],
+[1], [], [ovn-nbctl: lb0: a load balancer with this vip (ae0f::10) already exists
+])
+
+AT_CHECK([ovn-nbctl lb-del lb0])
+
+dnl Add ips to lb
+AT_CHECK([ovn-nbctl lb-add lb0 [[ae0f::10]]:80 ,,,[[fd0f::10]]:80,,,,,])
+AT_CHECK([ovn-nbctl lb-add lb1 [[ae0f::10]]:80 ,,,[[fd0f::10]]:80,,,,[[fd0f::20]]:80,,,,])
+AT_CHECK([ovn-nbctl lb-list | uuidfilt], [0], [dnl
+UUID                                    LB                  PROTO      VIP              IPs
+<0>    lb0                 tcp        [[ae0f::10]]:80    [[fd0f::10]]:80
+<1>    lb1                 tcp        [[ae0f::10]]:80    [[fd0f::10]]:80,[[fd0f::20]]:80
+])
+AT_CHECK([ovn-nbctl lb-del lb0])
+AT_CHECK([ovn-nbctl lb-del lb1])
+
+
+AT_CHECK([ovn-nbctl lb-add lb0 [[ae0f::10]]:80 [[fd0f::10]]:80,[[fd0f::20]]:80])
+AT_CHECK([ovn-nbctl lb-add lb1 [[ae0f::10]]:80 [[fd0f::10]]:80,[[fd0f::20]]:80 tcp])
+AT_CHECK([ovn-nbctl lb-list | uuidfilt], [0], [dnl
+UUID                                    LB                  PROTO      VIP              IPs
+<0>    lb0                 tcp        [[ae0f::10]]:80    [[fd0f::10]]:80,[[fd0f::20]]:80
+<1>    lb1                 tcp        [[ae0f::10]]:80    [[fd0f::10]]:80,[[fd0f::20]]:80
+])
+
+dnl Update the VIP of the lb1.
+AT_CHECK([ovn-nbctl --may-exist lb-add lb1 [[ae0f::10]]:80 [[fd0f::10]]:80,[[fd0f::20]]:8080])
+AT_CHECK([ovn-nbctl lb-list | uuidfilt], [0], [dnl
+UUID                                    LB                  PROTO      VIP              IPs
+<0>    lb0                 tcp        [[ae0f::10]]:80    [[fd0f::10]]:80,[[fd0f::20]]:80
+<1>    lb1                 tcp        [[ae0f::10]]:80    [[fd0f::10]]:80,[[fd0f::20]]:8080
+])
+
+AT_CHECK([ovn-nbctl --may-exist lb-add lb1 [[ae0f::10]]:80 [[fd0f::10]]:80,[[fd0f::20]]:8080 udp])
+AT_CHECK([ovn-nbctl lb-list | uuidfilt], [0], [dnl
+UUID                                    LB                  PROTO      VIP              IPs
+<0>    lb0                 tcp        [[ae0f::10]]:80    [[fd0f::10]]:80,[[fd0f::20]]:80
+<1>    lb1                 udp        [[ae0f::10]]:80    [[fd0f::10]]:80,[[fd0f::20]]:8080
+])
+
+dnl Config lb1 with another VIP.
+AT_CHECK([ovn-nbctl lb-add lb1 [[ae0f::20]]:80 [[fd0f::10]]:80 udp])
+AT_CHECK([ovn-nbctl lb-list | uuidfilt], [0], [dnl
+UUID                                    LB                  PROTO      VIP              IPs
+<0>    lb0                 tcp        [[ae0f::10]]:80    [[fd0f::10]]:80,[[fd0f::20]]:80
+<1>    lb1                 udp        [[ae0f::10]]:80    [[fd0f::10]]:80,[[fd0f::20]]:8080
+                                                            udp        [[ae0f::20]]:80    [[fd0f::10]]:80
+])
+
+AT_CHECK([ovn-nbctl lb-del lb1 [[ae0f::20]]:80])
+AT_CHECK([ovn-nbctl lb-list | uuidfilt], [0], [dnl
+UUID                                    LB                  PROTO      VIP              IPs
+<0>    lb0                 tcp        [[ae0f::10]]:80    [[fd0f::10]]:80,[[fd0f::20]]:80
+<1>    lb1                 udp        [[ae0f::10]]:80    [[fd0f::10]]:80,[[fd0f::20]]:8080
+])
+
+dnl Add LBs whose vip is just an IP address.
+AT_CHECK([ovn-nbctl lb-add lb2 ae0f::30 fd0f::10])
+AT_CHECK([ovn-nbctl lb-add lb3 ae0f::30 fd0f::10])
+AT_CHECK([ovn-nbctl lb-list | uuidfilt], [0], [dnl
+UUID                                    LB                  PROTO      VIP              IPs
+<0>    lb0                 tcp        [[ae0f::10]]:80    [[fd0f::10]]:80,[[fd0f::20]]:80
+<1>    lb1                 udp        [[ae0f::10]]:80    [[fd0f::10]]:80,[[fd0f::20]]:8080
+<2>    lb2                            ae0f::30         fd0f::10
+<3>    lb3                            ae0f::30         fd0f::10
+])
+AT_CHECK([ovn-nbctl lb-del lb2 ae0f::30])
+AT_CHECK([ovn-nbctl lb-del lb3 ae0f::30])
+
+AT_CHECK([ovn-nbctl lb-add lb2 [[ae0f::10]]:8080 [[fd0f::10]]:80,[[fd0f::20]]:80 tcp])
+AT_CHECK([ovn-nbctl --add-duplicate lb-add lb2 [[ae0f::10]]:8080 [[fd0f::10]]:80,[[fd0f::20]]:80 tcp])
+AT_CHECK([ovn-nbctl lb-list | uuidfilt], [0], [dnl
+UUID                                    LB                  PROTO      VIP                IPs
+<0>    lb0                 tcp        [[ae0f::10]]:80      [[fd0f::10]]:80,[[fd0f::20]]:80
+<1>    lb1                 udp        [[ae0f::10]]:80      [[fd0f::10]]:80,[[fd0f::20]]:8080
+<2>    lb2                 tcp        [[ae0f::10]]:8080    [[fd0f::10]]:80,[[fd0f::20]]:80
+<3>    lb2                 tcp        [[ae0f::10]]:8080    [[fd0f::10]]:80,[[fd0f::20]]:80
+])
+
+dnl If there are multiple load balancers with the same name, use a UUID to update/delete.
+AT_CHECK([ovn-nbctl lb-add lb2 [[ae0f::10]]:8080 [[fd0f::10]]:80,[[fd0f::20]]:80 tcp], [1], [],
+[ovn-nbctl: Multiple load balancers named 'lb2'.  Use a UUID.
+])
+
+AT_CHECK([ovn-nbctl lb-del lb2], [1], [],
+[ovn-nbctl: Multiple load balancers named 'lb2'.  Use a UUID.
+])
+
+AT_CHECK([ovn-nbctl --may-exist lb-add lb1 [[ae0f::10]]:80 [[fd0f::10]]:8080,[[fd0f::20]]:8080 udp])
+AT_CHECK([ovn-nbctl --may-exist lb-add lb1 [[ae0f::10]]:8080 [[fd0f::10]]:8080,[[fd0f::20]]:8080 udp])
+AT_CHECK([ovn-nbctl --may-exist lb-add lb1 [[ae0f::10]]:9090 [[fd0f::10]]:8080,[[fd0f::20]]:8080 udp])
+AT_CHECK([ovn-nbctl lb-del lb0 [[ae0f::10]]:80])
+AT_CHECK([ovn-nbctl lb-del lb1])
+AT_CHECK([ovn-nbctl lb-list | uuidfilt], [0], [dnl
+UUID                                    LB                  PROTO      VIP                IPs
+<0>    lb2                 tcp        [[ae0f::10]]:8080    [[fd0f::10]]:80,[[fd0f::20]]:80
+<1>    lb2                 tcp        [[ae0f::10]]:8080    [[fd0f::10]]:80,[[fd0f::20]]:80
+])
+
+dnl Add load balancer to logical switch.
+AT_CHECK([ovn-nbctl ls-add ls0])
+AT_CHECK([ovn-nbctl lb-add lb0 [[ae0f::10]]:80 [[fd0f::10]]:80,[[fd0f::20]]:80])
+AT_CHECK([ovn-nbctl lb-add lb1 [[ae0f::10]]:80 [[fd0f::10]]:80,[[fd0f::20]]:80 udp])
+AT_CHECK([ovn-nbctl lb-add lb3 ae0f::10 fd0f::10,fd0f::20])
+AT_CHECK([ovn-nbctl ls-lb-add ls0 lb0])
+AT_CHECK([ovn-nbctl ls-lb-add ls0 lb1])
+AT_CHECK([ovn-nbctl --may-exist ls-lb-add ls0 lb1])
+AT_CHECK([ovn-nbctl ls-lb-add ls0 lb2], [1], [],
+[ovn-nbctl: Multiple load balancers named 'lb2'.  Use a UUID.
+])
+AT_CHECK([ovn-nbctl ls-lb-add ls0 lb3])
+
+AT_CHECK([ovn-nbctl ls-lb-list ls0 | uuidfilt], [0], [dnl
+UUID                                    LB                  PROTO      VIP              IPs
+<0>    lb0                 tcp        [[ae0f::10]]:80    [[fd0f::10]]:80,[[fd0f::20]]:80
+<1>    lb1                 udp        [[ae0f::10]]:80    [[fd0f::10]]:80,[[fd0f::20]]:80
+<2>    lb3                            ae0f::10         fd0f::10,fd0f::20
+])
+
+AT_CHECK([ovn-nbctl ls-lb-del ls0 lb0])
+AT_CHECK([ovn-nbctl ls-lb-list ls0 | uuidfilt], [0], [dnl
+UUID                                    LB                  PROTO      VIP              IPs
+<0>    lb1                 udp        [[ae0f::10]]:80    [[fd0f::10]]:80,[[fd0f::20]]:80
+<1>    lb3                            ae0f::10         fd0f::10,fd0f::20
+])
+
+AT_CHECK([ovn-nbctl ls-lb-del ls0 lb1])
+AT_CHECK([ovn-nbctl ls-lb-del ls0 lb3])
+AT_CHECK([ovn-nbctl ls-lb-list ls0 | uuidfilt], [0], [])
+AT_CHECK([ovn-nbctl --if-exists ls-lb-del ls0 lb1])
+
+dnl Remove all load balancers from logical switch.
+AT_CHECK([ovn-nbctl ls-lb-add ls0 lb0])
+AT_CHECK([ovn-nbctl ls-lb-add ls0 lb1])
+AT_CHECK([ovn-nbctl ls-lb-add ls0 lb3])
+AT_CHECK([ovn-nbctl ls-lb-del ls0])
+AT_CHECK([ovn-nbctl ls-lb-list ls0 | uuidfilt], [0], [])
+
+AT_CHECK([ovn-nbctl lb-add lb4 [[ae07::10]]:80 [[fd0f::10]]:80,[[fd0f::20]]:80])
+AT_CHECK([ovn-nbctl lb-add lb5 [[ae08::10]]:80 [[fd0f::10]]:80,[[fd0f::20]]:80 udp])
+AT_CHECK([ovn-nbctl lb-add lb6 ae09::10 fd0f::10,fd0f::20])
+
+lb4=$(fetch_column nb:load_balancer _uuid name=lb4)
+lb5=$(fetch_column nb:load_balancer _uuid name=lb5)
+lb6=$(fetch_column nb:load_balancer _uuid name=lb6)
+
+lbg=$(ovn-nbctl create load_balancer_group name=lbg -- \
+  add load_balancer_group lbg load_balancer $lb4 -- \
+  add load_balancer_group lbg load_balancer $lb5 -- \
+  add load_balancer_group lbg load_balancer $lb6)
+
+AT_CHECK([ovn-nbctl add logical_switch ls0 load_balancer_group $lbg])
+
+AT_CHECK([ovn-nbctl ls-lb-list ls0 | uuidfilt], [0], [dnl
+UUID                                    LB                  PROTO      VIP              IPs
+<0>    lb4                 tcp        [[ae07::10]]:80    [[fd0f::10]]:80,[[fd0f::20]]:80
+<1>    lb5                 udp        [[ae08::10]]:80    [[fd0f::10]]:80,[[fd0f::20]]:80
+<2>    lb6                            ae09::10         fd0f::10,fd0f::20
+])
+
+AT_CHECK([ovn-nbctl remove logical_switch ls0 load_balancer_group $lbg])
+
+dnl Add load balancer to logical router.
+AT_CHECK([ovn-nbctl lr-add lr0])
+AT_CHECK([ovn-nbctl lr-lb-add lr0 lb0])
+AT_CHECK([ovn-nbctl lr-lb-add lr0 lb1])
+AT_CHECK([ovn-nbctl --may-exist lr-lb-add lr0 lb1])
+AT_CHECK([ovn-nbctl lr-lb-add lr0 lb2], [1], [],
+[ovn-nbctl: Multiple load balancers named 'lb2'.  Use a UUID.
+])
+AT_CHECK([ovn-nbctl lr-lb-add lr0 lb3])
+
+AT_CHECK([ovn-nbctl lr-lb-list lr0 | uuidfilt], [0], [dnl
+UUID                                    LB                  PROTO      VIP              IPs
+<0>    lb0                 tcp        [[ae0f::10]]:80    [[fd0f::10]]:80,[[fd0f::20]]:80
+<1>    lb1                 udp        [[ae0f::10]]:80    [[fd0f::10]]:80,[[fd0f::20]]:80
+<2>    lb3                            ae0f::10         fd0f::10,fd0f::20
+])
+
+AT_CHECK([ovn-nbctl lr-lb-del lr0 lb0])
+AT_CHECK([ovn-nbctl lr-lb-list lr0 | uuidfilt], [0], [dnl
+UUID                                    LB                  PROTO      VIP              IPs
+<0>    lb1                 udp        [[ae0f::10]]:80    [[fd0f::10]]:80,[[fd0f::20]]:80
+<1>    lb3                            ae0f::10         fd0f::10,fd0f::20
+])
+
+AT_CHECK([ovn-nbctl lr-lb-del lr0 lb1])
+AT_CHECK([ovn-nbctl lr-lb-del lr0 lb3])
+AT_CHECK([ovn-nbctl lr-lb-list lr0 | uuidfilt], [0], [])
+AT_CHECK([ovn-nbctl --if-exists lr-lb-del lr0 lb1])
+
+dnl Remove all load balancers from logical router.
+AT_CHECK([ovn-nbctl lr-lb-add lr0 lb0])
+AT_CHECK([ovn-nbctl lr-lb-add lr0 lb1])
+AT_CHECK([ovn-nbctl lr-lb-add lr0 lb3])
+AT_CHECK([ovn-nbctl lr-lb-del lr0])
+AT_CHECK([ovn-nbctl lr-lb-list lr0 | uuidfilt], [0], [])
+
+AT_CHECK([ovn-nbctl add logical_router lr0 load_balancer_group $lbg])
+
+AT_CHECK([ovn-nbctl lr-lb-list lr0 | uuidfilt], [0], [dnl
+UUID                                    LB                  PROTO      VIP              IPs
+<0>    lb4                 tcp        [[ae07::10]]:80    [[fd0f::10]]:80,[[fd0f::20]]:80
+<1>    lb5                 udp        [[ae08::10]]:80    [[fd0f::10]]:80,[[fd0f::20]]:80
+<2>    lb6                            ae09::10         fd0f::10,fd0f::20
+])])
+
+dnl ---------------------------------------------------------------------
+
+OVN_NBCTL_TEST([ovn_nbctl_template_lbs], [Template LBs], [
+check ovn-nbctl --template lb-add lb0 ^vip ^backend
+check ovn-nbctl --template lb-add lb1 ^vip:^vport ^backend udp
+check ovn-nbctl --template lb-add lb2 ^vip:^vport ^backend udp ipv4
+check ovn-nbctl --template lb-add lb3 ^vip:^vport ^backend udp ipv6
+check ovn-nbctl --template lb-add lb4 ^vip:^vport ^backend:^bport udp ipv4
+check ovn-nbctl --template lb-add lb5 ^vip:^vport ^backend:^bport udp ipv6
+check ovn-nbctl --template lb-add lb6 ^vip:^vport 1.1.1.1:111 udp ipv4
+check ovn-nbctl --template lb-add lb7 ^vip:^vport [[1::1]]:111 udp ipv6
+check ovn-nbctl --template lb-add lb8 ^vip:^vport "^backend,^port,1.1.1.1:111" udp ipv4
+check ovn-nbctl --template lb-add lb9 ^vip:^vport "^backend,^port,[[1::1]]:111" udp ipv6
+
+AT_CHECK([ovn-nbctl lb-list | uuidfilt], [0], [dnl
+UUID                                    LB                  PROTO      VIP            IPs
+<0>    lb0                 tcp        ^vip           ^backend
+<1>    lb1                 udp        ^vip:^vport    ^backend
+<2>    lb2                 udp        ^vip:^vport    ^backend
+<3>    lb3                 udp        ^vip:^vport    ^backend
+<4>    lb4                 udp        ^vip:^vport    ^backend:^bport
+<5>    lb5                 udp        ^vip:^vport    ^backend:^bport
+<6>    lb6                 udp        ^vip:^vport    1.1.1.1:111
+<7>    lb7                 udp        ^vip:^vport    [[1::1]]:111
+<8>    lb8                 udp        ^vip:^vport    ^backend,^port,1.1.1.1:111
+<9>    lb9                 udp        ^vip:^vport    ^backend,^port,[[1::1]]:111
+])
+
+])
+
+dnl ---------------------------------------------------------------------
+
+OVN_NBCTL_TEST([ovn_nbctl_basic_lr], [basic logical router commands], [
+AT_CHECK([ovn-nbctl lr-add lr0])
+AT_CHECK([ovn-nbctl lr-list | uuidfilt], [0], [dnl
+<0> (lr0)
+])
+
+AT_CHECK([ovn-nbctl lr-add lr1])
+AT_CHECK([ovn-nbctl lr-list | uuidfilt], [0], [dnl
+<0> (lr0)
+<1> (lr1)
+])
+
+AT_CHECK([ovn-nbctl lr-del lr0])
+AT_CHECK([ovn-nbctl lr-list | uuidfilt], [0], [dnl
+<0> (lr1)
+])
+
+AT_CHECK([ovn-nbctl show lr0])
+AT_CHECK([ovn-nbctl lr-add lr0])
+AT_CHECK([ovn-nbctl show lr0 | uuidfilt], [0],
+  [router <0> (lr0)
+])
+AT_CHECK([ovn-nbctl lr-add lr0], [1], [],
+  [ovn-nbctl: lr0: a router with this name already exists
+])
+AT_CHECK([ovn-nbctl --may-exist lr-add lr0])
+AT_CHECK([ovn-nbctl show lr0 | uuidfilt], [0],
+  [router <0> (lr0)
+])
+AT_CHECK([ovn-nbctl --add-duplicate lr-add lr0])
+AT_CHECK([ovn-nbctl --may-exist --add-duplicate lr-add lr0], [1], [],
+  [ovn-nbctl: --may-exist and --add-duplicate may not be used together
+])
+AT_CHECK([ovn-nbctl lr-del lr0], [1], [],
+  [ovn-nbctl: Multiple logical routers named 'lr0'.  Use a UUID.
+])
+
+AT_CHECK([ovn-nbctl lr-del lr2], [1], [],
+  [ovn-nbctl: lr2: router name not found
+])
+AT_CHECK([ovn-nbctl --if-exists lr-del lr2])
+
+AT_CHECK([ovn-nbctl lr-add])
+AT_CHECK([ovn-nbctl lr-add])
+AT_CHECK([ovn-nbctl --add-duplicate lr-add], [1], [],
+  [ovn-nbctl: --add-duplicate requires specifying a name
+])
+AT_CHECK([ovn-nbctl --may-exist lr-add], [1], [],
+  [ovn-nbctl: --may-exist requires specifying a name
+])])
+
+dnl ---------------------------------------------------------------------
+
+OVN_NBCTL_TEST([ovn_nbctl_basic_lrp], [basic logical router port commands], [
+AT_CHECK([ovn-nbctl lr-add lr0])
+AT_CHECK([ovn-nbctl lrp-add lr0 lrp0 00:00:00:01:02 192.168.1.1/24], [1], [],
+  [ovn-nbctl: lrp0: invalid mac address 00:00:00:01:02
+])
+AT_CHECK([ovn-nbctl lrp-add lr0 lrp0 00:00:00:01:02:03:04 192.168.1.1/24], [1], [],
+  [ovn-nbctl: lrp0: invalid mac address 00:00:00:01:02:03:04
+])
+
+AT_CHECK([ovn-nbctl lrp-add lr0 lrp0 00:00:00:01:02:03 192.168.1.1/24])
+
+AT_CHECK([ovn-nbctl show lr0 | uuidfilt], [0], [dnl
+router <0> (lr0)
+    port lrp0
+        mac: "00:00:00:01:02:03"
+        ipv6-lla: "fe80::200:ff:fe01:203"
+        networks: [["192.168.1.1/24"]]
+])
+
+AT_CHECK([ovn-nbctl lrp-add lr0 lrp0 00:00:00:01:02:03 192.168.1.1/24], [1], [],
+  [ovn-nbctl: lrp0: a port with this name already exists
+])
+AT_CHECK([ovn-nbctl --may-exist lrp-add lr0 lrp0 00:00:00:01:02:03 192.168.1.1/24])
+AT_CHECK([ovn-nbctl lrp-list lr0 | uuidfilt], [0], [dnl
+<0> (lrp0)
+])
+
+AT_CHECK([ovn-nbctl lrp-add lr0 lrp1 00:00:00:01:02:03 192.168.1.1/24 peer=lrp1-peer])
+AT_CHECK([ovn-nbctl lrp-list lr0 | uuidfilt], [0], [dnl
+<0> (lrp0)
+<1> (lrp1)
+])
+
+AT_CHECK([ovn-nbctl lrp-add lr0 lrp2 00:00:00:01:02:03])
+AT_CHECK([ovn-nbctl lrp-list lr0 | uuidfilt], [0], [dnl
+<0> (lrp0)
+<1> (lrp1)
+<2> (lrp2)
+])
+
+AT_CHECK([ovn-nbctl lrp-del lrp2])
+AT_CHECK([ovn-nbctl lrp-list lr0 | uuidfilt], [0], [dnl
+<0> (lrp0)
+<1> (lrp1)
+])
+
+AT_CHECK([ovn-nbctl lr-add lr1])
+AT_CHECK([ovn-nbctl lrp-add lr0 lrp1 00:00:00:01:02:03 192.168.1.1/24], [1], [],
+  [ovn-nbctl: lrp1: a port with this name already exists
+])
+
+AT_CHECK([ovn-nbctl --may-exist lrp-add lr1 lrp1 00:00:00:01:02:03 192.168.1.1/24], [1], [],
+  [ovn-nbctl: lrp1: port already exists but in router lr0
+])
+
+AT_CHECK([ovn-nbctl --may-exist lrp-add lr0 lrp1 00:00:00:04:05:06 192.168.1.1/24], [1], [],
+  [ovn-nbctl: lrp1: port already exists with mac 00:00:00:01:02:03
+])
+
+AT_CHECK([ovn-nbctl --may-exist lrp-add lr0 lrp1 00:00:00:01:02:03 192.168.1.1/24], [1], [],
+  [ovn-nbctl: lrp1: port already exists with mismatching peer
+])
+
+AT_CHECK([ovn-nbctl --may-exist lrp-add lr0 lrp1 00:00:00:01:02:03 10.0.0.1/24 peer=lrp1-peer], [1], [],
+  [ovn-nbctl: lrp1: port already exists with different network
+])
+
+AT_CHECK([ovn-nbctl --may-exist lrp-add lr0 lrp1 00:00:00:01:02:03 192.168.1.1/24 peer=lrp1-peer])
+
+AT_CHECK([ovn-nbctl lrp-del lrp1])
+AT_CHECK([ovn-nbctl lrp-list lr0 | uuidfilt], [0], [dnl
+<0> (lrp0)
+])
+
+AT_CHECK([ovn-nbctl --may-exist lrp-add lr0 lrp1 00:00:00:01:02:03 192.168.1.1/24 10.0.0.1/24 peer=lrp1-peer])
+
+AT_CHECK([ovn-nbctl --may-exist lrp-add lr0 lrp1 00:00:00:01:02:03 192.168.1.1/24 172.16.0.1/24 peer=lrp1-peer], [1], [],
+  [ovn-nbctl: lrp1: port already exists with different network
+])
+
+AT_CHECK([ovn-nbctl --may-exist lrp-add lr0 lrp1 00:00:00:01:02:03 10.0.0.1/24 192.168.1.1/24 peer=lrp1-peer])])
+
+dnl ---------------------------------------------------------------------
+
+OVN_NBCTL_TEST([ovn_nbctl_lrp_gw_chassi], [logical router port gateway chassis], [
+AT_CHECK([ovn-nbctl lr-add lr0])
+AT_CHECK([ovn-nbctl lrp-add lr0 lrp0 00:00:00:01:02:03 192.168.1.1/24])
+AT_CHECK([ovn-nbctl lrp-get-gateway-chassis lrp0], [0], [])
+
+AT_CHECK([ovn-nbctl lrp-set-gateway-chassis lp0 chassis1], [1], [],
+[ovn-nbctl: lp0: port name not found
+])
+
+AT_CHECK([ovn-nbctl lrp-get-gateway-chassis lp0], [1], [],
+[ovn-nbctl: lp0: port name not found
+])
+
+AT_CHECK([ovn-nbctl lrp-del-gateway-chassis lp0 chassis1], [1], [],
+[ovn-nbctl: lp0: port name not found
+])
+
+AT_CHECK([ovn-nbctl lrp-del-gateway-chassis lrp0 chassis1], [1], [],
+[ovn-nbctl: chassis chassis1 is not added to logical port lrp0
+])
+AT_CHECK([ovn-nbctl lrp-set-gateway-chassis lrp0 chassis1])
+
+AT_CHECK([ovn-nbctl lrp-get-gateway-chassis lrp0], [0], [dnl
+lrp0-chassis1     0
+])
+AT_CHECK([ovn-nbctl lrp-set-gateway-chassis lrp0 chassis1 10])
+
+AT_CHECK([ovn-nbctl lrp-get-gateway-chassis lrp0], [0], [dnl
+lrp0-chassis1    10
+])
+
+AT_CHECK([ovn-nbctl lrp-del lrp0 -- lrp-add lr0 lrp0 00:00:00:01:02:03 192.168.1.1/24 -- lrp-set-gateway-chassis lrp0 chassis1 10])
+AT_CHECK([ovn-nbctl lrp-get-gateway-chassis lrp0], [0], [dnl
+lrp0-chassis1    10
+])
+
+AT_CHECK([ovn-nbctl lrp-set-gateway-chassis lrp0 chassis1 20])
+
+AT_CHECK([ovn-nbctl lrp-get-gateway-chassis lrp0], [0], [dnl
+lrp0-chassis1    20
+])
+AT_CHECK([ovn-nbctl lrp-set-gateway-chassis lrp0 chassis2 5])
+AT_CHECK([ovn-nbctl lrp-get-gateway-chassis lrp0], [0], [dnl
+lrp0-chassis1    20
+lrp0-chassis2     5
+])
+
+AT_CHECK([ovn-nbctl lrp-del-gateway-chassis lrp0 chassis1])
+AT_CHECK([ovn-nbctl lrp-get-gateway-chassis lrp0], [0], [dnl
+lrp0-chassis2     5
+])
+
+AT_CHECK([ovn-nbctl lrp-del-gateway-chassis lrp0 chassis2])
+AT_CHECK([ovn-nbctl lrp-get-gateway-chassis lrp0])
+
+AT_CHECK([ovn-nbctl lrp-set-gateway-chassis lrp0 chassis1 1])
+AT_CHECK([ovn-nbctl lrp-set-gateway-chassis lrp0 chassis2 10])
+AT_CHECK([ovn-nbctl lrp-set-gateway-chassis lrp0 chassis3 5])
+AT_CHECK([ovn-nbctl lrp-get-gateway-chassis lrp0], [0], [dnl
+lrp0-chassis2    10
+lrp0-chassis3     5
+lrp0-chassis1     1
+])
+gc_uuid=$(ovn-nbctl --bare --colum _uuid find gateway_chassis name='lrp0-chassis1')
+AT_CHECK([ovn-nbctl set gateway_chassis $gc_uuid name='lrp0_chassis1'])
+AT_CHECK([ovn-nbctl lrp-get-gateway-chassis lrp0], [0], [dnl
+lrp0-chassis2    10
+lrp0-chassis3     5
+lrp0_chassis1     1
+])
+AT_CHECK([ovn-nbctl lrp-set-gateway-chassis lrp0 chassis1 2])
+AT_CHECK([ovn-nbctl lrp-get-gateway-chassis lrp0], [0], [dnl
+lrp0-chassis2    10
+lrp0-chassis3     5
+lrp0_chassis1     2
+])
+])
+
+dnl ---------------------------------------------------------------------
+
+OVN_NBCTL_TEST([ovn_nbctl_redirect_type], [logical router port redirect type], [
+AT_CHECK([ovn-nbctl lr-add lr0])
+AT_CHECK([ovn-nbctl lrp-add lr0 lrp0 00:00:00:01:02:03 192.168.1.1/24])
+AT_CHECK([ovn-nbctl lrp-get-redirect-type lrp0], [0], [dnl
+overlay
+])
+AT_CHECK([ovn-nbctl lrp-set-redirect-type lp0 bridged], [1], [],
+[ovn-nbctl: lp0: port name not found
+])
+AT_CHECK([ovn-nbctl lrp-set-redirect-type lrp0 bridged], [0], [])
+AT_CHECK([ovn-nbctl lrp-get-redirect-type lrp0], [0], [dnl
+bridged
+])
+AT_CHECK([ovn-nbctl lrp-set-redirect-type lrp0 overlay], [0], [])
+AT_CHECK([ovn-nbctl lrp-get-redirect-type lrp0], [0], [dnl
+overlay
+])
+AT_CHECK([ovn-nbctl lrp-set-redirect-type lrp0 abcd], [1], [],
+[ovn-nbctl: Invalid redirect type: abcd
+])
+
+])
+
+dnl ---------------------------------------------------------------------
+
+OVN_NBCTL_TEST([ovn_nbctl_lrp_enable], [logical router port enable and disable], [
+AT_CHECK([ovn-nbctl lr-add lr0])
+AT_CHECK([ovn-nbctl lrp-add lr0 lrp0 00:00:00:01:02:03 192.168.1.1/24])
+AT_CHECK([ovn-nbctl lrp-get-enabled lrp0], [0], [enabled
+])
+
+AT_CHECK([ovn-nbctl lrp-set-enabled lrp0 disabled])
+AT_CHECK([ovn-nbctl lrp-get-enabled lrp0], [0], [disabled
+])
+
+AT_CHECK([ovn-nbctl lrp-set-enabled lrp0 enabled])
+AT_CHECK([ovn-nbctl lrp-get-enabled lrp0], [0], [enabled
+])
+
+AT_CHECK([ovn-nbctl lrp-set-enabled lrp0 xyzzy], [1], [],
+  [ovn-nbctl: xyzzy: state must be "enabled" or "disabled"
+])])
+
+dnl ---------------------------------------------------------------------
+
+OVN_NBCTL_TEST([ovn_nbctl_routes], [routes], [
+AT_CHECK([ovn-nbctl lr-add lr0])
+AT_CHECK([ovn-nbctl lrp-add lr0 lp0 f0:00:00:00:00:01 10.0.0.254/24])
+
+dnl Check IPv4 routes
+AT_CHECK([ovn-nbctl lr-route-add lr0 0.0.0.0/0 192.168.0.1])
+AT_CHECK([ovn-nbctl lr-route-add lr0 10.0.1.0/24 11.0.1.1 lp0])
+AT_CHECK([ovn-nbctl lr-route-add lr0 10.0.0.1/24 11.0.0.2])
+AT_CHECK([ovn-nbctl lr-route-add lr0 10.0.10.0/24 lp0])
+AT_CHECK([ovn-nbctl --bfd lr-route-add lr0 10.0.20.0/24 11.0.2.1 lp0])
+AT_CHECK([ovn-nbctl lr-route-add lr0 10.0.10.0/24 lp1], [1], [],
+  [ovn-nbctl: bad nexthop argument: lp1
+])
+
+dnl Add overlapping route with 10.0.0.1/24
+AT_CHECK([ovn-nbctl lr-route-add lr0 10.0.0.111/24 11.0.0.1], [1], [],
+  [ovn-nbctl: duplicate prefix: 10.0.0.0/24 (policy: dst-ip). Use option --ecmp to allow this for ECMP routing.
+])
+AT_CHECK([ovn-nbctl lr-route-add lr0 10.0.0.111a/24 11.0.0.1], [1], [],
+  [ovn-nbctl: bad prefix argument: 10.0.0.111a/24
+])
+AT_CHECK([ovn-nbctl lr-route-add lr0 10.0.0.111/24a 11.0.0.1], [1], [],
+  [ovn-nbctl: bad prefix argument: 10.0.0.111/24a
+])
+AT_CHECK([ovn-nbctl lr-route-add lr0 10.0.0.111/24 11.0.0.1a], [1], [],
+  [ovn-nbctl: bad nexthop argument: 11.0.0.1a
+])
+AT_CHECK([ovn-nbctl lr-route-add lr0 10.0.0.111/24 11.0.0.1/24], [1], [],
+  [ovn-nbctl: bad nexthop argument: 11.0.0.1/24
+])
+AT_CHECK([ovn-nbctl lr-route-add lr0 2001:0db8:1::/64 2001:0db8:0:f103::1/64], [1], [],
+  [ovn-nbctl: bad nexthop argument: 2001:0db8:0:f103::1/64
+])
+AT_CHECK([ovn-nbctl --ecmp lr-route-add lr0 20.0.0.0/24 discard], [1], [],
+  [ovn-nbctl: ecmp is not valid for discard routes.
+])
+AT_CHECK([ovn-nbctl --ecmp-symmetric-reply lr-route-add lr0 20.0.0.0/24 discard], [1], [],
+  [ovn-nbctl: ecmp is not valid for discard routes.
+])
+AT_CHECK([ovn-nbctl --bfd lr-route-add lr0 20.0.0.0/24 discard lp0], [1], [],
+  [ovn-nbctl: bfd dst_ip cannot be discard.
+])
+AT_CHECK([ovn-nbctl lr-route-add lr0 20.0.0.0/24 discard lp0], [1], [],
+  [ovn-nbctl: outport is not valid for discard routes.
+])
+
+AT_CHECK([ovn-nbctl --may-exist lr-route-add lr0 10.0.0.111/24 11.0.0.1])
+AT_CHECK([ovn-nbctl --policy=src-ip lr-route-add lr0 9.16.1.0/24 11.0.0.1])
+dnl Add a route with existed prefix but different policy (src-ip)
+AT_CHECK([ovn-nbctl --policy=src-ip lr-route-add lr0 10.0.0.0/24 11.0.0.2])
+
+AT_CHECK([ovn-nbctl lr-route-add lr0 20.0.0.0/24 discard])
+AT_CHECK([ovn-nbctl --policy=src-ip lr-route-add lr0 20.0.0.0/24 discard])
+AT_CHECK([ovn-nbctl --ecmp --policy=src-ip lr-route-add lr0 20.0.0.0/24 11.0.0.1], [1], [],
+  [ovn-nbctl: discard nexthop for the same ECMP route exists.
+])
+
+AT_CHECK([ovn-nbctl lr-route-list lr0], [0], [dnl
+IPv4 Routes
+Route Table <main>:
+              10.0.0.0/24                  11.0.0.1 dst-ip
+              10.0.1.0/24                  11.0.1.1 dst-ip lp0
+             10.0.10.0/24                           dst-ip lp0
+             10.0.20.0/24                  11.0.2.1 dst-ip lp0 bfd
+              20.0.0.0/24                   discard dst-ip
+              9.16.1.0/24                  11.0.0.1 src-ip
+              10.0.0.0/24                  11.0.0.2 src-ip
+              20.0.0.0/24                   discard src-ip
+                0.0.0.0/0               192.168.0.1 dst-ip
+])
+
+check_row_count nb:BFD 1
+AT_CHECK([ovn-nbctl lr-route-del lr0 10.0.20.0/24])
+check_row_count nb:BFD 0
+
+AT_CHECK([ovn-nbctl lrp-add lr0 lp1 f0:00:00:00:00:02 11.0.0.254/24])
+AT_CHECK([ovn-nbctl --may-exist lr-route-add lr0 10.0.0.111/24 11.0.0.1 lp1])
+AT_CHECK([ovn-nbctl lr-route-list lr0], [0], [dnl
+IPv4 Routes
+Route Table <main>:
+              10.0.0.0/24                  11.0.0.1 dst-ip lp1
+              10.0.1.0/24                  11.0.1.1 dst-ip lp0
+             10.0.10.0/24                           dst-ip lp0
+              20.0.0.0/24                   discard dst-ip
+              9.16.1.0/24                  11.0.0.1 src-ip
+              10.0.0.0/24                  11.0.0.2 src-ip
+              20.0.0.0/24                   discard src-ip
+                0.0.0.0/0               192.168.0.1 dst-ip
+])
+
+AT_CHECK([ovn-nbctl --policy=src-ip lr-route-del lr0 20.0.0.0/24])
+AT_CHECK([ovn-nbctl lr-route-del lr0 20.0.0.0/24 discard])
+
+dnl Delete non-existent prefix
+AT_CHECK([ovn-nbctl lr-route-del lr0 10.0.2.1/24], [1], [],
+  [ovn-nbctl: no matching route: policy 'any', prefix '10.0.2.0/24', nexthop 'any', output_port 'any'.
+])
+AT_CHECK([ovn-nbctl lr-route-del lr0 10.0.1.0/24 11.0.1.2], [1], [],
+  [ovn-nbctl: no matching route: policy 'any', prefix '10.0.1.0/24', nexthop '11.0.1.2', output_port 'any'.
+])
+AT_CHECK([ovn-nbctl lr-route-del lr0 10.0.1.0/24 11.0.1.1 lp1], [1], [],
+  [ovn-nbctl: no matching route: policy 'any', prefix '10.0.1.0/24', nexthop '11.0.1.1', output_port 'lp1'.
+])
+AT_CHECK([ovn-nbctl --if-exists lr-route-del lr0 10.0.2.1/24])
+
+AT_CHECK([ovn-nbctl lr-route-del lr0 10.0.1.1/24])
+AT_CHECK([ovn-nbctl --policy=src-ip lr-route-del lr0 9.16.1.0/24])
+
+AT_CHECK([ovn-nbctl lr-route-list lr0], [0], [dnl
+IPv4 Routes
+Route Table <main>:
+              10.0.0.0/24                  11.0.0.1 dst-ip lp1
+             10.0.10.0/24                           dst-ip lp0
+              10.0.0.0/24                  11.0.0.2 src-ip
+                0.0.0.0/0               192.168.0.1 dst-ip
+])
+
+dnl Delete route by explicitely specifying --policy
+AT_CHECK([ovn-nbctl --policy=dst-ip lr-route-del lr0 10.0.0.0/24])
+AT_CHECK([ovn-nbctl --policy=src-ip lr-route-del lr0 10.0.0.0/24])
+AT_CHECK([ovn-nbctl lr-route-list lr0], [0], [dnl
+IPv4 Routes
+Route Table <main>:
+             10.0.10.0/24                           dst-ip lp0
+                0.0.0.0/0               192.168.0.1 dst-ip
+])
+
+dnl Delete route without specifying --policy
+AT_CHECK([ovn-nbctl lr-route-add lr0 10.0.0.0/24 11.0.0.1])
+AT_CHECK([ovn-nbctl --policy=src-ip lr-route-add lr0 10.0.0.0/24 11.0.0.2])
+AT_CHECK([ovn-nbctl lr-route-del lr0 10.0.0.0/24])
+AT_CHECK([ovn-nbctl lr-route-list lr0], [0], [dnl
+IPv4 Routes
+Route Table <main>:
+             10.0.10.0/24                           dst-ip lp0
+                0.0.0.0/0               192.168.0.1 dst-ip
+])
+
+dnl Delete all routes for the router
+AT_CHECK([ovn-nbctl lr-route-del lr0])
+AT_CHECK([ovn-nbctl lr-route-list lr0], [0], [dnl
+])
+
+dnl Add ecmp routes
+AT_CHECK([ovn-nbctl lr-route-add lr0 10.0.0.0/24 11.0.0.1])
+AT_CHECK([ovn-nbctl --ecmp lr-route-add lr0 10.0.0.0/24 11.0.0.2])
+AT_CHECK([ovn-nbctl --ecmp lr-route-add lr0 10.0.0.0/24 11.0.0.3])
+AT_CHECK([ovn-nbctl --ecmp lr-route-add lr0 10.0.0.0/24 11.0.0.4 lp0])
+AT_CHECK([ovn-nbctl lr-route-list lr0], [0], [dnl
+IPv4 Routes
+Route Table <main>:
+              10.0.0.0/24                  11.0.0.1 dst-ip ecmp
+              10.0.0.0/24                  11.0.0.2 dst-ip ecmp
+              10.0.0.0/24                  11.0.0.3 dst-ip ecmp
+              10.0.0.0/24                  11.0.0.4 dst-ip lp0 ecmp
+])
+AT_CHECK([ovn-nbctl --ecmp lr-route-add lr0 10.0.0.0/24 11.0.0.2], [1], [],
+  [ovn-nbctl: duplicate nexthop for the same ECMP route
+])
+AT_CHECK([ovn-nbctl --may-exist --ecmp lr-route-add lr0 10.0.0.0/24 11.0.0.2])
+
+dnl Delete ecmp routes
+AT_CHECK([ovn-nbctl lr-route-del lr0 10.0.0.0/24 11.0.0.1])
+AT_CHECK([ovn-nbctl lr-route-list lr0], [0], [dnl
+IPv4 Routes
+Route Table <main>:
+              10.0.0.0/24                  11.0.0.2 dst-ip ecmp
+              10.0.0.0/24                  11.0.0.3 dst-ip ecmp
+              10.0.0.0/24                  11.0.0.4 dst-ip lp0 ecmp
+])
+AT_CHECK([ovn-nbctl lr-route-del lr0 10.0.0.0/24 11.0.0.2])
+AT_CHECK([ovn-nbctl lr-route-list lr0], [0], [dnl
+IPv4 Routes
+Route Table <main>:
+              10.0.0.0/24                  11.0.0.3 dst-ip ecmp
+              10.0.0.0/24                  11.0.0.4 dst-ip lp0 ecmp
+])
+AT_CHECK([ovn-nbctl lr-route-del lr0 10.0.0.0/24 11.0.0.4 lp0])
+AT_CHECK([ovn-nbctl lr-route-list lr0], [0], [dnl
+IPv4 Routes
+Route Table <main>:
+              10.0.0.0/24                  11.0.0.3 dst-ip
+])
+AT_CHECK([ovn-nbctl lr-route-del lr0 10.0.0.0/24 11.0.0.3])
+AT_CHECK([ovn-nbctl lr-route-list lr0], [0], [dnl
+])
+
+dnl Check IPv6 routes
+AT_CHECK([ovn-nbctl lr-route-add lr0 0:0:0:0:0:0:0:0/0 2001:0db8:0:f101::1])
+AT_CHECK([ovn-nbctl lr-route-add lr0 2001:0db8:0::/64 2001:0db8:0:f102::1 lp0])
+AT_CHECK([ovn-nbctl lr-route-add lr0 2001:0db8:1::/64 2001:0db8:0:f103::1])
+
+AT_CHECK([ovn-nbctl lr-route-list lr0], [0], [dnl
+IPv6 Routes
+Route Table <main>:
+            2001:db8::/64        2001:db8:0:f102::1 dst-ip lp0
+          2001:db8:1::/64        2001:db8:0:f103::1 dst-ip
+                     ::/0        2001:db8:0:f101::1 dst-ip
+])
+
+AT_CHECK([ovn-nbctl lr-route-del lr0 2001:0db8:0::/64])
+
+AT_CHECK([ovn-nbctl lr-route-list lr0], [0], [dnl
+IPv6 Routes
+Route Table <main>:
+          2001:db8:1::/64        2001:db8:0:f103::1 dst-ip
+                     ::/0        2001:db8:0:f101::1 dst-ip
+])
+
+AT_CHECK([ovn-nbctl lr-route-del lr0])
+AT_CHECK([ovn-nbctl lr-route-list lr0], [0], [dnl
+])
+
+dnl Check IPv4 and IPv6 routes
+AT_CHECK([ovn-nbctl lr-route-add lr0 0.0.0.0/0 192.168.0.1])
+AT_CHECK([ovn-nbctl lr-route-add lr0 10.0.1.1/24 11.0.1.1 lp0])
+AT_CHECK([ovn-nbctl lr-route-add lr0 10.0.0.1/24 11.0.0.1])
+AT_CHECK([ovn-nbctl lr-route-add lr0 0:0:0:0:0:0:0:0/0 2001:0db8:0:f101::1])
+AT_CHECK([ovn-nbctl lr-route-add lr0 2001:0db8:0::/64 2001:0db8:0:f102::1 lp0])
+AT_CHECK([ovn-nbctl --ecmp lr-route-add lr0 2001:0db8:1::/64 2001:0db8:0:f103::1])
+AT_CHECK([ovn-nbctl --ecmp lr-route-add lr0 2001:0db8:1::/64 2001:0db8:0:f103::2])
+AT_CHECK([ovn-nbctl --ecmp lr-route-add lr0 2001:0db8:1::/64 2001:0db8:0:f103::3])
+AT_CHECK([ovn-nbctl --ecmp lr-route-add lr0 2001:0db8:1::/64 2001:0db8:0:f103::4])
+AT_CHECK([ovn-nbctl lr-route-add lr0 2002:0db8:1::/64 2001:0db8:0:f103::5])
+AT_CHECK([ovn-nbctl --ecmp-symmetric-reply lr-route-add lr0 2003:0db8:1::/64 2001:0db8:0:f103::6])
+AT_CHECK([ovn-nbctl --ecmp-symmetric-reply lr-route-add lr0 2003:0db8:1::/64 2001:0db8:0:f103::6], [1], [],
+  [ovn-nbctl: duplicate nexthop for the same ECMP route
+])
+AT_CHECK([ovn-nbctl --may-exist --ecmp-symmetric-reply lr-route-add lr0 2003:0db8:1::/64 2001:0db8:0:f103::6])
+
+AT_CHECK([ovn-nbctl lr-route-list lr0], [0], [dnl
+IPv4 Routes
+Route Table <main>:
+              10.0.0.0/24                  11.0.0.1 dst-ip
+              10.0.1.0/24                  11.0.1.1 dst-ip lp0
+                0.0.0.0/0               192.168.0.1 dst-ip
+
+IPv6 Routes
+Route Table <main>:
+            2001:db8::/64        2001:db8:0:f102::1 dst-ip lp0
+          2001:db8:1::/64        2001:db8:0:f103::1 dst-ip ecmp
+          2001:db8:1::/64        2001:db8:0:f103::2 dst-ip ecmp
+          2001:db8:1::/64        2001:db8:0:f103::3 dst-ip ecmp
+          2001:db8:1::/64        2001:db8:0:f103::4 dst-ip ecmp
+          2002:db8:1::/64        2001:db8:0:f103::5 dst-ip
+          2003:db8:1::/64        2001:db8:0:f103::6 dst-ip ecmp-symmetric-reply
+                     ::/0        2001:db8:0:f101::1 dst-ip
+])
+
+AT_CHECK([ovn-nbctl lrp-add lr0 lr0-p0 00:00:01:01:02:03 192.168.10.1/24])
+bfd_uuid=$(ovn-nbctl create bfd logical_port=lr0-p0 dst_ip=100.0.0.50 status=down min_tx=250 min_rx=250 detect_mult=10)
+AT_CHECK([ovn-nbctl lr-route-add lr0 100.0.0.0/24 192.168.0.1])
+route_uuid=$(fetch_column nb:logical_router_static_route _uuid ip_prefix="100.0.0.0/24")
+AT_CHECK([ovn-nbctl set logical_router_static_route $route_uuid bfd=$bfd_uuid])
+
+check ovn-nbctl lr-route-del lr0
+AT_CHECK([ovn-nbctl lr-route-list lr0], [0], [dnl
+])
+
+dnl Check IPv4 over v6 and IPv6 over v4 routes
+AT_CHECK([ovn-nbctl lr-route-add lr0 10.0.0.1/24 2001:0db8:0:f103::10])
+AT_CHECK([ovn-nbctl lr-route-add lr0 2001:0db8:0::/64 11.0.1.10])
+
+AT_CHECK([ovn-nbctl lr-route-list lr0], [0], [dnl
+IPv4 Routes
+Route Table <main>:
+              10.0.0.0/24       2001:db8:0:f103::10 dst-ip
+
+IPv6 Routes
+Route Table <main>:
+            2001:db8::/64                 11.0.1.10 dst-ip
+])
+
+check ovn-nbctl lr-route-del lr0
+AT_CHECK([ovn-nbctl lr-route-list lr0], [0], [dnl
+])
+
+dnl Check IPv4 routes in route table
+check ovn-nbctl --route-table=rtb-1 lr-route-add lr0 0.0.0.0/0 192.168.0.1
+check ovn-nbctl --route-table=rtb-1 lr-route-add lr0 10.0.1.1/24 11.0.1.1 lp0
+check ovn-nbctl --route-table=rtb-1 lr-route-add lr0 10.0.0.1/24 11.0.0.1
+AT_CHECK([ovn-nbctl lr-route-list lr0], [0], [dnl
+IPv4 Routes
+Route Table rtb-1:
+              10.0.0.0/24                  11.0.0.1 dst-ip
+              10.0.1.0/24                  11.0.1.1 dst-ip lp0
+                0.0.0.0/0               192.168.0.1 dst-ip
+])
+
+check ovn-nbctl lr-route-del lr0
+AT_CHECK([ovn-nbctl lr-route-list lr0], [0], [dnl
+])
+
+dnl Check IPv6 routes in route table
+check ovn-nbctl --route-table=rtb-1 lr-route-add lr0 0:0:0:0:0:0:0:0/0 2001:0db8:0:f101::1
+check ovn-nbctl --route-table=rtb-1 lr-route-add lr0 2001:0db8:0::/64 2001:0db8:0:f102::1 lp0
+check ovn-nbctl --route-table=rtb-1 lr-route-add lr0 2001:0db8:1::/64 2001:0db8:0:f103::1
+
+AT_CHECK([ovn-nbctl lr-route-list lr0], [0], [dnl
+IPv6 Routes
+Route Table rtb-1:
+            2001:db8::/64        2001:db8:0:f102::1 dst-ip lp0
+          2001:db8:1::/64        2001:db8:0:f103::1 dst-ip
+                     ::/0        2001:db8:0:f101::1 dst-ip
+])
+
+dnl Check IPv4 and IPv6 routes in route table
+check ovn-nbctl --route-table=rtb-1 lr-route-add lr0 0.0.0.0/0 192.168.0.1
+check ovn-nbctl --route-table=rtb-1 lr-route-add lr0 10.0.1.1/24 11.0.1.1 lp0
+check ovn-nbctl --route-table=rtb-1 lr-route-add lr0 10.0.0.1/24 11.0.0.1
+
+AT_CHECK([ovn-nbctl lr-route-list lr0], [0], [dnl
+IPv4 Routes
+Route Table rtb-1:
+              10.0.0.0/24                  11.0.0.1 dst-ip
+              10.0.1.0/24                  11.0.1.1 dst-ip lp0
+                0.0.0.0/0               192.168.0.1 dst-ip
+
+IPv6 Routes
+Route Table rtb-1:
+            2001:db8::/64        2001:db8:0:f102::1 dst-ip lp0
+          2001:db8:1::/64        2001:db8:0:f103::1 dst-ip
+                     ::/0        2001:db8:0:f101::1 dst-ip
+])
+
+# Add routes in another route table
+check ovn-nbctl --route-table=rtb-2 lr-route-add lr0 0.0.0.0/0 192.168.0.1
+check ovn-nbctl --route-table=rtb-2 lr-route-add lr0 10.0.1.1/24 11.0.1.1 lp0
+check ovn-nbctl --route-table=rtb-2 lr-route-add lr0 10.0.0.1/24 11.0.0.1
+check ovn-nbctl --route-table=rtb-2 lr-route-add lr0 0:0:0:0:0:0:0:0/0 2001:0db8:0:f101::1
+check ovn-nbctl --route-table=rtb-2 lr-route-add lr0 2001:0db8:0::/64 2001:0db8:0:f102::1 lp0
+check ovn-nbctl --route-table=rtb-2 lr-route-add lr0 2001:0db8:1::/64 2001:0db8:0:f103::1
+
+AT_CHECK([ovn-nbctl lr-route-list lr0], [0], [dnl
+IPv4 Routes
+Route Table rtb-1:
+              10.0.0.0/24                  11.0.0.1 dst-ip
+              10.0.1.0/24                  11.0.1.1 dst-ip lp0
+                0.0.0.0/0               192.168.0.1 dst-ip
+
+Route Table rtb-2:
+              10.0.0.0/24                  11.0.0.1 dst-ip
+              10.0.1.0/24                  11.0.1.1 dst-ip lp0
+                0.0.0.0/0               192.168.0.1 dst-ip
+
+IPv6 Routes
+Route Table rtb-1:
+            2001:db8::/64        2001:db8:0:f102::1 dst-ip lp0
+          2001:db8:1::/64        2001:db8:0:f103::1 dst-ip
+                     ::/0        2001:db8:0:f101::1 dst-ip
+
+Route Table rtb-2:
+            2001:db8::/64        2001:db8:0:f102::1 dst-ip lp0
+          2001:db8:1::/64        2001:db8:0:f103::1 dst-ip
+                     ::/0        2001:db8:0:f101::1 dst-ip
+])
+
+# Add routes to <main> route table
+check ovn-nbctl lr-route-add lr0 0.0.0.0/0 192.168.0.1
+check ovn-nbctl lr-route-add lr0 10.0.1.1/24 11.0.1.1 lp0
+check ovn-nbctl lr-route-add lr0 10.0.0.1/24 11.0.0.1
+check ovn-nbctl lr-route-add lr0 0:0:0:0:0:0:0:0/0 2001:0db8:0:f101::1
+check ovn-nbctl lr-route-add lr0 2001:0db8:0::/64 2001:0db8:0:f102::1 lp0
+check check ovn-nbctl lr-route-add lr0 2001:0db8:1::/64 2001:0db8:0:f103::1
+
+AT_CHECK([ovn-nbctl lr-route-list lr0], [0], [dnl
+IPv4 Routes
+Route Table <main>:
+              10.0.0.0/24                  11.0.0.1 dst-ip
+              10.0.1.0/24                  11.0.1.1 dst-ip lp0
+                0.0.0.0/0               192.168.0.1 dst-ip
+
+Route Table rtb-1:
+              10.0.0.0/24                  11.0.0.1 dst-ip
+              10.0.1.0/24                  11.0.1.1 dst-ip lp0
+                0.0.0.0/0               192.168.0.1 dst-ip
+
+Route Table rtb-2:
+              10.0.0.0/24                  11.0.0.1 dst-ip
+              10.0.1.0/24                  11.0.1.1 dst-ip lp0
+                0.0.0.0/0               192.168.0.1 dst-ip
+
+IPv6 Routes
+Route Table <main>:
+            2001:db8::/64        2001:db8:0:f102::1 dst-ip lp0
+          2001:db8:1::/64        2001:db8:0:f103::1 dst-ip
+                     ::/0        2001:db8:0:f101::1 dst-ip
+
+Route Table rtb-1:
+            2001:db8::/64        2001:db8:0:f102::1 dst-ip lp0
+          2001:db8:1::/64        2001:db8:0:f103::1 dst-ip
+                     ::/0        2001:db8:0:f101::1 dst-ip
+
+Route Table rtb-2:
+            2001:db8::/64        2001:db8:0:f102::1 dst-ip lp0
+          2001:db8:1::/64        2001:db8:0:f103::1 dst-ip
+                     ::/0        2001:db8:0:f101::1 dst-ip
+])
+
+# delete IPv4 route from rtb-1
+check ovn-nbctl --route-table=rtb-1 lr-route-del lr0 10.0.0.0/24
+AT_CHECK([ovn-nbctl --route-table=rtb-1 lr-route-list lr0], [0], [dnl
+IPv4 Routes
+Route Table rtb-1:
+              10.0.1.0/24                  11.0.1.1 dst-ip lp0
+                0.0.0.0/0               192.168.0.1 dst-ip
+
+IPv6 Routes
+Route Table rtb-1:
+            2001:db8::/64        2001:db8:0:f102::1 dst-ip lp0
+          2001:db8:1::/64        2001:db8:0:f103::1 dst-ip
+                     ::/0        2001:db8:0:f101::1 dst-ip
+])
+
+# delete IPv6 route from rtb-2
+check ovn-nbctl --route-table=rtb-2 lr-route-del lr0 2001:db8::/64
+AT_CHECK([ovn-nbctl --route-table=rtb-2 lr-route-list lr0], [0], [dnl
+IPv4 Routes
+Route Table rtb-2:
+              10.0.0.0/24                  11.0.0.1 dst-ip
+              10.0.1.0/24                  11.0.1.1 dst-ip lp0
+                0.0.0.0/0               192.168.0.1 dst-ip
+
+IPv6 Routes
+Route Table rtb-2:
+          2001:db8:1::/64        2001:db8:0:f103::1 dst-ip
+                     ::/0        2001:db8:0:f101::1 dst-ip
+])
+
+check ovn-nbctl lr-route-del lr0
+
+# ECMP route in route table
+check ovn-nbctl --route-table=rtb1 lr-route-add lr0 0.0.0.0/0 192.168.0.1
+check ovn-nbctl --ecmp --route-table=rtb1 lr-route-add lr0 0.0.0.0/0 192.168.0.2
+
+# Negative route table case: same prefix
+AT_CHECK([ovn-nbctl --route-table=rtb1 lr-route-add lr0 0.0.0.0/0 192.168.0.1], [1], [], [dnl
+ovn-nbctl: duplicate prefix: 0.0.0.0/0 (policy: dst-ip). Use option --ecmp to allow this for ECMP routing.
+])
+
+# Negative route table case: same prefix & nexthop with ecmp
+AT_CHECK([ovn-nbctl --ecmp --route-table=rtb1 lr-route-add lr0 0.0.0.0/0 192.168.0.2], [1], [], [dnl
+ovn-nbctl: duplicate nexthop for the same ECMP route
+])
+
+# Add routes to <main> route table
+check ovn-nbctl lrp-add lr0 lrp0 00:00:00:00:00:01 1.1.1.1/24
+check ovn-nbctl lrp-set-options lrp0 route_table=rtb1
+AT_CHECK([ovn-nbctl get logical-router-port lrp0 options:route_table], [0], [dnl
+rtb1
+])
+check `ovn-nbctl show lr0 | grep lrp0 -A3 | grep route_table=rtb1`
+])
+
+dnl ---------------------------------------------------------------------
+
+OVN_NBCTL_TEST([ovn_nbctl_policies], [policies], [
+AT_CHECK([ovn-nbctl lr-add lr0])
+
+dnl Add policies with allow, drop and jump actions
+AT_CHECK([ovn-nbctl lr-policy-add lr0 100 "ip4.src == 1.1.1.0/24" drop])
+AT_CHECK([ovn-nbctl lr-policy-add lr0 100 "ip4.src == 1.1.2.0/24" allow pkt_mark=100,foo=bar])
+AT_CHECK([ovn-nbctl lr-policy-add lr0 101 "ip4.src == 2.1.1.0/24" allow])
+AT_CHECK([ovn-nbctl lr-policy-add lr0 101 "ip4.src == 2.1.2.0/24" drop])
+AT_CHECK([ovn-nbctl lr-policy-add lr0 101 "ip6.src == 2002::/64" drop])
+AT_CHECK([ovn-nbctl --bfd lr-policy-add lr0 103 "ip4.src == 1.2.3.0/24" reroute 192.168.1.1], [1], [],
+  [ovn-nbctl: out lrp not found for 192.168.1.1 nexthop
+])
+AT_CHECK([ovn-nbctl --bfd lr-policy-add lr0 103 "ip4.src == 1.2.3.0/24" drop], [1], [],
+  [ovn-nbctl: BFD is valid only with reroute action.
+])
+AT_CHECK([ovn-nbctl --chain=inbound lr-policy-add lr0 100 "ip4.src == 1.1.1.0/24" drop])
+AT_CHECK([ovn-nbctl --chain=outbound lr-policy-add lr0 100 "ip4.src == 2.1.1.0/24" jump inbound])
+
+dnl Incomplete option set.
+AT_CHECK([ovn-nbctl lr-policy-add lr0 200 "ip4.src == 1.1.4.0/24" reroute 192.168.0.10 foo], [1], [],
+  [ovn-nbctl: No value specified for the option : foo
+])
+
+AT_CHECK([ovn-nbctl lr-policy-add lr0 200 "ip4.src == 1.1.4.0/24" allow bar=], [1], [],
+  [ovn-nbctl: No value specified for the option : bar
+])
+
+AT_CHECK([ovn-nbctl --chain lr-policy-add lr0 100 "ip4.src == 1.1.1.0/24" drop], [1], [],
+  [ovn-nbctl: unknown command 'lr0'; use --help for help
+])
+
+AT_CHECK([ovn-nbctl lr-policy-add lr0 100 "ip4.src == 2.1.1.0/24" jump], [1], [],
+  [ovn-nbctl: Chain name is required when action is jump.
+])
+
+AT_CHECK([ovn-nbctl --output-port=lrp0 lr-policy-add lr0 101 "ip4.src == 3.1.1.0/24" drop], [1], [],
+  [ovn-nbctl: Specifying output-port is only allowed for reroute policies.
+])
+
+AT_CHECK([ovn-nbctl --output-port=lrp0 lr-policy-add lr0 101 "ip4.src == 3.1.1.0/24" reroute 192.168.0.10,192.168.0.11], [1], [],
+  [ovn-nbctl: output-port option is supported only for policies with a single reroute next hop
+])
+
+AT_CHECK([ovn-nbctl --output-port=lrp0 lr-policy-add lr0 101 "ip4.src == 3.1.1.0/24" reroute 192.168.0.10], [1], [],
+  [ovn-nbctl: unknown output-port: lrp0
+])
+
+check ovn-nbctl lrp-add lr0 lrp0 00:00:00:00:00:01 192.168.0.1/24
+check ovn-nbctl --output-port=lrp0 lr-policy-add lr0 101 "ip4.src == 3.1.1.0/24" reroute 192.168.0.10
+
+dnl Add duplicated policy
+AT_CHECK([ovn-nbctl lr-policy-add lr0 100 "ip4.src == 1.1.1.0/24" drop], [1], [],
+  [ovn-nbctl: Same routing policy already existed on the logical router lr0.
+])
+
+AT_CHECK([ovn-nbctl --may-exist lr-policy-add lr0 100 "ip4.src == 1.1.1.0/24" drop])
+
+dnl Add duplicated policy
+AT_CHECK([ovn-nbctl lr-policy-add lr0 103 "ip4.src == 1.1.1.0/24" deny], [1], [],
+  [ovn-nbctl: deny: action must be one of "allow", "drop", "reroute", "jump"
+])
+
+dnl Delete by priority and match string
+AT_CHECK([ovn-nbctl lr-policy-del lr0 100 "ip4.src == 1.1.1.0/24"])
+
+AT_CHECK([ovn-nbctl lr-policy-list lr0], [0], [dnl
+Routing Policies
+Chain <Default>:
+       101                              ip4.src == 2.1.1.0/24           allow
+       101                              ip4.src == 2.1.2.0/24            drop
+       101                              ip4.src == 3.1.1.0/24         reroute              192.168.0.10 lrp0
+       101                               ip6.src == 2002::/64            drop
+       100                              ip4.src == 1.1.2.0/24           allow               pkt_mark=100,foo=bar
+
+Chain inbound:
+       100                              ip4.src == 1.1.1.0/24            drop
+
+Chain outbound:
+       100                              ip4.src == 2.1.1.0/24            jump -> inbound
+])
+
+AT_CHECK([ovn-nbctl --chain inbound lr-policy-del lr0 100 "ip4.src == 1.1.1.0/24"])
+
+AT_CHECK([ovn-nbctl lr-policy-list lr0], [0], [dnl
+Routing Policies
+Chain <Default>:
+       101                              ip4.src == 2.1.1.0/24           allow
+       101                              ip4.src == 2.1.2.0/24            drop
+       101                              ip4.src == 3.1.1.0/24         reroute              192.168.0.10 lrp0
+       101                               ip6.src == 2002::/64            drop
+       100                              ip4.src == 1.1.2.0/24           allow               pkt_mark=100,foo=bar
+
+Chain outbound:
+       100                              ip4.src == 2.1.1.0/24            jump -> inbound
+])
+
+dnl Delete all policies for given priority
+AT_CHECK([ovn-nbctl lr-policy-del lr0 101])
+AT_CHECK([ovn-nbctl lr-policy-list lr0], [0], [dnl
+Routing Policies
+Chain <Default>:
+       100                              ip4.src == 1.1.2.0/24           allow               pkt_mark=100,foo=bar
+
+Chain outbound:
+       100                              ip4.src == 2.1.1.0/24            jump -> inbound
+])
+
+dnl Delete policy by specified uuid
+uuid=$(ovn-nbctl --bare --column _uuid find logical_router_policy 'chain{<=}""')
+AT_CHECK([ovn-nbctl lr-policy-del lr0 $uuid])
+AT_CHECK([ovn-nbctl lr-policy-list lr0], [0], [dnl
+Routing Policies
+
+Chain outbound:
+       100                              ip4.src == 2.1.1.0/24            jump -> inbound
+])
+
+AT_CHECK([ovn-nbctl --if-exists lr-policy-del lr0 $uuid])
+
+AT_CHECK([ovn-nbctl --chain outbound lr-policy-del lr0])
+
+AT_CHECK([ovn-nbctl lr-policy-list lr0], [0], [dnl
+])
+
+dnl Add policy with reroute action
+AT_CHECK([ovn-nbctl lr-policy-add lr0 102 "ip4.src == 3.1.2.0/24" reroute 3.3.3.3])
+
+dnl Add policy with invalid reroute ip
+AT_CHECK([ovn-nbctl lr-policy-add lr0 103 "ip4.src == 3.1.2.0/24" reroute 3.3.3.x], [1], [],
+  [ovn-nbctl: bad next hop argument: 3.3.3.x
+])
+
+dnl Add policy with reroute action
+AT_CHECK([ovn-nbctl lr-policy-add lr0 104 "ip6.src == 2001::/64" reroute 2002::5])
+
+dnl Add policy with invalid reroute ip
+AT_CHECK([ovn-nbctl lr-policy-add lr0 105 "ip6.src == 2001::/64" reroute 2002::x], [1], [],
+  [ovn-nbctl: bad next hop argument: 2002::x
+])
+
+])
+
+dnl ---------------------------------------------------------------------
+
+OVN_NBCTL_TEST([ovn_nbctl_lsp_types], [lsp types], [
+AT_CHECK([ovn-nbctl ls-add ls0])
+AT_CHECK([ovn-nbctl lsp-add ls0 lp0])
+
+dnl switchport type defaults to empty
+AT_CHECK([ovn-nbctl lsp-get-type lp0], [0], [dnl
+
+])
+
+dnl The following are the valid entries for
+dnl switchport type
+AT_CHECK([ovn-nbctl lsp-set-type lp0 l2gateway])
+AT_CHECK([ovn-nbctl lsp-get-type lp0], [0], [dnl
+l2gateway
+])
+
+AT_CHECK([ovn-nbctl lsp-set-type lp0 router])
+AT_CHECK([ovn-nbctl lsp-get-type lp0], [0], [dnl
+router
+])
+
+AT_CHECK([ovn-nbctl lsp-set-type lp0 switch])
+AT_CHECK([ovn-nbctl lsp-get-type lp0], [0], [dnl
+switch
+])
+
+AT_CHECK([ovn-nbctl lsp-set-type lp0 localnet])
+AT_CHECK([ovn-nbctl lsp-get-type lp0], [0], [dnl
+localnet
+])
+
+AT_CHECK([ovn-nbctl lsp-set-type lp0 localport])
+AT_CHECK([ovn-nbctl lsp-get-type lp0], [0], [dnl
+localport
+])
+
+AT_CHECK([ovn-nbctl lsp-set-type lp0 vtep])
+AT_CHECK([ovn-nbctl lsp-get-type lp0], [0], [dnl
+vtep
+])
+
+dnl All of these are valid southbound port types but
+dnl should be rejected for northbound logical switch
+dnl ports.
+AT_CHECK([ovn-nbctl lsp-set-type lp0 l3gateway], [1], [], [dnl
+ovn-nbctl: Logical switch port type 'l3gateway' is unrecognized. Not setting type.
+])
+AT_CHECK([ovn-nbctl lsp-set-type lp0 patch], [1], [], [dnl
+ovn-nbctl: Logical switch port type 'patch' is unrecognized. Not setting type.
+])
+AT_CHECK([ovn-nbctl lsp-set-type lp0 chassisredirect], [1], [], [dnl
+ovn-nbctl: Logical switch port type 'chassisredirect' is unrecognized. Not setting type.
+])
+
+dnl switch port type should still be "vtep" since previous
+dnl commands failed.
+AT_CHECK([ovn-nbctl lsp-get-type lp0], [0], [dnl
+vtep
+])
+
+dnl Attempt a nonsense type
+AT_CHECK([ovn-nbctl lsp-set-type lp0 eggs], [1], [], [dnl
+ovn-nbctl: Logical switch port type 'eggs' is unrecognized. Not setting type.
+])
+
+dnl Empty string should work too
+AT_CHECK([ovn-nbctl lsp-set-type lp0 ""])
+AT_CHECK([ovn-nbctl lsp-get-type lp0], [0], [
+])
+
+dnl Only the 'switch' type should accept peer.
+AT_CHECK([ovn-nbctl lsp-set-type lp0 router peer=qwe], [1], [], [dnl
+ovn-nbctl: Peer can only be set for a logical switch port with type 'switch'.
+])
+AT_CHECK([ovn-nbctl lsp-get-type lp0], [0], [
+])
+dnl Check that peer can be set.
+AT_CHECK([ovn-nbctl lsp-set-type lp0 switch peer=my-peer])
+AT_CHECK([ovn-nbctl lsp-get-type lp0], [0], [dnl
+switch
+])
+AT_CHECK([ovn-nbctl get logical-switch-port lp0 peer], [0], [dnl
+my-peer
+])])
+
+dnl ---------------------------------------------------------------------
+
+OVN_NBCTL_TEST([ovn_nbctl_connection], [connection], [
+AT_CHECK([ovn-nbctl --inactivity-probe=30000 set-connection ptcp:6641:127.0.0.1 punix:$OVS_RUNDIR/ovnnb_db.sock])
+AT_CHECK([ovn-nbctl list connection | grep inactivity_probe], [0], [dnl
+inactivity_probe    : 30000
+inactivity_probe    : 30000
+])])
+
+dnl ---------------------------------------------------------------------
+
+OVN_NBCTL_TEST([ovn_nbctl_dry_run_mode], [dry run mode], [
+dnl Check that dry run has no permanent effect.
+AT_CHECK([ovn-nbctl --dry-run ls-add ls0 -- ls-list | uuidfilt], [0], [dnl
+<0> (ls0)
+])
+AT_CHECK([ovn-nbctl ls-list | uuidfilt], [0], [dnl
+])
+
+dnl Check that dry-run mode is not sticky.
+AT_CHECK([ovn-nbctl ls-add ls0])
+AT_CHECK([ovn-nbctl ls-list | uuidfilt], [0], [dnl
+<0> (ls0)
+])])
+
+dnl ---------------------------------------------------------------------
+
+OVN_NBCTL_TEST([ovn_nbctl_oneline_output], [oneline output], [
+AT_CHECK([ovn-nbctl ls-add ls0 -- ls-add ls1])
+
+dnl Expect one line for one command.
+AT_CHECK([ovn-nbctl --oneline ls-list | uuidfilt], [0], [dnl
+<0> (ls0)\n<1> (ls1)
+])
+
+dnl Expect lines for two commands.
+AT_CHECK([ovn-nbctl --oneline ls-list -- ls-list | uuidfilt], [0], [dnl
+<0> (ls0)\n<1> (ls1)
+<0> (ls0)\n<1> (ls1)
+])])
+
+dnl ---------------------------------------------------------------------
+
+OVN_NBCTL_TEST([ovn_nbctl_error_paths], [commands parser error paths], [
+dnl FIXME: Duplicate options are allowed when passed with global options.
+dnl        For example: ovn-nbctl --if-exists --if-exists list Logical_Switch
+
+dnl Duplicate option
+AT_CHECK([ovn-nbctl -- --if-exists --if-exists list Logical_Switch], [1], [], [stderr])
+AT_CHECK([grep 'option specified multiple times' stderr], [0], [ignore])
+
+dnl Missing command
+AT_CHECK([ovn-nbctl], [1], [], [stderr])
+AT_CHECK([grep 'missing command name' stderr], [0], [ignore])
+
+AT_CHECK([ovn-nbctl --if-exists], [1], [], [stderr])
+AT_CHECK([grep 'missing command name' stderr], [0], [ignore])
+
+AT_CHECK([ovn-nbctl --], [1], [], [stderr])
+AT_CHECK([grep 'missing command name' stderr], [0], [ignore])
+
+AT_CHECK([ovn-nbctl -- --if-exists], [1], [], [stderr])
+AT_CHECK([grep 'missing command name' stderr], [0], [ignore])
+
+dnl Unknown command
+AT_CHECK([ovn-nbctl foo], [1], [], [stderr])
+AT_CHECK([grep 'unknown command' stderr], [0], [ignore])
+
+AT_CHECK([ovn-nbctl -- foo], [1], [], [stderr])
+AT_CHECK([grep 'unknown command' stderr], [0], [ignore])
+
+dnl Unknown option
+AT_CHECK([ovn-nbctl --foo list Logical_Switch], [1], [], [stderr])
+AT_CHECK([grep 'unrecognized option' stderr], [0], [ignore])
+
+AT_CHECK([ovn-nbctl -- --foo list Logical_Switch], [1], [], [stderr])
+AT_CHECK([grep 'command has no .* option' stderr], [0], [ignore])
+
+dnl Missing option argument
+AT_CHECK([ovn-nbctl --columns], [1], [], [stderr])
+AT_CHECK([grep 'option .* requires an argument' stderr], [0], [ignore])
+
+AT_CHECK([ovn-nbctl -- --columns list Logical_Switch], [1], [], [stderr])
+AT_CHECK([grep 'missing argument to .* option' stderr], [0], [ignore])
+
+dnl Unexpected option argument
+AT_CHECK([ovn-nbctl --if-exists=foo list Logical_Switch], [1], [], [stderr])
+AT_CHECK([grep -E 'option .* doesn'\''t allow an argument|option .* requires an argument' stderr], [0], [ignore])
+
+AT_CHECK([ovn-nbctl -- --if-exists=foo list Logical_Switch], [1], [], [stderr])
+AT_CHECK([grep 'option on .* does not accept an argument' stderr], [0], [ignore])
+
+dnl Not enough arguments
+AT_CHECK([ovn-nbctl list], [1], [], [stderr])
+AT_CHECK([grep 'command requires at least .* arguments' stderr], [0], [ignore])
+
+AT_CHECK([ovn-nbctl -- list], [1], [], [stderr])
+AT_CHECK([grep 'command requires at least .* arguments' stderr], [0], [ignore])
+
+dnl Too many arguments
+AT_CHECK([ovn-nbctl show foo bar], [1], [], [stderr])
+AT_CHECK([grep 'command takes at most .* arguments' stderr], [0], [ignore])
+
+AT_CHECK([ovn-nbctl -- show foo bar], [1], [], [stderr])
+AT_CHECK([grep 'command takes at most .* arguments' stderr], [0], [ignore])
+
+AT_CHECK([ovn-nbctl show foo --bar], [1], [], [stderr])
+AT_CHECK([grep 'command takes at most .* arguments' stderr], [0], [ignore])
+
+AT_CHECK([ovn-nbctl -- show foo --bar], [1], [], [stderr])
+AT_CHECK([grep 'command takes at most .* arguments' stderr], [0], [ignore])])
+
+dnl ---------------------------------------------------------------------
+
+OVN_NBCTL_TEST([ovn_nbctl_port_groups], [port groups], [
+dnl Check that port group can be looked up by name
+AT_CHECK([ovn-nbctl create Port_Group name=pg0], [0], [ignore])
+AT_CHECK([ovn-nbctl get Port_Group pg0 name], [0], [dnl
+pg0
+])])
+
+OVN_NBCTL_TEST([ovn_nbctl_extra_newlines], [extra newlines], [
+dnl This test addresses a specific issue seen when running ovn-nbctl in
+dnl daemon mode. All we have to do is ensure that each time we list database
+dnl information, there is not an extra newline at the beginning of the output.
+AT_CHECK([ovn-nbctl ls-add sw1], [0], [ignore])
+AT_CHECK([ovn-nbctl --columns=name list logical_switch sw1], [0], [dnl
+name                : sw1
+])
+AT_CHECK([ovn-nbctl --columns=name list logical_switch sw1], [0], [dnl
+name                : sw1
+])])
+
+OVN_NBCTL_TEST([ovn_nbctl_table_formatting], [table formatting], [
+dnl This test addresses a specific issue seen when running ovn-nbctl in
+dnl daemon mode. We need to ensure that table formatting options are honored
+dnl when listing database information.
+AT_CHECK([ovn-nbctl ls-add sw1], [0], [ignore])
+AT_CHECK([ovn-nbctl --bare --columns=name list logical_switch sw1], [0], [dnl
+sw1
+])])
+dnl ---------------------------------------------------------------------
+
+OVN_NBCTL_TEST([ovn_nbctl_port_group_commands], [port group commands], [
+AT_CHECK([ovn-nbctl pg-add pg1], [0], [ignore])
+AT_CHECK([ovn-nbctl --bare --columns=name list port_group pg1], [0],
+[pg1
+])
+
+AT_CHECK([ovn-nbctl pg-del pg1], [0], [ignore])
+AT_CHECK([ovn-nbctl list port_group], [0], [])
+
+AT_CHECK([ovn-nbctl ls-add sw1], [0], [ignore])
+AT_CHECK([ovn-nbctl lsp-add sw1 sw1-p1], [0], [ignore])
+SW1P1=$(ovn-nbctl --bare --columns=_uuid list logical_switch_port sw1-p1)
+AT_CHECK([ovn-nbctl lsp-add sw1 sw1-p2], [0], [ignore])
+SW1P2=$(ovn-nbctl --bare --columns=_uuid list logical_switch_port sw1-p2)
+
+AT_CHECK([ovn-nbctl pg-add pg1 sw1-p1 sw1-p2], [0], [ignore])
+AT_CHECK([ovn-nbctl --bare --columns=name list port_group pg1], [0],[dnl
+pg1
+])
+AT_CHECK([ovn-nbctl pg-get-ports pg1],[0], [dnl
+sw1-p1 sw1-p2
+])
+
+AT_CHECK([ovn-nbctl pg-set-ports pg1 sw1-p2], [0], [ignore])
+AT_CHECK_UNQUOTED([ovn-nbctl --bare --columns=ports list port_group pg1], [0], [dnl
+$SW1P2
+])
+AT_CHECK([ovn-nbctl pg-get-ports pg1],[0], [dnl
+sw1-p2
+])
+
+AT_CHECK([ovn-nbctl pg-del pg1], [0], [ignore])
+AT_CHECK([ovn-nbctl list port_group], [0], [])
+AT_CHECK([ovn-nbctl pg-get-ports pg1], [1], [],
+  [ovn-nbctl: pg1: port group name not found
+])])
+dnl ---------------------------------------------------------------------
+
+OVN_NBCTL_TEST([ovn_nbctl_fwd_groups], [fwd groups], [
+
+dnl Add fwd-group to a non-existent logical switch
+AT_CHECK([ovn-nbctl fwd-group-add fwd_grp1 ls0 10.1.1.11 00:11:22:33:44:55 lsp1 lsp2], [1], [],
+  [ovn-nbctl: ls0: switch name not found
+])
+
+AT_CHECK([ovn-nbctl ls-add ls0])
+
+dnl Add fwd-group with non-existent logical switch ports
+AT_CHECK([ovn-nbctl fwd-group-add fwd_grp1 ls0 10.1.1.11 00:11:22:33:44:55 lsp1 lsp2], [1], [],
+  [ovn-nbctl: lsp1: logical switch port does not exist
+])
+
+AT_CHECK([ovn-nbctl lsp-add ls0 lsp1])
+AT_CHECK([ovn-nbctl lsp-add ls0 lsp2])
+AT_CHECK([ovn-nbctl fwd-group-add fwd_grp1 ls0 10.1.1.11 00:11:22:33:44:55 lsp1 lsp2])
+AT_CHECK([ovn-nbctl fwd-group-list ls0], [0], [dnl
+FWD_GROUP       LS            VIP             VMAC                  CHILD_PORTS
+fwd_grp1        ls0           10.1.1.11      00:11:22:33:44:55      lsp1 lsp2
+])
+AT_CHECK([ovn-nbctl --bare --columns=name list forwarding_group], [0],
+[fwd_grp1
+])
+
+dnl Add duplicate fwd-group
+AT_CHECK([ovn-nbctl fwd-group-add fwd_grp1 ls0 10.1.1.11 00:11:22:33:44:55 lsp1 lsp2], [1], [],
+  [ovn-nbctl: fwd_grp1: a forwarding group by this name already exists
+])
+
+dnl Delete fwd-group
+AT_CHECK([ovn-nbctl fwd-group-del fwd_grp1], [0], [ignore])
+AT_CHECK([ovn-nbctl list forwarding_group], [0], [])
+
+])
+
+dnl ---------------------------------------------------------------------
+
+OVN_NBCTL_TEST([ovn_nbctl_static_mac_binding], [lr static_mac_binding], [
+
+AT_CHECK([ovn-nbctl lr-add lr0])
+AT_CHECK([ovn-nbctl lrp-add lr0 lr0-p0 00:00:01:01:02:03 192.168.10.1/24])
+AT_CHECK([ovn-nbctl lrp-add lr0 lr0-p1 00:00:02:02:03:04 192.168.11.1/24])
+
+AT_CHECK([ovn-nbctl static-mac-binding-add lr0-p0 192.168.10.10 00:00:11:22:33:44])
+AT_CHECK([ovn-nbctl static-mac-binding-add lr0-p0 192.168.10.100 00:00:22:33:44:55])
+AT_CHECK([ovn-nbctl static-mac-binding-add lr0-p0 10.0.0.10 00:00:33:44:55:66])
+AT_CHECK([ovn-nbctl static-mac-binding-add lr0-p0 172.16.0.11 00:00:44:55:66:88])
+
+AT_CHECK([ovn-nbctl static-mac-binding-add lr0-p0 foo 00:00:44:55:66:88], [1], [],
+  [ovn-nbctl: foo: Not a valid IPv4 or IPv6 address.
+])
+AT_CHECK([ovn-nbctl static-mac-binding-add lr0-p0 172.16.0.200 foo], [1], [],
+  [ovn-nbctl: invalid mac address foo.
+])
+AT_CHECK([ovn-nbctl static-mac-binding-add lr0-p0 172.16.0.11 00:00:44:55:66:77], [1], [],
+  [ovn-nbctl: lr0-p0, 172.16.0.11: a Static_MAC_Binding with this logical_port and ip already exists
+])
+
+AT_CHECK([ovn-nbctl --may-exist static-mac-binding-add lr0-p0 172.16.0.11 00:00:44:55:66:77])
+
+AT_CHECK([ovn-nbctl static-mac-binding-add lr0-p1 10.0.0.10 00:00:33:44:55:66])
+AT_CHECK([ovn-nbctl static-mac-binding-add lr0-p1 172.16.0.11 00:00:44:55:66:88])
+
+AT_CHECK([ovn-nbctl static-mac-binding-list], [0], [dnl
+LOGICAL_PORT             IP                       MAC
+lr0-p0                   10.0.0.10                00:00:33:44:55:66
+lr0-p0                   172.16.0.11              00:00:44:55:66:77
+lr0-p0                   192.168.10.10            00:00:11:22:33:44
+lr0-p0                   192.168.10.100           00:00:22:33:44:55
+lr0-p1                   10.0.0.10                00:00:33:44:55:66
+lr0-p1                   172.16.0.11              00:00:44:55:66:88
+])
+
+AT_CHECK([ovn-nbctl static-mac-binding-del lr0-p0 foo], [1], [],
+  [ovn-nbctl: foo: Not a valid IPv4 or IPv6 address.
+])
+
+AT_CHECK([ovn-nbctl static-mac-binding-del lr0-p1 10.0.0.100], [1], [],
+  [ovn-nbctl: no matching Static_MAC_Binding with port lr0-p1 and ip 10.0.0.100
+])
+
+AT_CHECK([ovn-nbctl --if-exists static-mac-binding-del lr0-p1 10.0.0.100])
+
+AT_CHECK([ovn-nbctl static-mac-binding-del lr0-p0 10.0.0.10])
+AT_CHECK([ovn-nbctl static-mac-binding-del lr0-p0 192.168.10.100])
+
+AT_CHECK([ovn-nbctl static-mac-binding-list], [0], [dnl
+LOGICAL_PORT             IP                       MAC
+lr0-p0                   172.16.0.11              00:00:44:55:66:77
+lr0-p0                   192.168.10.10            00:00:11:22:33:44
+lr0-p1                   10.0.0.10                00:00:33:44:55:66
+lr0-p1                   172.16.0.11              00:00:44:55:66:88
+])
+
+AT_CHECK([ovn-nbctl static-mac-binding-del lr0-p1 10.0.0.10])
+AT_CHECK([ovn-nbctl static-mac-binding-list], [0], [dnl
+LOGICAL_PORT             IP                       MAC
+lr0-p0                   172.16.0.11              00:00:44:55:66:77
+lr0-p0                   192.168.10.10            00:00:11:22:33:44
+lr0-p1                   172.16.0.11              00:00:44:55:66:88
+])
+
+])
+
+dnl ---------------------------------------------------------------------
+
+OVN_NBCTL_TEST([ovn_nbctl_negative], [basic negative tests], [
+AT_CHECK([ovn-nbctl --id=@ls create logical_switch name=foo -- \
+          set logical_switch foo1 name=bar],
+         [1], [], [dnl
+ovn-nbctl: no row "foo1" in table Logical_Switch
+])
+AT_CHECK([ovn-nbctl -- set logical_switch_port ln tag-request 100 -- show],
+         [1], [], [dnl
+ovn-nbctl: Logical_Switch_Port does not contain a column whose name matches "100"
+])
+])
+
+dnl ---------------------------------------------------------------------
+
+OVN_NBCTL_TEST([acl_tiers], [ACL tier operations], [
+check ovn-nbctl ls-add ls
+check ovn-nbctl --tier=3 acl-add ls from-lport 1000 "ip" drop
+check_column 3 nb:ACL tier priority=1000
+
+check ovn-nbctl --tier=3 acl-add ls from-lport 1001 "ip" drop
+check_column 3 nb:ACL tier priority=1001
+
+check ovn-nbctl --tier=2 acl-add ls from-lport 1002 "ip" drop
+check_column 2 nb:ACL tier priority=1002
+
+# Removing the tier 3 acls from ls should result in 1 ACL
+# remaining.
+check ovn-nbctl --tier=3 acl-del ls
+check_row_count nb:ACL 1
+check_column 2 nb:ACL tier priority=1002
+
+# Add two egress ACLs at tier 2.
+check ovn-nbctl --tier=2 acl-add ls to-lport 1000 "ip" drop
+check ovn-nbctl --tier=2 acl-add ls to-lport 1001 "ip" drop
+
+check_row_count nb:ACL 3 tier=2
+
+# This should remove the egress tier 2 ACLs and leave the
+# ingress tier 2 ACL
+check ovn-nbctl --tier=2 acl-del ls to-lport
+check_row_count nb:ACL 1
+check_column 2 nb:ACL tier priority=1002
+check_column from-lport nb:ACL direction priority=1002
+
+# Re-add two ingress ACLs at tier 2.
+check ovn-nbctl --tier=2 acl-add ls from-lport 1000 "ip" drop
+check ovn-nbctl --tier=2 acl-add ls from-lport 1001 "ip" drop
+
+check_row_count nb:ACL 3
+
+# Attempt to remove all tier 3 ACLs. All three ACLs are tier 2
+# so this shouldn't have any effect.
+check ovn-nbctl --tier=3 acl-del ls
+check_row_count nb:ACL 3
+
+# Attempt to remove all ingress tier 3 ACLs. All three ACLs are tier
+# 2, so this shouldn't have any effect.
+check ovn-nbctl --tier=3 acl-del ls from-lport
+check_row_count nb:ACL 3
+
+# Attempt to remove the 1000 priority ACL but specify tier 3. Since
+# all ACLs are tier 2, this should have no effect.
+check ovn-nbctl --tier=3 acl-del ls from-lport 1000 "ip"
+check_row_count nb:ACL 3
+
+# Specifying the proper tier should result in all ACLs being deleted.
+check ovn-nbctl --tier=2 acl-del ls
+check_row_count nb:ACL 0
+
+# Now let's experiment with identical ACLs at different tiers.
+check ovn-nbctl --tier=1 acl-add ls from-lport 1000 "ip" drop
+check ovn-nbctl --tier=2 acl-add ls from-lport 1000 "ip" drop
+check ovn-nbctl --tier=3 acl-add ls from-lport 1000 "ip" drop
+check_row_count nb:ACL 3
+check_row_count nb:ACL 1 tier=1
+check_row_count nb:ACL 1 tier=2
+check_row_count nb:ACL 1 tier=3
+
+# Specifying tier 1 should result in only one ACL being deleted.
+check ovn-nbctl --tier=1 acl-del ls from-lport 1000 "ip"
+check_row_count nb:ACL 2
+check_row_count nb:ACL 1 tier=2
+check_row_count nb:ACL 1 tier=3
+
+# Not specifying a tier should result in all ACLs being deleted.
+check ovn-nbctl acl-del ls from-lport 1000 "ip"
+check_row_count nb:ACL 0
+])
+
+dnl ---------------------------------------------------------------------
+
+OVN_NBCTL_TEST([acl_sampling], [ACL sampling operations], [
+check ovn-nbctl ls-add ls
+check_uuid ovn-nbctl \
+  --id=@sample1 create Sample metadata=4301 -- \
+  --sample-new=@sample1 acl-add ls from-lport 1 1 allow-related
+sample1=$(fetch_column nb:Sample _uuid metadata=4301)
+check_column "$sample1" nb:ACL sample_new priority=1
+
+check_uuid ovn-nbctl \
+  --id=@sample2 create Sample metadata=4302 -- \
+  --sample-est=@sample2 acl-add ls from-lport 2 1 allow-related
+sample2=$(fetch_column nb:Sample _uuid metadata=4302)
+check_column "$sample2" nb:ACL sample_est priority=2
+
+check_uuid ovn-nbctl \
+  --id=@sample3 create Sample metadata=4303 -- \
+  --id=@sample4 create Sample metadata=4304 -- \
+  --sample-new=@sample3 --sample-est=@sample4 acl-add ls from-lport 3 1 allow-related
+sample3=$(fetch_column nb:Sample _uuid metadata=4303)
+sample4=$(fetch_column nb:Sample _uuid metadata=4304)
+check_column "$sample3" nb:ACL sample_new priority=3
+check_column "$sample4" nb:ACL sample_est priority=3
+
+dnl Check invalid sample_new and sample_est values.
+AT_CHECK([ovn-nbctl --sample-new=foo acl-add ls from-lport 4 1 allow-related], [1], [], [dnl
+ovn-nbctl: invalid --sample-new: "foo" is not a valid UUID
+])
+
+AT_CHECK([ovn-nbctl --sample-est=bar acl-add ls from-lport 4 1 allow-related], [1], [], [dnl
+ovn-nbctl: invalid --sample-est: "bar" is not a valid UUID
+])
+
+])
+
+dnl ---------------------------------------------------------------------
+
+AT_SETUP([ovn-nbctl - daemon retry connection])
+OVN_NBCTL_TEST_START daemon
+pid=$(cat ovsdb-server.pid)
+AT_CHECK([kill $pid])
+OVS_WAIT_WHILE([kill -0 $pid 2>/dev/null])
+AT_CHECK([ovsdb-server --detach --no-chdir --pidfile --log-file --remote=punix:$OVS_RUNDIR/ovnnb_db.sock ovn-nb.db], [0], [], [stderr])
+AT_CHECK([ovn-nbctl show], [0], [ignore])
+OVN_NBCTL_TEST_STOP "/terminating with signal 15/d"
+AT_CLEANUP
+
+AT_SETUP([ovn-nbctl - daemon ssl/tls files change])
+AT_SKIP_IF([test "$HAVE_OPENSSL" = no])
+dnl Create ovn-nb database.
+AT_CHECK([ovsdb-tool create ovn-nb.db $abs_top_srcdir/ovn-nb.ovsschema])
+
+dnl Start ovsdb-server.
+
+key=testpki-hv1-privkey.pem
+cert=testpki-hv1-cert.pem
+
+key_server=$PKIDIR/testpki-test-privkey.pem
+cert_server=$PKIDIR/testpki-test-cert.pem
+cacert=$PKIDIR/testpki-cacert.pem
+
+key2=testpki-hv2-privkey.pem
+cert3=testpki-hv3-cert.pem
+
+ssl_options="--remote=pssl:0:127.0.0.1 ovn-nb.db -p $key_server -c $cert_server -C $cacert"
+AT_CHECK([ovsdb-server --detach --no-chdir --pidfile --log-file $ssl_options], [0], [], [stderr])
+on_exit "kill `cat ovsdb-server.pid`"
+PARSE_LISTENING_PORT([ovsdb-server.log], [TCP_PORT])
+
+cp $PKIDIR/$key $key
+cp $PKIDIR/$cert $cert
+
+start_daemon ovn-nbctl --pidfile=ovn-nbctl.pid --db=ssl:127.0.0.1:$TCP_PORT \
+    -p $key -c $cert -C $cacert
+
+check ovn-appctl -t ovn-nbctl run init
+
+# Overwrite with mismatched key and cert
+cp $PKIDIR/$key2 $key
+cp $PKIDIR/$cert3 $cert
+
+# Wakeup the ovn-nbctl loop
+ovn-appctl -t ovn-nbctl run show
+OVS_WAIT_UNTIL([grep mismatch ovn-nbctl.log])
+
+cp $PKIDIR/$key $key
+cp $PKIDIR/$cert $cert
+OVS_WAIT_UNTIL([ovn-appctl -t ovn-nbctl run show])
+AT_CHECK([grep -c mismatch ovn-nbctl.log], [0], [dnl
+1
+])
+
+AT_CLEANUP
+
+dnl ---------------------------------------------------------------------
+
+AT_SETUP([ovn-nbctl - ha-chassis-group-list group])
+OVN_NBCTL_TEST_START daemon
+check ovn-nbctl ha-chassis-group-add chg1
+chg1uuid=$(fetch_column nb:HA_Chassis_Group _uuid name=chg1)
+check ovn-nbctl ha-chassis-group-add chg2
+chg2uuid=$(fetch_column nb:HA_Chassis_Group _uuid name=chg2)
+check ovn-nbctl ha-chassis-group-add-chassis chg1 hv1 1
+check ovn-nbctl ha-chassis-group-add-chassis chg1 hv2 2
+check ovn-nbctl ha-chassis-group-add-chassis chg2 hv3 3
+check ovn-nbctl ha-chassis-group-add-chassis chg2 hv4 4
+AT_CHECK([ovn-nbctl ha-chassis-group-list], [0], [ignore])
+
+AT_CHECK_UNQUOTED([ovn-nbctl ha-chassis-group-list $chg1uuid | grep chg1 | awk '{print $1}'], [0], [dnl
+$chg1uuid
+])
+AT_CHECK([ovn-nbctl ha-chassis-group-list chg1 | awk '{print $2}' | grep chg], [0], [dnl
+(chg1)
+])
+AT_CHECK([ovn-nbctl ha-chassis-group-list chg1 | awk '{print $2}' | grep -A1 hv1], [0], [dnl
+(hv1)
+1
+])
+AT_CHECK([ovn-nbctl ha-chassis-group-list chg1 | awk '{print $2}' | grep -A1 hv2], [0], [dnl
+(hv2)
+2
+])
+
+AT_CHECK_UNQUOTED([ovn-nbctl ha-chassis-group-list $chg2uuid | grep chg2 | awk '{print $1}'], [0], [dnl
+$chg2uuid
+])
+AT_CHECK([ovn-nbctl ha-chassis-group-list chg2 | awk '{print $2}' | grep chg], [0], [dnl
+(chg2)
+])
+AT_CHECK([ovn-nbctl ha-chassis-group-list chg2 | awk '{print $2}' | grep -A1 hv3], [0], [dnl
+(hv3)
+3
+])
+AT_CHECK([ovn-nbctl ha-chassis-group-list chg2 | awk '{print $2}' | grep -A1 hv4], [0], [dnl
+(hv4)
+4
+])
+
+AT_CHECK([ovn-nbctl ha-chassis-group-list negative], [1], [], [dnl
+ovn-nbctl: negative: ha_chassis_group name not found
+])
+AT_CHECK([ovn-nbctl ha-chassis-group-list 11111111-1111-1111-1111-111111111111], [1], [], [dnl
+ovn-nbctl: 11111111-1111-1111-1111-111111111111: ha_chassis_group UUID not found
+])
+OVN_NBCTL_TEST_STOP "/terminating with signal 15/d"
+AT_CLEANUP
+
+dnl ---------------------------------------------------------------------
+
+OVN_NBCTL_TEST([network_function], [Network function operations], [
+AT_CHECK([ovn-nbctl ls-add ls0])
+AT_CHECK([check ovn-nbctl lsp-add ls0 svc-port0])
+AT_CHECK([check ovn-nbctl lsp-add ls0 svc-port1])
+AT_CHECK([check ovn-nbctl set logical_switch_port svc-port0 \
+    options:receive_multicast=false options:lsp_learn_fdb=false \
+    options:is-nf=true options:nf-linked-port=svc-port1])
+AT_CHECK([check ovn-nbctl set logical_switch_port svc-port1 \
+    options:receive_multicast=false options:lsp_learn_fdb=false \
+    options:is-nf=true options:nf-linked-port=svc-port0])
+
+# Create network-function.
+AT_CHECK([ovn-nbctl nf-add nf0 1 svc-port0 svc-port1])
+AT_CHECK([ovn-nbctl nf-add nf0 1 svc-port0 svc-port1], [1], [],
+  [ovn-nbctl: nf0: same name network-function already exists
+])
+AT_CHECK([ovn-nbctl --may-exist nf-add nf0 1 svc-port0 svc-port1])
+AT_CHECK([ovn-nbctl nf-list | uuidfilt], [0], [dnl
+<0> (nf0) id:1 in:svc-port0 out:svc-port1
+])
+
+# Test --may-exist overwrite behavior: update existing network function with new ports
+AT_CHECK([check ovn-nbctl lsp-add ls0 svc-port4])
+AT_CHECK([check ovn-nbctl lsp-add ls0 svc-port5])
+AT_CHECK([check ovn-nbctl set logical_switch_port svc-port4 \
+    options:receive_multicast=false options:lsp_learn_fdb=false \
+    options:is-nf=true options:nf-linked-port=svc-port5])
+AT_CHECK([check ovn-nbctl set logical_switch_port svc-port5 \
+    options:receive_multicast=false options:lsp_learn_fdb=false \
+    options:is-nf=true options:nf-linked-port=svc-port4])
+AT_CHECK([ovn-nbctl --may-exist nf-add nf0 1 svc-port4 svc-port5])
+AT_CHECK([ovn-nbctl nf-list | uuidfilt], [0], [dnl
+<0> (nf0) id:1 in:svc-port4 out:svc-port5
+])
+
+# Create two more network-functions, one with same inport and outport.
+AT_CHECK([check ovn-nbctl lsp-add ls0 svc-port2])
+AT_CHECK([check ovn-nbctl lsp-add ls0 svc-port3])
+AT_CHECK([ovn-nbctl nf-add nf1 2 svc-port2 svc-port3])
+AT_CHECK([ovn-nbctl nf-list | uuidfilt], [0], [dnl
+<0> (nf0) id:1 in:svc-port4 out:svc-port5
+<1> (nf1) id:2 in:svc-port2 out:svc-port3
+])
+
+AT_CHECK([ovn-nbctl nf-add nf2 3 svc-port2 svc-port2])
+AT_CHECK([ovn-nbctl nf-list | uuidfilt], [0], [dnl
+<0> (nf0) id:1 in:svc-port4 out:svc-port5
+<1> (nf1) id:2 in:svc-port2 out:svc-port3
+<2> (nf2) id:3 in:svc-port2 out:svc-port2
+])
+
+# Create a network-function-group.
+AT_CHECK([ovn-nbctl nfg-add nfg0 1 inline nf0])
+AT_CHECK([ovn-nbctl nfg-add nfg0 2 inline nf0], [1], [],
+  [ovn-nbctl: nfg0: a network-function-group with this name already exists
+])
+AT_CHECK([ovn-nbctl --may-exist nfg-add nfg0 1 inline nf0])
+AT_CHECK([ovn-nbctl nfg-list | uuidfilt], [0], [dnl
+<0> (nfg0)
+])
+
+# Test --may-exist overwrite behavior: update existing network function group with new config
+AT_CHECK([ovn-nbctl --may-exist nfg-add nfg0 5 inline nf1 nf2])
+AT_CHECK([ovn-nbctl nfg-list | uuidfilt], [0], [dnl
+<0> (nfg0)
+])
+# nf1 and nf2 are already in the group, so adding them should fail without --may-exist
+AT_CHECK([ovn-nbctl nfg-add-nf nfg0 nf1], [1], [],
+  [ovn-nbctl: network-function nf1 is already added to network-function-group nfg0
+])
+# Add nf0 to the group
+AT_CHECK([ovn-nbctl nfg-add-nf nfg0 nf0])
+AT_CHECK([ovn-nbctl nfg-del-nf nfg0 nf0])
+AT_CHECK([ovn-nbctl nfg-add nfg1 2 inline nf1])
+AT_CHECK([ovn-nbctl nfg-list | uuidfilt], [0], [dnl
+<0> (nfg0)
+<1> (nfg1)
+])
+
+# Access-list with network-function-group.
+AT_CHECK(ovn-nbctl lsp-add ls0 p0 -- lsp-set-addresses p0 "00:00:00:00:00:01 10.0.0.1")
+AT_CHECK(ovn-nbctl lsp-add ls0 p1 -- lsp-set-addresses p1 "00:00:00:00:00:02 10.0.0.2")
+AT_CHECK(ovn-nbctl pg-add pg0 p0 p1)
+check_uuid ovn-nbctl create Address_Set name=as0 addresses=\"10.1.1.5\"
+AT_CHECK([ovn-nbctl acl-add pg0 from-lport 100 'inport == @pg0 && ip4.dst == $as2' allow-related nfg0])
+AT_CHECK([ovn-nbctl acl-list pg0], [0], [dnl
+from-lport   100 (inport == @pg0 && ip4.dst == $as2) allow-related network-function-group=nfg0
+])
+AT_CHECK([ovn-nbctl acl-add pg0 to-lport 200 'outport == @pg0 && ip4.src == $as2' allow-related nfg1])
+AT_CHECK([ovn-nbctl acl-list pg0], [0], [dnl
+from-lport   100 (inport == @pg0 && ip4.dst == $as2) allow-related network-function-group=nfg0
+  to-lport   200 (outport == @pg0 && ip4.src == $as2) allow-related network-function-group=nfg1
+])
+AT_CHECK([ovn-nbctl acl-del pg0 to-lport 200 'outport == @pg0 && ip4.src == $as2'])
+AT_CHECK([ovn-nbctl acl-del pg0 from-lport 100 'inport == @pg0 && ip4.dst == $as2'])
+AT_CHECK([ovn-nbctl nfg-del nfg1])
+AT_CHECK([ovn-nbctl nfg-del nfg0])
+AT_CHECK([ovn-nbctl nfg-list | uuidfilt], [0], [])
+AT_CHECK([ovn-nbctl nf-del nf1])
+AT_CHECK([ovn-nbctl nf-del nf0])
+AT_CHECK([ovn-nbctl nf-list | uuidfilt], [0], [dnl
+<0> (nf2) id:3 in:svc-port2 out:svc-port2
+])
+AT_CHECK([ovn-nbctl nf-del nf2])
+AT_CHECK([ovn-nbctl nf-list | uuidfilt], [0], [])
+
+# Test ID validation and uniqueness
+AT_CHECK([check ovn-nbctl lsp-add ls0 svc-port6])
+AT_CHECK([check ovn-nbctl lsp-add ls0 svc-port7])
+# Test invalid ID (out of range)
+AT_CHECK([ovn-nbctl nf-add nf3 0 svc-port6 svc-port7], [1], [],
+  [ovn-nbctl: network-function id must be between 1 and 255
+])
+AT_CHECK([ovn-nbctl nf-add nf3 256 svc-port6 svc-port7], [1], [],
+  [ovn-nbctl: network-function id must be between 1 and 255
+])
+AT_CHECK([ovn-nbctl nf-add nf3 abc svc-port6 svc-port7], [1], [],
+  [ovn-nbctl: network-function id must be between 1 and 255
+])
+# Test valid ID
+AT_CHECK([ovn-nbctl nf-add nf3 10 svc-port6 svc-port7])
+AT_CHECK([ovn-nbctl nf-list | uuidfilt], [0], [dnl
+<0> (nf3) id:10 in:svc-port6 out:svc-port7
+])
+AT_CHECK([ovn-nbctl nf-del nf3])
+])
+
+AT_SETUP([ovn-nbctl - TLS server name indication (SNI) with --ssl-server-name])
+AT_KEYWORDS([ovn-nbctl ssl tls sni client])
+AT_SKIP_IF([test "$HAVE_OPENSSL" = no])
+
+# This test validates the --ssl-server-name option for SNI in ovn-nbctl.
+# Test 1: Connect to IP with --ssl-server-name to verify SNI override.
+# Test 2: Connect to same IP without --ssl-server-name (no SNI sent).
+
+# Create ovn-nb database
+AT_CHECK([ovsdb-tool create ovn-nb.db $abs_top_srcdir/ovn-nb.ovsschema])
+
+PKIDIR=$abs_top_builddir/tests
+AT_CAPTURE_FILE([ovsdb-server.log])
+on_exit 'kill $(cat ovsdb-server.pid)'
+
+# Start ovsdb-server with SSL and debug logging
+AT_CHECK([ovsdb-server --log-file --detach --no-chdir --pidfile \
+    --private-key=$PKIDIR/testpki-test-privkey.pem \
+    --certificate=$PKIDIR/testpki-test-cert.pem \
+    --ca-cert=$PKIDIR/testpki-cacert.pem \
+    --remote=pssl:0:127.0.0.1 \
+    -vstream_ssl:file:dbg ovn-nb.db], [0], [ignore], [ignore])
+PARSE_LISTENING_PORT([ovsdb-server.log], [SSL_PORT])
+
+# Initialize the database
+AT_CHECK([ovn-nbctl --db=ssl:127.0.0.1:$SSL_PORT \
+    --private-key=$PKIDIR/testpki-test-privkey.pem \
+    --certificate=$PKIDIR/testpki-test-cert.pem \
+    --ca-cert=$PKIDIR/testpki-cacert.pem \
+    init])
+
+# Test 1: SNI override - connect to IP but specify server name.
+# This validates that --ssl-server-name overrides connection hostname.
+AT_CHECK([ovn-nbctl -t 5 \
+    --db=ssl:127.0.0.1:$SSL_PORT \
+    --private-key=$PKIDIR/testpki-test-privkey.pem \
+    --certificate=$PKIDIR/testpki-test-cert.pem \
+    --ca-cert=$PKIDIR/testpki-cacert.pem \
+    --ssl-server-name=sni-test.example \
+    ls-add test-ls])
+
+# Verify SNI was sent with the overridden name.
+OVS_WAIT_UNTIL([grep -q \
+    "connection indicated server name sni-test.example" \
+    ovsdb-server.log])
+
+# Save current log size for Test 2.
+LOG_SIZE=$(wc -l < ovsdb-server.log)
+
+# Test 2: Default behavior without SNI override - should NOT show SNI
+# connecting to IP address (no hostname to extract).
+AT_CHECK([ovn-nbctl -t 5 \
+    --db=ssl:127.0.0.1:$SSL_PORT \
+    --private-key=$PKIDIR/testpki-test-privkey.pem \
+    --certificate=$PKIDIR/testpki-test-cert.pem \
+    --ca-cert=$PKIDIR/testpki-cacert.pem \
+    ls-del test-ls])
+
+# Stop server to ensure logs are flushed before checking.
+AT_CHECK([ovs-appctl -t ovsdb-server exit])
+OVS_WAIT_WHILE([kill -0 $(cat ovsdb-server.pid) 2>/dev/null])
+
+# Check that no new SNI messages appeared in Test 2 (connecting to IP
+# without --ssl-server-name should not generate SNI).
+AT_CHECK([tail -n +$(($LOG_SIZE + 1)) ovsdb-server.log | \
+    grep -q "connection indicated server name"], [1])
+
+AT_CLEANUP
+dnl ---------------------------------------------------------------------
+
+OVN_NBCTL_TEST([ls_add_router_port], [Add router port], [
+AT_CHECK([ovn-nbctl lsp-add-router-port ls ls-lr lr-ls], [1], [],
+  [ovn-nbctl: ls: switch name not found
+])
+
+check ovn-nbctl ls-add ls
+ovn-nbctl lsp-add-router-port ls ls-lr lr-ls
+check_row_count nb:Logical_Switch_Port 1 addresses=[[router]] options:router-port="lr-ls"
+AT_CHECK([ovn-nbctl show | uuidfilt], [0], [dnl
+switch <0> (ls)
+    port ls-lr
+        type: router
+        router-port: lr-ls
+])
+
+check ovn-nbctl lsp-del ls-lr
+
+check ovn-nbctl ls-add ls1
+check ovn-nbctl lsp-add ls1 ls-lr
+
+AT_CHECK([ovn-nbctl lsp-add-router-port ls ls-lr lr-ls], [1], [],
+  [ovn-nbctl: ls-lr: a port with this name already exists
+])
+
+AT_CHECK([ovn-nbctl --may-exist lsp-add-router-port ls ls-lr lr-ls], [1], [],
+  [ovn-nbctl: ls-lr: a port already exists but in switch ls1
+])
+
+check ovn-nbctl lsp-del ls-lr
+check ovn-nbctl lsp-add ls ls-lr -- lsp-set-options ls-lr router-port=lr-ls2
+
+AT_CHECK([ovn-nbctl --may-exist lsp-add-router-port ls ls-lr lr-ls], [1], [],
+  [ovn-nbctl: ls-lr: a port already exists but with different type ""
+])
+
+check ovn-nbctl lsp-set-type ls-lr router
+AT_CHECK([ovn-nbctl --may-exist lsp-add-router-port ls ls-lr lr-ls], [1], [],
+  [ovn-nbctl: ls-lr: a port already exists but with different router-port "lr-ls2"
+])
+
+check ovn-nbctl lsp-set-options ls-lr router-port=lr-ls
+check ovn-nbctl --may-exist lsp-add-router-port ls ls-lr lr-ls
+])
+
+dnl ---------------------------------------------------------------------
+
+OVN_NBCTL_TEST([ls_add_localnet_port], [Add localnet port], [
+AT_CHECK([ovn-nbctl lsp-add-localnet-port ls ln_port net1], [1], [],
+  [ovn-nbctl: ls: switch name not found
+])
+
+check ovn-nbctl ls-add ls
+check ovn-nbctl lsp-add-localnet-port ls ln_port net1
+check_row_count nb:Logical_Switch_Port 1 addresses=[[unknown]] options:network_name="net1"
+AT_CHECK([ovn-nbctl show | uuidfilt], [0], [dnl
+switch <0> (ls)
+    port ln_port
+        type: localnet
+        addresses: [["unknown"]]
+])
+
+check ovn-nbctl lsp-del ln_port
+
+check ovn-nbctl ls-add ls1
+check ovn-nbctl lsp-add ls1 ln_port
+
+AT_CHECK([ovn-nbctl lsp-add-localnet-port ls ln_port net1], [1], [],
+  [ovn-nbctl: ln_port: a port with this name already exists
+])
+
+AT_CHECK([ovn-nbctl --may-exist lsp-add-localnet-port ls ln_port net1], [1], [],
+  [ovn-nbctl: ln_port: a port already exists but in switch ls1
+])
+
+check ovn-nbctl lsp-del ln_port
+check ovn-nbctl lsp-add ls ln_port -- lsp-set-options ln_port network_name=net2
+
+AT_CHECK([ovn-nbctl --may-exist lsp-add-localnet-port ls ln_port net1], [1], [],
+  [ovn-nbctl: ln_port: a port already exists but with different type ""
+])
+
+check ovn-nbctl lsp-set-type ln_port localnet
+AT_CHECK([ovn-nbctl --may-exist lsp-add-localnet-port ls ln_port net1], [1], [],
+  [ovn-nbctl: ln_port: a port already exists but with different network_name "net2"
+])
+
+check ovn-nbctl lsp-set-options ln_port network_name=net1
+check ovn-nbctl --may-exist lsp-add-localnet-port ls ln_port net1
+])
+
+dnl ---------------------------------------------------------------------
+
+OVN_NBCTL_TEST([ovn_nbctl_lsp_health_check], [Logical Switch Port Health Check], [
+# Create logical switch port.
+AT_CHECK([ovn-nbctl ls-add ls0])
+AT_CHECK([ovn-nbctl lsp-add ls0 lport0])
+AT_CHECK([ovn-nbctl lsp-set-addresses lport0 "00:11:22:33:44:55 192.168.1.10" "00:11:22:33:44:56 192.168.1.11"])
+
+# Create IPV4 ICMP health check.
+AT_CHECK([ovn-nbctl lsp-hc-add lport0 icmp 192.168.0.255 192.168.1.10])
+AT_CHECK([ovn-nbctl lsp-hc-list lport0], [0], [dnl
+Logical Switch Port lport0:
+  Protocol      :  icmp
+  Source IP     :  192.168.0.255
+  Address       :  192.168.1.10
+])
+
+# Check hc attaching to logical switch port.
+hc_icmp_uuid=$(fetch_column nb:logical_switch_port_health_check _uuid src_ip="192.168.0.255")
+check_column "$hc_icmp_uuid" nb:logical_switch_port health_checks
+
+# Create IPv4 TCP health check with the specified addresses.
+AT_CHECK([ovn-nbctl lsp-hc-add lport0 tcp 10.0.0.2 80 192.168.1.10])
+AT_CHECK([ovn-nbctl lsp-hc-list lport0], [0], [dnl
+Logical Switch Port lport0:
+  Protocol      :  tcp
+  Source IP     :  10.0.0.2
+  Port          :  80
+  Address       :  192.168.1.10
+
+  Protocol      :  icmp
+  Source IP     :  192.168.0.255
+  Address       :  192.168.1.10
+])
+hc_tcp_uuid=$(fetch_column nb:logical_switch_port_health_check _uuid src_ip="10.0.0.2")
+
+# Create UDP health check with the specified addresses.
+AT_CHECK([ovn-nbctl lsp-hc-add lport0 udp 10.0.0.3 53 192.168.1.11])
+AT_CHECK([ovn-nbctl lsp-hc-list lport0], [0], [dnl
+Logical Switch Port lport0:
+  Protocol      :  tcp
+  Source IP     :  10.0.0.2
+  Port          :  80
+  Address       :  192.168.1.10
+
+  Protocol      :  udp
+  Source IP     :  10.0.0.3
+  Port          :  53
+  Address       :  192.168.1.11
+
+  Protocol      :  icmp
+  Source IP     :  192.168.0.255
+  Address       :  192.168.1.10
+])
+hc_udp_uuid=$(fetch_column nb:logical_switch_port_health_check _uuid src_ip="10.0.0.3")
+
+check_column "$hc_icmp_uuid $hc_tcp_uuid $hc_udp_uuid" nb:logical_switch_port health_checks
+
+AT_CHECK([ovn-nbctl lsp-hc-del lport0 $hc_icmp_uuid])
+# Check hcs detaching to logical switch port.
+check_column "$hc_tcp_uuid $hc_udp_uuid" nb:logical_switch_port health_checks
+
+AT_CHECK([ovn-nbctl lsp-hc-list lport0], [0], [dnl
+Logical Switch Port lport0:
+  Protocol      :  tcp
+  Source IP     :  10.0.0.2
+  Port          :  80
+  Address       :  192.168.1.10
+
+  Protocol      :  udp
+  Source IP     :  10.0.0.3
+  Port          :  53
+  Address       :  192.168.1.11
+])
+
+AT_CHECK([ovn-nbctl lsp-hc-del lport0])
+check_row_count nb:Logical_Switch_Port_Health_Check 0
+AT_CHECK([ovn-nbctl lsp-hc-list lport0], [0], [dnl])
+
+# Check invalid protocol.
+AT_CHECK([ovn-nbctl lsp-hc-add lport0 stcp 10.0.0.1 50], [1], [], [stderr])
+AT_CHECK([grep "Type must be icmp, tcp, or udp" stderr], [0], [ignore])
+
+# Check invalid source IP.
+AT_CHECK([ovn-nbctl lsp-hc-add lport0 icmp invalid_ip invalid_ip], [1], [], [stderr])
+AT_CHECK([grep "Not a valid IPv4 or IPv6 address" stderr], [0], [ignore])
+
+# Check TCP/UDP non-valid destination port.
+AT_CHECK([ovn-nbctl lsp-hc-add lport0 tcp 10.0.0.1 70000], [1], [], [stderr])
+AT_CHECK([grep "port must in range 0...65535" stderr], [0], [ignore])
+
+# Check IP address not configured on port.
+AT_CHECK([ovn-nbctl lsp-hc-add lport0 icmp 10.0.0.1 192.168.99.99], [1], [], [stderr])
+AT_CHECK([grep "Address 192.168.99.99 not configured on port" stderr], [0], [ignore])
+
+AT_CHECK([ovn-nbctl lsp-hc-del lport0])
+
+# Different source IP, same protocol, port and address - should be allowed.
+AT_CHECK([ovn-nbctl lsp-hc-add lport0 tcp 10.0.0.1 80 192.168.1.10])
+AT_CHECK([ovn-nbctl lsp-hc-add lport0 tcp 10.0.0.2 80 192.168.1.10], [0], [], [ignore])
+AT_CHECK([ovn-nbctl lsp-hc-add lport0 tcp 10.0.0.3 80 192.168.1.10], [0], [], [ignore])
+
+# Same source IP, different ports, same protocol and address - should be allowed.
+AT_CHECK([ovn-nbctl lsp-hc-add lport0 tcp 10.0.0.1 81 192.168.1.10], [0], [], [ignore])
+AT_CHECK([ovn-nbctl lsp-hc-add lport0 tcp 10.0.0.1 82 192.168.1.10], [0], [], [ignore])
+
+# Same source IP and port, different protocols, same address - should be allowed.
+AT_CHECK([ovn-nbctl lsp-hc-add lport0 udp 10.0.0.1 80 192.168.1.10], [0], [], [ignore])
+AT_CHECK([ovn-nbctl lsp-hc-add lport0 icmp 10.0.0.1 192.168.1.10], [0], [], [ignore])
+
+# Check duplication.
+AT_CHECK([ovn-nbctl lsp-hc-add lport0 tcp 10.0.0.5 90 192.168.1.10])
+AT_CHECK([ovn-nbctl lsp-hc-add lport0 tcp 10.0.0.5 90 192.168.1.10], [1], [], [stderr])
+AT_CHECK([grep "Health check with address 192.168.1.10 already exists on port lport0" stderr], [0], [ignore])
+
+# ICMP - same source IP, different addresses - should be allowed.
+AT_CHECK([ovn-nbctl lsp-hc-del lport0])
+AT_CHECK([ovn-nbctl lsp-hc-add lport0 icmp 10.0.0.9 192.168.1.10])
+AT_CHECK([ovn-nbctl lsp-hc-add lport0 icmp 10.0.0.9 192.168.1.11], [0], [], [ignore])
+
+# ICMP - different source IP, same address - should be allowed.
+AT_CHECK([ovn-nbctl lsp-hc-add lport0 icmp 10.0.0.10 192.168.1.10], [0], [], [ignore])
+
+# Check supported logical switch port type for monitoring.
+AT_CHECK([ovn-nbctl lsp-add ls0 lport1])
+AT_CHECK([ovn-nbctl lsp-set-type lport1 router])
+AT_CHECK([ovn-nbctl lsp-hc-add lport1 icmp 10.0.0.1 10.0.0.2], [1], [], [stderr])
+AT_CHECK([grep "Health check monitoring supported only for port with vif type" stderr], [0], [ignore])
+
+AT_CHECK([ovn-nbctl lsp-hc-del lport0])
+
+# Test IPv6 addresses support: icmp, tcp, udp.
+AT_CHECK([ovn-nbctl lsp-add ls0 lport3])
+AT_CHECK([ovn-nbctl lsp-set-addresses lport3 "00:11:22:33:44:57 2001:db8::1"])
+AT_CHECK([ovn-nbctl lsp-hc-add lport3 icmp 2001:db8::2 2001:db8::1])
+AT_CHECK([ovn-nbctl lsp-hc-add lport3 tcp 2001:db8::2 80 2001:db8::1])
+AT_CHECK([ovn-nbctl lsp-hc-add lport3 udp 2001:db8::2 53 2001:db8::1])
+AT_CHECK([ovn-nbctl lsp-hc-list lport3], [0], [dnl
+Logical Switch Port lport3:
+  Protocol      :  icmp
+  Source IP     :  2001:db8::2
+  Address       :  2001:db8::1
+
+  Protocol      :  tcp
+  Source IP     :  2001:db8::2
+  Port          :  80
+  Address       :  2001:db8::1
+
+  Protocol      :  udp
+  Source IP     :  2001:db8::2
+  Port          :  53
+  Address       :  2001:db8::1
+])
+
+AT_CHECK([ovn-nbctl lsp-hc-del lport3])
+
+# Duplicate IPv6 health check - should be disabled.
+AT_CHECK([ovn-nbctl lsp-hc-add lport3 icmp 2001:db8::2 2001:db8::1])
+AT_CHECK([ovn-nbctl lsp-hc-add lport3 icmp 2001:db8::2 2001:db8::1], [1], [], [stderr])
+AT_CHECK([grep "Health check with address 2001:db8::1 already exists on port lport3" stderr], [0], [ignore])
+
+# Check options printing.
+AT_CHECK([ovn-nbctl lsp-hc-add lport0 icmp 10.0.0.4 192.168.1.10 192.168.1.11])
+AT_CHECK([ovn-nbctl lsp-hc-list lport0], [0], [dnl
+Logical Switch Port lport0:
+  Protocol      :  icmp
+  Source IP     :  10.0.0.4
+  Address       :  192.168.1.10
+])
+hc_icmp_uuid=$(fetch_column nb:logical_switch_port_health_check _uuid src_ip="10.0.0.4")
+
+AT_CHECK([ovn-nbctl set logical_switch_port_health_check $hc_icmp_uuid options:interval=3])
+AT_CHECK([ovn-nbctl set logical_switch_port_health_check $hc_icmp_uuid options:timeout=30])
+AT_CHECK([ovn-nbctl set logical_switch_port_health_check $hc_icmp_uuid options:success_count=1])
+AT_CHECK([ovn-nbctl set logical_switch_port_health_check $hc_icmp_uuid options:failure_count=2])
+
+AT_CHECK([ovn-nbctl lsp-hc-list lport0], [0], [dnl
+Logical Switch Port lport0:
+  Protocol      :  icmp
+  Source IP     :  10.0.0.4
+  Address       :  192.168.1.10
+  Interval      :  3
+  Timeout       :  30
+  Success count :  1
+  Failure count :  2
+])
+
+AT_CHECK([ovn-nbctl lsp-hc-del lport0])
+AT_CHECK([ovn-nbctl lsp-hc-del lport3])
+check_row_count nb:Logical_Switch_Port_Health_Check 0
+])

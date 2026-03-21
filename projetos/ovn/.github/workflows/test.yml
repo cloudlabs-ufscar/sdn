@@ -1,0 +1,315 @@
+name: Build and Test
+
+on:
+  push:
+  pull_request:
+  schedule:
+    # Run Sunday at midnight
+    - cron: '0 0 * * 0'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  prepare-container:
+    # This job has the following matrix, x: Job trigger, y: Branch
+    # (scheduled jobs run only on main):
+    # +-------+-------------------+-------------------+
+    # |       | Push/Pull request |     Scheduled     |
+    # +-------+-------------------+-------------------+
+    # |  main |  ghcr.io - Ubuntu | ghcr.io - Fedora  |
+    # +-------+-------------------+-------------------+
+    # | !main |  Builds - Ubuntu  | xxxxxxxxxxxxxxxxx |
+    # +-------+-------------------+-------------------+
+    env:
+      DEPENDENCIES: podman
+    name: Prepare container
+    if: github.repository_owner == 'ovn-org' || github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Update APT cache
+        run: sudo apt update
+
+      - name: Install dependencies
+        run: sudo apt install -y ${{ env.DEPENDENCIES }}
+
+      - name: Fix /etc/hosts file
+        run: |
+          . .ci/linux-util.sh
+          fix_etc_hosts
+
+      - name: Disable apparmor
+        run: |
+          . .ci/linux-util.sh
+          disable_apparmor
+
+      - name: Choose image distro
+        if: github.event_name == 'push' || github.event_name == 'pull_request'
+        run: |
+          echo "IMAGE_DISTRO=ubuntu" >> $GITHUB_ENV
+
+      - name: Choose image distro
+        if: github.event_name == 'schedule'
+        run: |
+          echo "IMAGE_DISTRO=fedora" >> $GITHUB_ENV
+
+      - name: Build container
+        if: github.ref_name != 'main'
+        run: make ${{ env.IMAGE_DISTRO }}
+        working-directory: utilities/containers
+
+      - name: Download container
+        if: github.ref_name == 'main'
+        run: podman pull ghcr.io/ovn-org/ovn-tests:${{ env.IMAGE_DISTRO }}
+
+      - name: Tag image
+        run: podman tag ovn-org/ovn-tests:${{ env.IMAGE_DISTRO }} ovn-org/ovn-tests
+
+      - name: Export image
+        run: podman save -o /tmp/image.tar --format oci-archive ovn-org/ovn-tests
+
+      - name: Cache image
+        id: image_cache
+        uses: actions/cache@v5
+        with:
+          path: /tmp/image.tar
+          key: ${{ github.sha }}/${{ github.event_name }}
+
+  build-linux:
+    needs: [prepare-container]
+    env:
+      ARCH:        ${{ matrix.cfg.arch }}
+      CC:          ${{ matrix.cfg.compiler }}
+      DPDK:        ${{ matrix.cfg.dpdk }}
+      LIBS:        ${{ matrix.cfg.libs }}
+      OPTS:        ${{ matrix.cfg.opts }}
+      TESTSUITE:   ${{ matrix.cfg.testsuite }}
+      TEST_RANGE:  ${{ matrix.cfg.test_range }}
+      SANITIZERS:  ${{ matrix.cfg.sanitizers }}
+      UNSTABLE:    ${{ matrix.cfg.unstable }}
+
+    name: linux ${{ join(matrix.cfg.*, ' ') }}
+    runs-on: ubuntu-24.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        cfg:
+        - { compiler: gcc, opts: --disable-ssl }
+        - { compiler: clang, opts: --disable-ssl }
+        - { compiler: gcc, testsuite: dist-test }
+        - { compiler: gcc, testsuite: test, test_range: "-300" }
+        - { compiler: gcc, testsuite: test, test_range: "301-600" }
+        - { compiler: gcc, testsuite: test, test_range: "601-", unstable: unstable }
+        - { compiler: clang, testsuite: test, sanitizers: sanitizers, test_range: "-300" }
+        - { compiler: clang, testsuite: test, sanitizers: sanitizers, test_range: "301-600" }
+        - { compiler: clang, testsuite: test, sanitizers: sanitizers, test_range: "601-", unstable: unstable }
+        - { compiler: gcc, testsuite: test, libs: -ljemalloc, test_range: "-300" }
+        - { compiler: gcc, testsuite: test, libs: -ljemalloc, test_range: "301-600" }
+        - { compiler: gcc, testsuite: test, libs: -ljemalloc, test_range: "601-", unstable: unstable }
+        - { compiler: gcc, testsuite: system-test-dpdk, dpdk: dpdk, test_range: "-100" }
+        - { compiler: gcc, testsuite: system-test-dpdk, dpdk: dpdk, test_range: "101-200" }
+        - { compiler: gcc, testsuite: system-test-dpdk, dpdk: dpdk, test_range: "201-", unstable: unstable }
+        - { compiler: gcc, testsuite: system-test-userspace, test_range: "-100" }
+        - { compiler: gcc, testsuite: system-test-userspace, test_range: "101-200" }
+        - { compiler: gcc, testsuite: system-test-userspace, test_range: "201-", unstable: unstable }
+        - { compiler: gcc, testsuite: system-test, test_range: "-100" }
+        - { compiler: gcc, testsuite: system-test, test_range: "101-200" }
+        - { compiler: gcc, testsuite: system-test, test_range: "201-", unstable: unstable }
+        - { compiler: clang, testsuite: system-test, sanitizers: sanitizers, test_range: "-100" }
+        - { compiler: clang, testsuite: system-test, sanitizers: sanitizers, test_range: "101-200" }
+        - { compiler: clang, testsuite: system-test, sanitizers: sanitizers, test_range: "201-", unstable: unstable }
+        - { arch: x86, compiler: gcc, opts: --disable-ssl }
+
+    steps:
+    - name: system-level-dependencies
+      if: ${{ startsWith(matrix.cfg.testsuite, 'system-test') }}
+      run: |
+        sudo apt update
+        sudo apt -y install linux-modules-extra-$(uname -r)
+
+    - name: checkout
+      if: github.event_name == 'push' || github.event_name == 'pull_request'
+      uses: actions/checkout@v6
+      with:
+        submodules: recursive
+
+    # For weekly runs, don't update submodules
+    - name: checkout without submodule
+      if: github.event_name == 'schedule'
+      uses: actions/checkout@v6
+
+    # Weekly runs test using the tip of the most recent stable OVS branch
+    # instead of the submodule.
+    - name: checkout OVS
+      if: github.event_name == 'schedule'
+      uses: actions/checkout@v6
+      with:
+        repository: 'openvswitch/ovs'
+        fetch-depth: 0
+        path: 'ovs'
+
+    - name: checkout OVS most recent stable branch.
+      if: github.event_name == 'schedule'
+      run: |
+        git checkout \
+          $(git branch -a -l '*branch-*' | sed 's/remotes\/origin\///' | \
+            sort -V | tail -1)
+      working-directory: ovs
+
+    - name: Fix /etc/hosts file
+      run: |
+        . .ci/linux-util.sh
+        fix_etc_hosts
+
+    - name: Disable apparmor
+      run: |
+        . .ci/linux-util.sh
+        disable_apparmor
+
+    - name: image cache
+      id: image_cache
+      uses: actions/cache@v5
+      with:
+        path: /tmp/image.tar
+        key: ${{ github.sha }}/${{ github.event_name }}
+
+    - name: load image
+      run: |
+        sudo podman load -i /tmp/image.tar
+        podman load -i /tmp/image.tar
+        rm -rf /tmp/image.tar
+
+    - name: build
+      if: ${{ startsWith(matrix.cfg.testsuite, 'system-test') }}
+      run: sudo -E ./.ci/ci.sh --archive-logs --timeout=2h
+
+    - name: build
+      if: ${{ !startsWith(matrix.cfg.testsuite, 'system-test') }}
+      run: ./.ci/ci.sh --archive-logs --timeout=2h
+
+    - name: upload logs on failure
+      if: failure() || cancelled()
+      uses: actions/upload-artifact@v7
+      with:
+        name: logs-linux-${{ join(matrix.cfg.*, '-') }}
+        path: logs.tgz
+
+  build-osx:
+    env:
+      CC:    clang
+      OPTS:  --disable-ssl
+
+    name:    osx clang --disable-ssl
+    if: github.repository_owner == 'ovn-org' || github.event_name != 'schedule'
+    runs-on: macos-latest
+
+    strategy:
+      fail-fast: false
+
+    steps:
+    - name: checkout
+      if: github.event_name == 'push' || github.event_name == 'pull_request'
+      uses: actions/checkout@v6
+      with:
+        submodules: recursive
+    # For weekly runs, don't update submodules
+    - name: checkout without submodule
+      if: github.event_name == 'schedule'
+      uses: actions/checkout@v6
+    # Weekly runs test using the tip of the most recent stable OVS branch
+    # instead of the submodule.
+    - name: checkout OVS
+      if: github.event_name == 'schedule'
+      uses: actions/checkout@v6
+      with:
+        repository: 'openvswitch/ovs'
+        fetch-depth: 0
+        path: 'ovs'
+    - name: checkout OVS most recent stable branch.
+      if: github.event_name == 'schedule'
+      run: |
+        git checkout \
+          $(git branch -a -l '*branch-*' | sed 's/remotes\/origin\///' | \
+            sort -V | tail -1)
+      working-directory: ovs
+    - name: install dependencies
+      run:  brew install automake libtool
+    - name: update PATH
+      run:  |
+        echo "$HOME/bin"        >> $GITHUB_PATH
+        echo "$HOME/.local/bin" >> $GITHUB_PATH
+    - name: set up python
+      uses: actions/setup-python@v6
+      with:
+        python-version: '3.12'
+    - name: prepare
+      run:  ./.ci/osx-prepare.sh
+    - name: build
+      run:  ./.ci/osx-build.sh
+    - name: upload logs on failure
+      if: failure()
+      uses: actions/upload-artifact@v7
+      with:
+        name: logs-osx-clang---disable-ssl
+        path: config.log
+
+  build-linux-rpm:
+    name: linux rpm fedora
+    if: github.repository_owner == 'ovn-org' || github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    container: fedora:42
+    timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+
+    steps:
+      - name: install dependencies
+        run: dnf install -y dnf-plugins-core git rpm-build
+
+      - name: checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: install build dependencies
+        run: |
+          sed -e 's/@VERSION@/0.0.1/' rhel/ovn-fedora.spec.in \
+          > /tmp/ovn.spec
+          dnf builddep -y /tmp/ovn.spec
+
+      - name: Fix /etc/hosts file
+        run: |
+          . .ci/linux-util.sh
+          fix_etc_hosts
+
+      - name: configure OvS
+        run: ./boot.sh && ./configure
+        working-directory: ovs
+
+      - name: make dist OvS
+        run: make dist
+        working-directory: ovs
+
+      - name: configure OVN
+        run:  ./boot.sh && ./configure
+
+      - name: make dist OVN
+        run: make dist
+
+      - name: build RPM
+        run:  make rpm-fedora
+
+      - name: upload rpm packages
+        uses: actions/upload-artifact@v7
+        with:
+          name: rpm-packages
+          path: |
+            rpm/rpmbuild/SRPMS/*.rpm
+            rpm/rpmbuild/RPMS/*/*.rpm
+          retention-days: 14

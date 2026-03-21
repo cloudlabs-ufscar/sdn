@@ -1,0 +1,134 @@
+/* Copyright (c) 2021, Red Hat, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at:
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#include <config.h>
+
+#include "packets.h"
+#include "test-utils.h"
+
+#include "ovn-util.h"
+#include "util.h"
+
+static bool
+test_read_uint_value_base(struct ovs_cmdl_context *ctx, unsigned int index,
+                          const char *descr, int base, unsigned int *result)
+{
+    if (index >= ctx->argc) {
+        fprintf(stderr, "Missing %s argument\n", descr);
+        return false;
+    }
+
+    const char *arg = ctx->argv[index];
+    if (!str_to_uint(arg, base, result)) {
+        fprintf(stderr, "Invalid %s: %s\n", descr, arg);
+        return false;
+    }
+    return true;
+}
+
+bool
+test_read_uint_value(struct ovs_cmdl_context *ctx, unsigned int index,
+                     const char *descr, unsigned int *result)
+{
+    return test_read_uint_value_base(ctx, index, descr, 10, result);
+}
+
+bool
+test_read_uint_hex_value(struct ovs_cmdl_context *ctx, unsigned int index,
+                         const char *descr, unsigned int *result)
+{
+    return test_read_uint_value_base(ctx, index, descr, 16, result);
+}
+
+const char *
+test_read_value(struct ovs_cmdl_context *ctx, unsigned int index,
+                const char *descr)
+{
+    if (index >= ctx->argc) {
+        fprintf(stderr, "Missing %s argument\n", descr);
+        return NULL;
+    }
+
+    return ctx->argv[index];
+}
+
+bool
+test_read_ullong_value(struct ovs_cmdl_context *ctx, unsigned int index,
+                       const char *descr, unsigned long long int *result)
+{
+    if (index >= ctx->argc) {
+        fprintf(stderr, "Missing %s argument\n", descr);
+        return false;
+    }
+
+    const char *arg = ctx->argv[index];
+    if (!str_to_ullong(arg, 10, result)) {
+        fprintf(stderr, "Invalid %s: %s\n", descr, arg);
+        return false;
+    }
+    return true;
+}
+
+bool
+test_read_eth_addr_value(struct ovs_cmdl_context *ctx, unsigned int index,
+                         const char *descr, struct eth_addr *result)
+{
+    if (index >= ctx->argc) {
+        fprintf(stderr, "Missing %s argument\n", descr);
+        return false;
+    }
+
+    const char *arg = ctx->argv[index];
+    if (!eth_addr_from_string(arg, result)) {
+        fprintf(stderr, "Invalid %s: %s\n", descr, arg);
+        return false;
+    }
+    return true;
+}
+
+bool
+test_read_ipv6_mapped_value(struct ovs_cmdl_context *ctx, unsigned int index,
+                           const char *descr, struct in6_addr *result)
+{
+    if (index >= ctx->argc) {
+        fprintf(stderr, "Missing %s argument\n", descr);
+        return false;
+    }
+
+    const char *arg = ctx->argv[index];
+    if (!ip46_parse(arg, result)) {
+        fprintf(stderr, "Invalid %s: %s\n", descr, arg);
+        return false;
+    }
+    return true;
+}
+
+bool
+test_read_ipv6_cidr_mapped_value(struct ovs_cmdl_context *ctx,
+                                 unsigned int index, const char *descr,
+                                 struct in6_addr *result, unsigned int *plen)
+{
+    if (index >= ctx->argc) {
+        fprintf(stderr, "Missing %s argument\n", descr);
+        return false;
+    }
+
+    const char *arg = ctx->argv[index];
+    if (!ip46_parse_cidr(arg, result, plen)) {
+        fprintf(stderr, "Invalid %s: %s\n", descr, arg);
+        return false;
+    }
+    return true;
+}

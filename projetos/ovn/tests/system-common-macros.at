@@ -1,0 +1,506 @@
+# DEL_NAMESPACES(ns [, ns ... ])
+#
+# Delete namespaces from the running OS
+m4_define([DEL_NAMESPACES],
+   [m4_foreach([ns], [$@],
+               [ip netns del ns
+])
+   ]
+)
+
+# ADD_NAMESPACES(ns [, ns ... ])
+#
+# Add new namespaces, if ns exists, the old one
+# will be remove before new ones are installed.
+m4_define([ADD_NAMESPACES],
+   [m4_foreach([ns], [$@],
+               [DEL_NAMESPACES(ns)
+                AT_CHECK([ip netns add ns || return 77])
+                on_exit "DEL_NAMESPACES(ns)"
+                ip netns exec ns sysctl -w net.netfilter.nf_conntrack_helper=0
+               ])
+   ]
+)
+
+# NS_EXEC([namespace], [command])
+#
+# Execute 'command' in 'namespace'
+m4_define([NS_EXEC],
+    [ip netns exec $1 sh << NS_EXEC_HEREDOC
+$2
+NS_EXEC_HEREDOC])
+
+# NS_CHECK_EXEC([namespace], [command], other_params...)
+#
+# Wrapper for AT_CHECK that executes 'command' inside 'namespace'.
+# 'other_params' as passed as they are to AT_CHECK.
+m4_define([NS_CHECK_EXEC],
+    [ AT_CHECK([NS_EXEC([$1], [$2])], m4_shift(m4_shift($@))) ]
+)
+
+# ADD_BR([name], [vsctl-args])
+#
+# Expands into the proper ovs-vsctl commands to create a bridge with the
+# appropriate type, and allows additional arguments to be passed.
+m4_define([ADD_BR], [ovs-vsctl _ADD_BR([$1]) -- $2])
+
+# ADD_VETH([port], [namespace], [ovs-br], [ip_addr] [mac_addr], [gateway],
+#          [ip_addr_flags] [ip6_addr] [gateway6])
+#
+# Add a pair of veth ports. 'port' will be added to name space 'namespace',
+# and "ovs-'port'" will be added to ovs bridge 'ovs-br'.
+#
+# The 'port' in 'namespace' will be brought up with static IP address
+# with 'ip_addr' in CIDR notation.
+#
+# Optionally, one can specify the 'mac_addr' for 'port' and the default
+# 'gateway'.
+#
+# The existing 'port' or 'ovs-port' will be removed before new ones are added.
+#
+m4_define([ADD_VETH],
+    [ AT_CHECK([ip link add $1 type veth peer name ovs-$1])
+      on_exit "ip link del ovs-$1"
+      CONFIGURE_VETH_OFFLOADS([$1])
+      AT_CHECK([ip link set $1 netns $2])
+      AT_CHECK([ip link set dev ovs-$1 up])
+      AT_CHECK([ovs-vsctl add-port $3 ovs-$1 -- \
+                set interface ovs-$1 external-ids:iface-id="$1"])
+      NS_CHECK_EXEC([$2], [ip addr add $4 dev $1 $7])
+      NS_CHECK_EXEC([$2], [ip link set dev $1 up])
+      if test -n "$5"; then
+        NS_CHECK_EXEC([$2], [ip link set dev $1 address $5])
+      fi
+      if test -n "$6"; then
+        NS_CHECK_EXEC([$2], [ip route add $6 dev $1])
+        NS_CHECK_EXEC([$2], [ip route add default via $6])
+      fi
+      if test -n "$8"; then
+        NS_CHECK_EXEC([$2], [ip addr add $8 dev $1])
+      fi
+      if test -n "$9"; then
+        NS_CHECK_EXEC([$2], [ip route add default via $9])
+      fi
+    ]
+)
+
+# FORMAT_PING([])
+#
+# Strip variant pieces from ping output so the output can be reliably compared.
+#
+m4_define([FORMAT_PING], [grep "transmitted" | sed 's/time.*ms$/time 0ms/'])
+
+# FORMAT_CT([ip-addr])
+#
+# Strip content from the piped input which would differ from test to test
+# and limit the output to the rows containing 'ip-addr'.
+#
+m4_define([FORMAT_CT],
+    [[grep -F "dst=$1," | sed -e 's/port=[0-9]*/port=<cleared>/g' -e 's/id=[0-9]*/id=<cleared>/g' -e 's/state=[0-9_A-Z]*/state=<cleared>/g' | sort | uniq]])
+
+# DAEMONIZE([command], [pidfile])
+#
+# Run 'command' as a background process and record its pid to 'pidfile' to
+# allow cleanup on exit.
+#
+m4_define([DAEMONIZE],
+   [$1 & echo $! > $2
+    on_exit "kill \`cat $2\`"
+   ])
+
+# RETIS_CHECK_AND_RUN()
+#
+# Start retis to track all the traffic passing through OVS.
+m4_define([RETIS_CHECK_AND_RUN],
+  [if test "$OVS_TEST_WITH_RETIS" = yes && retis --version > /dev/null; then
+       on_exit 'retis sort --utc retis.data > retis.sorted'
+       DAEMONIZE([retis -p ifdump collect --utc --allow-system-changes \
+                        --ovs-track --out --print 2>retis.err 1>retis.log],
+                 [retis.pid])
+       OVS_WAIT_UNTIL([grep -q 'loaded' retis.err])
+   fi])
+
+# NETNS_DAEMONIZE([namespace], [command], [pidfile])
+#
+# Run 'command' as a background process within 'namespace' and record its pid
+# to 'pidfile' to allow cleanup on exit.
+#
+m4_define([NETNS_DAEMONIZE],
+   [ip netns exec $1 $2 & echo $! > $3
+     echo "kill \`cat $3\`" >> cleanup
+   ]
+)
+
+# OVS_START_L7([namespace], [protocol])
+#
+# Start a server serving 'protocol' within 'namespace'. The server will exit
+# when the test finishes.
+#
+m4_define([OVS_START_L7],
+   [PIDFILE=$(mktemp $2XXX.pid)
+    echo $PIDFILE > l7_pid_file
+    NETNS_DAEMONIZE([$1], [[$PYTHON $srcdir/test-l7.py $2]], [$PIDFILE])
+
+    dnl netstat doesn't print http over IPv6 as "http6"; drop the number.
+    PROTO=$(echo $2 | sed -e 's/\([[a-zA-Z]]*\).*/\1/')
+    OVS_WAIT_UNTIL([NS_EXEC([$1], [netstat -l | grep $PROTO])])
+   ]
+)
+
+# NETNS_START_TCPDUMP([namespace], [params], [name])
+#
+# Helper to properly start tcpdump and wait for the startup.
+# The tcpdump output is available in <name>.tcpdump file.
+m4_define([NETNS_START_TCPDUMP],
+    [
+     NETNS_DAEMONIZE([$1], [tcpdump -l $2 >$3.tcpdump 2>$3.stderr], [$3.pid])
+     OVS_WAIT_UNTIL([grep -q "listening" $3.stderr])
+    ]
+)
+
+# NETNS_START_DHCPD([namespace], [iface], [dhcpd.conf])
+#
+# Helper to properly start dhcpd
+m4_define([NETNS_START_DHCPD],
+    [
+        DHCP_TEST_DIR="$ovs_base/dhcp-test"
+        mkdir -p $DHCP_TEST_DIR
+
+        mv $3 $DHCP_TEST_DIR/dhcpd.conf
+
+        touch $DHCP_TEST_DIR/dhcpd.leases
+        chown root:dhcpd $DHCP_TEST_DIR $DHCP_TEST_DIR/dhcpd.leases
+        chmod 775 $DHCP_TEST_DIR
+        chmod 664 $DHCP_TEST_DIR/dhcpd.leases
+
+        NETNS_START_TCPDUMP([$1], [-nni $2], [$1])
+        NETNS_DAEMONIZE([$1], [dhcpd -6 -f -lf $DHCP_TEST_DIR/dhcpd.leases -cf $DHCP_TEST_DIR/dhcpd.conf $2 > dhcpd.log 2>&1], [dhcpd.pid])
+    ]
+)
+
+# OVS_CHECK_CT_ZERO_SNAT()
+m4_define([OVS_CHECK_CT_ZERO_SNAT],
+    [AT_SKIP_IF([! grep -q "Datapath supports ct_zero_snat" ovs-vswitchd.log])])
+
+# LOAD_MODULE([name])
+#
+# Tries to load specified kernel module and removes it after
+# if it wasn't loaded before this call.
+#
+m4_define([LOAD_MODULE],
+    [if ! lsmod | grep -q $1; then
+         on_exit 'modprobe -q -r $1'
+     fi
+     AT_CHECK([modprobe $1])
+    ]
+)
+
+# SET_EVPN_IFACE_NAMES IFNAME SWITCH [VNI]
+#
+# If IFNAME != "default" configures LS to use br-<IFNAME>, vxlan-<IFNAME> and
+# lo-<IFNAME> as EVPN host interfaces.
+# If IFNAME == "default" configures LS to use the default br-$vni, vxlan-$vni
+# and lo-$vni host interfaces.
+#
+# The host interface names are exported as environment variables BR_NAME,
+# VXLAN_NAME and LO_NAME.
+m4_define([SET_EVPN_IFACE_NAMES],
+    [
+        ifname=$1 switch=$2 vni=$3
+
+        [[ $ifname = "default" ]] && BR_NAME=br-$vni || BR_NAME=br-$ifname
+        [[ $ifname = "default" ]] && VXLAN_NAME=vxlan-$vni || VXLAN_NAME=vxlan-v4-$ifname
+        [[ $ifname = "default" ]] && VXLAN_V6_NAME=vxlan-v6-$vni || VXLAN_V6_NAME=vxlan-v6-$ifname
+        [[ $ifname = "default" ]] && LO_NAME=lo-$vni || LO_NAME=lo-$ifname
+
+        check ovn-nbctl set logical_switch $switch                 \
+            other_config:dynamic-routing-bridge-ifname=$BR_NAME    \
+            other_config:dynamic-routing-advertise-ifname=$LO_NAME \
+            other_config:dynamic-routing-vxlan-ifname=$VXLAN_NAME","$VXLAN_V6_NAME
+
+        export BR_NAME VXLAN_NAME VXLAN_V6_NAME LO_NAME
+        on_exit 'unset BR_NAME VXLAN_NAME VXLAN_V6_NAME LO_NAME'
+    ]
+)
+
+# OVN_TEST_IPV6_PREFIX_DELEGATION()
+m4_define([OVN_TEST_IPV6_PREFIX_DELEGATION],
+[
+ovn_start
+OVS_TRAFFIC_VSWITCHD_START()
+
+ADD_BR([br-int])
+ADD_BR([br-ext])
+
+ovs-vsctl set-fail-mode br-ext standalone
+# Set external-ids in br-int needed for ovn-controller
+ovs-vsctl \
+        -- set Open_vSwitch . external-ids:system-id=hv1 \
+        -- set Open_vSwitch . external-ids:ovn-remote=unix:$ovs_base/ovn-sb/ovn-sb.sock \
+        -- set Open_vSwitch . external-ids:ovn-encap-type=geneve \
+        -- set Open_vSwitch . external-ids:ovn-encap-ip=169.0.0.1 \
+        -- set bridge br-int fail-mode=secure other-config:disable-in-band=true
+
+# Start ovn-controller
+start_daemon ovn-controller
+
+ADD_NAMESPACES(sw01)
+ADD_VETH(sw01, sw01, br-int, "192.168.1.2/24", "f0:00:00:01:02:03", \
+         "192.168.1.1")
+ADD_NAMESPACES(sw11)
+ADD_VETH(sw11, sw11, br-int, "192.168.2.2/24", "f0:00:00:02:02:03", \
+         "192.168.2.1")
+ADD_NAMESPACES(server)
+ADD_VETH(s1, server, br-ext, "2001:db8:3333::2/64", "f0:00:00:01:02:05", \
+         "2001:db8:3333::1", "nodad")
+
+if test X"$1" = X"GR"; then
+   check_uuid ovn-nbctl create Logical_Router name=R1 options:chassis=hv1
+else
+   check ovn-nbctl lr-add R1
+fi
+
+check ovn-nbctl ls-add sw0
+check ovn-nbctl ls-add sw1
+check ovn-nbctl ls-add public
+
+check ovn-nbctl lrp-add R1 rp-sw0 00:00:01:01:02:03 192.168.1.1/24
+check ovn-nbctl lrp-add R1 rp-sw1 00:00:03:01:02:03 192.168.2.1/24
+check ovn-nbctl lrp-add R1 rp-public 00:00:02:01:02:03 172.16.1.1/24
+
+if test X"$1" != X"GR"; then
+    check ovn-nbctl lrp-set-gateway-chassis rp-public hv1
+fi
+
+check ovn-nbctl lsp-add sw0 sw0-rp -- set Logical_Switch_Port sw0-rp \
+    type=router options:router-port=rp-sw0 \
+    -- lsp-set-addresses sw0-rp router
+check ovn-nbctl lsp-add sw1 sw1-rp -- set Logical_Switch_Port sw1-rp \
+    type=router options:router-port=rp-sw1 \
+    -- lsp-set-addresses sw1-rp router
+
+check ovn-nbctl lsp-add public public-rp -- set Logical_Switch_Port public-rp \
+    type=router options:router-port=rp-public \
+    -- lsp-set-addresses public-rp router
+
+check ovn-nbctl lsp-add sw0 sw01 \
+    -- lsp-set-addresses sw01 "f0:00:00:01:02:03 192.168.1.2"
+
+check ovn-nbctl lsp-add sw1 sw11 \
+    -- lsp-set-addresses sw11 "f0:00:00:02:02:03 192.168.2.2"
+
+AT_CHECK([ovs-vsctl set Open_vSwitch . external-ids:ovn-bridge-mappings=phynet:br-ext])
+check ovn-nbctl lsp-add-localnet-port public public1 phynet
+
+check ovn-nbctl set logical_router_port rp-public options:prefix_delegation=true
+check ovn-nbctl set logical_router_port rp-public options:prefix=true
+check ovn-nbctl set logical_router_port rp-sw0 options:prefix=true
+
+OVN_POPULATE_ARP
+
+check ovn-nbctl --wait=hv sync
+
+cat > dhcpd.conf <<EOF
+option dhcp-rebinding-time 10;
+option dhcp-renewal-time 5;
+subnet6 2001:db8:3333::/56 {
+    prefix6 2001:db8:3333:100:: 2001:db8:3333:111:: /64;
+}
+EOF
+
+NETNS_START_DHCPD([server], [s1], [dhcpd.conf])
+
+check ovn-nbctl --wait=hv sync
+
+OVS_WAIT_WHILE([test "$(ovn-nbctl get logical_router_port rp-public ipv6_prefix | cut -c4-15)" = ""])
+OVS_WAIT_WHILE([test "$(ovn-nbctl get logical_router_port rp-sw0 ipv6_prefix | cut -c4-15)" = ""])
+
+AT_CHECK([ovn-nbctl get logical_router_port rp-public ipv6_prefix | cut -c3-15], [0], [dnl
+[2001:db8:3333]
+])
+AT_CHECK([ovn-nbctl get logical_router_port rp-sw0 ipv6_prefix | cut -c3-15], [0], [dnl
+[2001:db8:3333]
+])
+
+hex_prefix=0x20010db8
+ovn-nbctl list logical_router_port rp-public > /tmp/rp-public
+
+# Wait for 2 renew on each port.
+NETNS_START_TCPDUMP([server], [-c 4 -nni s1 ip6[[48:1]]=0x05 and ip6[[113:4]]=${hex_prefix}], [renew])
+# Reply message with Status OK
+NETNS_START_TCPDUMP([server], [-c 4 -nni s1 ip6[[48:1]]=0x07 and ip6[[81:4]]=${hex_prefix}], [reply])
+
+OVS_WAIT_UNTIL([
+    total_pkts=$(cat renew.tcpdump | wc -l)
+    test "${total_pkts}" = "4"
+])
+
+OVS_WAIT_UNTIL([
+    total_pkts=$(cat reply.tcpdump | wc -l)
+    test "${total_pkts}" = "4"
+])
+
+check ovn-nbctl set logical_router_port rp-public options:prefix=false
+check ovn-nbctl set logical_router_port rp-sw0 options:prefix=false
+check ovn-nbctl --wait=hv set logical_router_port rp-sw1 options:prefix=true
+sleep_sb
+NETNS_START_TCPDUMP([server], [-c 2 -nni s1 ip6[[48:1]]=0x05 and ip6[[113:4]]=${hex_prefix}], [renew2])
+
+# Sleep enough to have solicit and renew being sent, then wait for 2 renew.
+# The reply to the request will usually be received as sb is sleeping.
+# Hence, the reply to the first renew will be received when sb is ro.
+sleep 10
+wake_up_sb
+OVS_WAIT_UNTIL([
+    total_pkts=$(cat renew2.tcpdump | wc -l)
+    test "${total_pkts}" = "2"
+])
+
+check ovn-nbctl set logical_router_port rp-sw0 options:prefix=false
+check ovn-nbctl clear logical_router_port rp-sw0 ipv6_prefix
+OVS_WAIT_WHILE([test "$(ovn-nbctl get logical_router_port rp-sw0 ipv6_prefix | cut -c3-15)" = "[2001:db8:3333]"])
+AT_CHECK([ovn-nbctl get logical_router_port rp-sw0 ipv6_prefix | cut -c3-15], [0], [dnl
+[]
+])
+
+OVS_APP_EXIT_AND_WAIT([ovn-controller])
+
+OVN_CLEANUP_NORTHD
+
+as
+OVS_TRAFFIC_VSWITCHD_STOP(["/.*error receiving.*/d
+/failed to query port patch-.*/d
+/.*terminating with signal 15.*/d"])
+]))
+
+# CHECK_VRF()
+#
+# Perform a requirements check for running VRF tests.
+#
+m4_define([CHECK_VRF],
+[
+    rc=0
+    modprobe vrf || rc=$?
+    AT_SKIP_IF([test $rc -ne 0])
+    on_exit 'modprobe -r vrf'
+])
+
+# VRF_RESERVE([id])
+#
+# Helper to ensure we actually support vrfs and the vrf in question has no
+# route entries in it and is not existing.
+# We need to add it before deleting as routes can actually survive in a
+# deleted vrf.
+m4_define([VRF_RESERVE],
+    [
+     CHECK_VRF()
+     ip link add "ovnvrf$1" type vrf table "$1"
+     ip route flush vrf "ovnvrf$1"
+     ip link del "ovnvrf$1"
+    ]
+)
+
+# OVN_ROUTE_EQUAL([vrf], [string to compare])
+#
+# Will dump all v4 routes in the mentioned vrf. Trailing spaces will be removed
+# and "proto 84" is converted to "proto ovn" for compatibility.
+m4_define([OVN_ROUTE_EQUAL],
+  [OVS_WAIT_UNTIL_EQUAL([ip route list vrf $1 | sed -e 's|[[[[:space:]]]]*$||g' -e 's|proto 84|proto ovn|'], [$2])
+])
+
+# OVN_ROUTE_V6_EQUAL([vrf], [string to compare])
+#
+# Will dump all v6 routes in the mentioned vrf. Trailing spaces will be removed
+# and "proto 84" is converted to "proto ovn" for compatibility.
+m4_define([OVN_ROUTE_V6_EQUAL],
+  [OVS_WAIT_UNTIL_EQUAL([ip -6 route list vrf $1 | \
+    grep -v anycast | grep -v multicast | \
+    sed -e 's|[[[[:space:]]]]*$||g' -e 's|proto 84|proto ovn|'], [$2])
+])
+
+# OVN_NEIGH_EQUAL([interface], [options], [match], [string to compare])
+#
+# Will dump all matching v4 neighbors on the mentioned interface. Trailing
+# spaces will be removed.
+m4_define([OVN_NEIGH_EQUAL],
+  [OVS_WAIT_UNTIL_EQUAL([ip neigh show dev $1 $2 | sed -e 's|[[[[:space:]]]]*$||g' | grep $3 | sort], [$4])
+])
+
+# OVN_NEIGH_V6_EQUAL([interface], [options], [match], [string to compare])
+#
+# Will dump all matching v6 neighbors on the mentioned interface. Trailing
+# spaces will be removed.
+m4_define([OVN_NEIGH_V6_EQUAL],
+  [OVS_WAIT_UNTIL_EQUAL([ip -6 neigh show dev $1 $2 | sed -e 's|[[[[:space:]]]]*$||g' | grep $3 | sort], [$4])
+])
+
+# NS_CHECK_CONNECTIVITY__([NS_SRC], [NS_DST], [IP_ADDR], [SET_IF_V6])
+#
+# Ensures that network namespace NS_SRC can reach NS_DST on IP_ADDR. The check performs:
+#   * Ping
+#   * Exchange of multiple messages over TCP
+#   * Exchange of multiple messages over UDP
+#
+# If SET_IF_V6 argument is provided with any value, the IP_ADDR is treated as IPv6 address.
+m4_define([NS_CHECK_CONNECTIVITY__],
+[
+    ns_src="$1"
+    ns_dst="$2"
+    ip="$3"
+    is_v6="$4"
+
+    proto="-4"
+    if test -n "$is_v6"; then
+        proto="-6"
+    fi
+    # Start a simple TCP and UDP echo server that replies with "ack <received_msg>".
+    NETNS_DAEMONIZE($ns_dst, [nc $proto -l -p 1235 -d 0.1 -c '/bin/cat'], [nc-$ns_dst-$ip-tcp.pid])
+    NETNS_DAEMONIZE($ns_dst, [nc $proto -l -u -p 1234 -d 0.1 -c '/bin/cat'], [nc-$ns_dst-$ip-udp.pid])
+
+    # Ensure that the destination NS can be pinged on the specified IP
+    NS_CHECK_EXEC([$ns_src], [ping $proto -q -c 3 -i 0.3 -w 2 $ip | FORMAT_PING], \
+    [0], [dnl
+3 packets transmitted, 3 received, 0% packet loss, time 0ms
+])
+
+    # Exchange multiple messages over TCP and UDP to verify connectivity
+    # Note(mkalcok): Server replies are printed to file, because STDOUT is captured by the nc.
+    :> ./tcp_data
+    :> ./udp_data
+
+    NETNS_DAEMONIZE($ns_src, [nc $proto $ip 1235 -d 0.1 -c 'for i in $(seq 1 3); do echo "tcp_data $i"; read msg; echo "$msg" >>./tcp_data; done'], [nc_$ns_src-$ip-tcp.pid])
+    NETNS_DAEMONIZE($ns_src, [nc $proto -u $ip 1234 -d 0.1 -c 'for i in $(seq 1 3); do echo "udp_data $i"; read msg; echo "$msg" >>./udp_data; done'], [nc_$ns_src-$ip-udp.pid])
+
+    OVS_WAIT_FOR_OUTPUT([cat ./tcp_data],  [0], [dnl
+tcp_data 1
+tcp_data 2
+tcp_data 3
+])
+    OVS_WAIT_FOR_OUTPUT([cat ./udp_data], [0], [dnl
+udp_data 1
+udp_data 2
+udp_data 3
+])
+
+    # cleanup echo processes
+    kill $(cat nc-$ns_dst-$ip-tcp.pid)
+    kill $(cat nc-$ns_dst-$ip-udp.pid)
+    kill $(cat nc_$ns_src-$ip-tcp.pid)
+    kill $(cat nc_$ns_src-$ip-udp.pid)
+])
+
+# NS_CHECK_CONNECTIVITY([NS_SRC], [NS_DST], [IPV4_ADDR])
+#
+# IPv4 version of NS_CHECK_CONNECTIVITY__.
+m4_define([NS_CHECK_CONNECTIVITY],
+[
+    NS_CHECK_CONNECTIVITY__([$1], [$2], [$3])
+])
+
+# NS_CHECK_CONNECTIVITY_V6([NS_SRC], [NS_DST], [IPV6_ADDR])
+#
+# IPv6 version of NS_CHECK_CONNECTIVITY__.
+m4_define([NS_CHECK_CONNECTIVITY_V6],
+[
+    NS_CHECK_CONNECTIVITY__([$1], [$2], [$3], [yes])
+])

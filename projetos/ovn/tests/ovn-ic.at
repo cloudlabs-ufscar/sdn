@@ -1,0 +1,4694 @@
+AT_BANNER([OVN Interconnection Controller])
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-ic -- AZ register])
+
+ovn_init_ic_db
+ovn_start az1
+ovn_start az2
+
+OVS_WAIT_UNTIL([test 2 = `ovn-ic-sbctl show | wc -l`])
+
+check ovn-ic-nbctl --wait=sb sync
+AT_CHECK([ovn-ic-sbctl show], [0], [dnl
+availability-zone az1
+availability-zone az2
+])
+
+ovn_as az1
+check ovn-nbctl set NB_Global . name=az3
+OVS_WAIT_UNTIL([ovn-ic-sbctl show | grep -q az3])
+AT_CHECK([ovn-ic-sbctl show], [0], [dnl
+availability-zone az2
+availability-zone az3
+])
+
+ovn_as az2
+check ovn-nbctl set NB_Global . name=\"\"
+OVS_WAIT_WHILE([ovn-ic-sbctl show | grep -q az2])
+AT_CHECK([ovn-ic-sbctl show], [0], [dnl
+availability-zone az3
+])
+
+OVN_CLEANUP_IC([az1], [az2])
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-ic -- AZ update in GW])
+ovn_init_ic_db
+net_add n1
+
+ovn_start az1
+sim_add gw-az1
+as gw-az1
+
+check ovs-vsctl add-br br-phys
+ovn_az_attach az1 n1 br-phys 192.168.1.1
+check ovs-vsctl set open . external-ids:ovn-is-interconn=true
+
+az_uuid=$(fetch_column ic-sb:availability-zone _uuid name="az1")
+ovn_as az1 ovn-nbctl set NB_Global . name="az2"
+
+check ovn-ic-nbctl --wait=sb sync
+check_column "$az_uuid" ic-sb:availability-zone _uuid name="az2"
+
+# make sure that gateway still point to the same AZ with new name
+check_column "$az_uuid" ic-sb:gateway availability_zone name="gw-az1"
+
+OVN_CLEANUP_IC([az1])
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-ic -- transit switch handling])
+
+ovn_init_ic_db
+ovn_start az1
+
+# create fake chassis with vxlan encap to enforce requested tunnel key checks
+check ovn-sbctl chassis-add fakechassis vxlan 192.168.0.2
+
+AT_CHECK([ovn-ic-nbctl ts-add ts1])
+AT_CHECK([ovn-ic-nbctl --wait=sb ts-add ts2])
+
+# Check ISB
+check_row_count ic-sb:Datapath_Binding 1 transit_switch=ts1
+check_row_count ic-sb:Datapath_Binding 1 transit_switch=ts2
+check_column "ts1 ts2" ic-sb:Datapath_Binding transit_switch
+check_column "ts1 ts2" nb:Logical_Switch name
+
+check ovn-nbctl --wait=hv sync
+
+# Check SB DP key
+ts1_key=$(fetch_column ic-sb:Datapath_Binding tunnel_key transit_switch=ts1)
+check_column "$ts1_key" Datapath_Binding tunnel_key external_ids:interconn-ts=ts1
+
+# Test delete
+AT_CHECK([ovn-ic-nbctl --wait=sb ts-del ts1])
+check_row_count ic-sb:Datapath_Binding 0 transit_switch=ts1
+check_column ts2 ic-sb:Datapath_Binding transit_switch
+check_column ts2 nb:Logical_Switch name
+
+OVN_CLEANUP_IC([az1])
+
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-ic -- VXLAN tunnel key])
+ovn_init_ic_db
+net_add n1
+
+ovn_start az1
+sim_add gw-az1
+as gw-az1
+
+check ovs-vsctl add-br br-phys
+ovn_az_attach az1 n1 br-phys 192.168.1.1
+check ovs-vsctl set open . external-ids:ovn-is-interconn=true
+
+AT_CHECK([ovn-ic-nbctl --wait=sb ts-add ts1])
+
+# Check ISB
+check_row_count ic-sb:Datapath_Binding 1 transit_switch=ts1
+check_column "ts1" ic-sb:Datapath_Binding transit_switch
+check_column "ts1" nb:Logical_Switch name
+
+wait_column "ic-vxlan_mode=false interconn-ts=ts1 requested-tnl-key=16711682" nb:Logical_Switch other_config name="ts1"
+# Check tunnel key fits in VXLAN space
+check ovn-ic-nbctl --wait=sb set IC_NB_Global . options:vxlan_mode=true
+wait_column "ic-vxlan_mode=true interconn-ts=ts1 requested-tnl-key=1025" nb:Logical_Switch other_config name="ts1"
+
+check ovn-ic-nbctl --wait=sb set IC_NB_Global . options:vxlan_mode=false
+wait_column "ic-vxlan_mode=false interconn-ts=ts1 requested-tnl-key=16711682" nb:Logical_Switch other_config name="ts1"
+
+OVN_CLEANUP_IC([az1])
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-ic -- port-bindings deletion upon TS deletion])
+
+ovn_init_ic_db
+net_add n1
+
+# 1 GW per AZ
+for i in 1 2; do
+    az=az$i
+    ovn_start $az
+    sim_add gw-$az
+    as gw-$az
+    check ovs-vsctl add-br br-phys
+    ovn_az_attach $az n1 br-phys 192.168.1.$i
+    check ovs-vsctl set open . external-ids:ovn-is-interconn=true
+done
+
+ovn_as az1
+
+# create transit switch and connect to LR
+check ovn-ic-nbctl --wait=sb ts-add ts1
+check ovn-nbctl lr-add lr1
+check ovn-nbctl lrp-add lr1 lrp1 00:00:00:00:00:01 10.0.0.1/24
+check ovn-nbctl lrp-set-gateway-chassis lrp1 gw-az1
+
+check ovn-nbctl lsp-add-router-port ts1 lsp1 lrp1
+
+wait_row_count Datapath_Binding 1 external_ids:interconn-ts=ts1
+
+# Sync ic-sb DB to see the TS changes.
+check ovn-ic-nbctl --wait=sb sync
+
+AT_CHECK([ovn-ic-sbctl show | grep -A2 lsp1], [0], [dnl
+        port lsp1
+            transit switch: ts1
+            address: [["00:00:00:00:00:01 10.0.0.1/24"]]
+])
+
+# remove transit switch and check if port_binding is deleted
+check ovn-ic-nbctl --wait=sb ts-del ts1
+check_row_count ic-sb:Port_Binding 0 logical_port=lsp1
+for i in 1 2; do
+    az=az$i
+    ovn_as $az
+    OVN_CLEANUP_SBOX(gw-$az)
+    OVN_CLEANUP_AZ([$az])
+done
+OVN_CLEANUP_IC
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-ic -- route deletion upon TS deletion])
+
+ovn_init_ic_db
+net_add n1
+
+# 1 GW per AZ
+for i in 1 2; do
+    az=az$i
+    ovn_start $az
+    sim_add gw-$az
+    as gw-$az
+    check ovs-vsctl add-br br-phys
+    ovn_az_attach $az n1 br-phys 192.168.1.$i
+    check ovs-vsctl set open . external-ids:ovn-is-interconn=true
+    check ovn-nbctl set nb-global . \
+        options:ic-route-adv=true \
+        options:ic-route-adv-default=true \
+        options:ic-route-learn=true \
+        options:ic-route-learn-default=true
+done
+
+create_ic_infra() {
+    az_id=$1
+    ts_id=$2
+    az=az$1
+
+    lsp=lsp${az_id}-${ts_id}
+    lrp=lrp${az_id}-${ts_id}
+    ts=ts${az_id}-${ts_id}
+    lr=lr${az_id}-${ts_id}
+
+    ovn_as $az
+
+    check ovn-ic-nbctl --wait=sb ts-add $ts
+    check ovn-nbctl lr-add $lr
+    check ovn-nbctl --wait=sb lrp-add $lr $lrp 00:00:00:00:00:0$az_id 10.0.$az_id.1/24
+    check ovn-nbctl lrp-set-gateway-chassis $lrp gw-$az
+
+    check ovn-nbctl lsp-add-router-port $ts $lsp $lrp
+
+    check ovn-nbctl --wait=sb lr-route-add $lr 192.168.0.0/16 10.0.$az_id.10
+}
+
+create_ic_infra 1 1
+create_ic_infra 1 2
+create_ic_infra 2 1
+check ovn-ic-nbctl --wait=sb sync
+
+ovn_as az1
+
+check_row_count ic-sb:Route 3 ip_prefix=192.168.0.0/16
+
+# remove transit switch 1 (from az1) and check if its route is deleted
+# same route from another AZ and ts should remain, as
+check ovn-ic-nbctl --wait=sb ts-del ts1-1
+ovn-ic-sbctl list route
+ovn-ic-nbctl list transit_switch
+check_row_count ic-sb:route 2 ip_prefix=192.168.0.0/16
+ovn-ic-sbctl list route
+
+for i in 1 2; do
+    az=az$i
+    ovn_as $az
+    OVN_CLEANUP_SBOX(gw-$az)
+    OVN_CLEANUP_AZ([$az])
+done
+OVN_CLEANUP_IC
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-ic -- duplicate NB route adv/learn])
+
+ovn_init_ic_db
+net_add n1
+
+# 1 GW per AZ
+for i in 1 2; do
+    az=az$i
+    ovn_start $az
+    sim_add gw-$az
+    as gw-$az
+    check ovs-vsctl add-br br-phys
+    ovn_az_attach $az n1 br-phys 192.168.1.$i
+    check ovs-vsctl set open . external-ids:ovn-is-interconn=true
+    check ovn-nbctl set nb-global . \
+        options:ic-route-adv=true \
+        options:ic-route-adv-default=true \
+        options:ic-route-learn=true \
+        options:ic-route-learn-default=true
+done
+
+ovn_as az1
+
+# create transit switch and connect to LR
+check ovn-ic-nbctl --wait=sb ts-add ts1
+for i in 1 2; do
+    ovn_as az$i
+
+    check ovn-nbctl lr-add lr1
+    check ovn-nbctl lrp-add lr1 lrp$i 00:00:00:00:0$i:01 10.0.$i.1/24
+    check ovn-nbctl lrp-set-gateway-chassis lrp$i gw-az$i
+
+    check ovn-nbctl --wait=sb lsp-add-router-port ts1 lsp$i lrp$i
+done
+
+ovn_as az1
+
+check_uuid ovn-nbctl \
+  --id=@id create logical-router-static-route ip_prefix=1.1.1.1/32 nexthop=10.0.1.10 -- \
+  add logical-router lr1 static_routes @id
+
+check ovn-ic-nbctl --wait=sb sync
+check ovn-ic-nbctl --wait=sb sync
+check_row_count ic-sb:route 1 ip_prefix=1.1.1.1/32
+
+for i in 1 2; do
+    az=az$i
+    ovn_as $az
+    OVN_CLEANUP_SBOX(gw-$az)
+    OVN_CLEANUP_AZ([$az])
+done
+
+OVN_CLEANUP_IC
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-ic -- local duplicate connected route])
+
+ovn_init_ic_db
+net_add n1
+
+# 1 GW per AZ
+for i in 1 2; do
+    az=az$i
+    ovn_start $az
+    sim_add gw-$az
+    as gw-$az
+    check ovs-vsctl add-br br-phys
+    ovn_az_attach $az n1 br-phys 192.168.1.$i
+    check ovs-vsctl set open . external-ids:ovn-is-interconn=true
+    check ovn-nbctl set nb-global . \
+        options:ic-route-adv=true \
+        options:ic-route-adv-default=true \
+        options:ic-route-learn=true \
+        options:ic-route-learn-default=true
+done
+
+ovn_as az1
+
+# create transit switch and connect to LR
+check ovn-ic-nbctl --wait=sb ts-add ts1
+for i in 1 2; do
+    ovn_as az$i
+
+    check \
+       grep -vq "connected route advertisement was suppressed! NB lrp" \
+       az$i/ic/ovn-ic.log
+
+    check ovn-nbctl lr-add lr1
+    check ovn-nbctl lrp-add lr1 lrp$i 00:00:00:00:0$i:01 10.0.$i.1/24
+    check ovn-nbctl lrp-add lr1 lrp-dup1 00:00:00:00:0$i:42 10.0.42.1/24
+    check ovn-nbctl lrp-add lr1 lrp-dup2 00:00:00:00:0$i:51 10.0.42.1/24
+    check ovn-nbctl lrp-set-gateway-chassis lrp$i gw-az$i
+
+    check ovn-nbctl --wait=sb lsp-add-router-port ts1 lsp$i lrp$i
+    check ovn-ic-nbctl --wait=sb sync
+
+    check \
+       grep -q "connected route advertisement was suppressed! NB lrp" \
+       az$i/ic/ovn-ic.log
+done
+
+for i in 1 2; do
+    az=az$i
+    ovn_as $az
+    OVN_CLEANUP_SBOX(gw-$az)
+    OVN_CLEANUP_AZ([$az])
+done
+
+OVN_CLEANUP_IC
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-ic -- gateway sync])
+
+ovn_init_ic_db
+net_add n1
+ovn_start az1
+ovn_start az2
+sim_add gw1
+as gw1
+ovs-vsctl add-br br-phys
+ovn_az_attach az1 n1 br-phys 192.168.0.1
+ovs-vsctl set open . external-ids:ovn-is-interconn=true external-ids:hostname=gw1
+
+OVS_WAIT_UNTIL([ovn_as az2 ovn-sbctl show | grep "192.168.0.1"])
+AT_CHECK([ovn_as az2 ovn-sbctl show | sort -r], [0], [dnl
+Chassis gw1
+    hostname: gw1
+    Encap vxlan
+    Encap geneve
+        options: {csum="true"}
+        options: {csum="true"}
+        ip: "192.168.0.1"
+        ip: "192.168.0.1"
+])
+
+AT_CHECK([ovn_as az2 ovn-sbctl -f csv -d bare --no-headings --columns other_config list chassis], [0], [dnl
+is-remote=true
+])
+
+ovs-vsctl set open . external-ids:ovn-is-interconn=false
+OVS_WAIT_UNTIL([test "$(ovn_as az2 ovn-sbctl show)" = ""])
+
+ovs-vsctl set open . external-ids:ovn-is-interconn=true
+OVS_WAIT_UNTIL([ovn_as az2 ovn-sbctl show | grep gw1])
+
+OVN_CLEANUP_SBOX(gw1)
+OVS_WAIT_FOR_OUTPUT([ovn_as az2 ovn-sbctl show], [0], [dnl
+])
+
+# Test encap change
+sim_add gw2
+as gw2
+ovs-vsctl add-br br-phys
+ovn_az_attach az1 n1 br-phys 192.168.0.1
+ovs-vsctl set open . external-ids:ovn-is-interconn=true
+OVS_WAIT_UNTIL([ovn_as az2 ovn-sbctl show | grep "192.168.0.1"])
+ovs-vsctl set open . external_ids:ovn-encap-ip=192.168.0.2
+OVS_WAIT_UNTIL([ovn_as az2 ovn-sbctl show | grep "192.168.0.2"])
+ovs-vsctl set open . external_ids:ovn-encap-type="geneve,vxlan"
+OVS_WAIT_UNTIL([ovn_as az2 ovn-sbctl show | grep vxlan])
+
+OVN_CLEANUP_SBOX([gw2])
+OVN_CLEANUP_IC([az1], [az2])
+
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-ic -- port sync])
+
+ovn_init_ic_db
+ovn-ic-nbctl ts-add ts1
+net_add n1
+ovn_start az1
+ovn_start az2
+# sync IC-NB to IC-SB and AZs after AZs creation.
+check ovn-ic-nbctl --wait=sb sync
+sim_add gw1
+as gw1
+ovs-vsctl add-br br-phys
+ovn_az_attach az1 n1 br-phys 192.168.0.1
+ovs-vsctl set open . external-ids:ovn-is-interconn=true
+
+ovn_as az1
+# Create LRP and connect to TS
+check ovn-nbctl lr-add lr1
+check ovn-nbctl lrp-add lr1 lrp-lr1-ts1 aa:aa:aa:aa:aa:01 169.254.100.1/24
+check ovn-nbctl --wait=hv lsp-add-router-port ts1 lsp-ts1-lr1 lrp-lr1-ts1
+OVS_WAIT_UNTIL([ovn_as az2 ovn-nbctl show | grep lsp-ts1-lr1])
+ovn_as az2 ovn-nbctl lsp-set-options lsp-ts1-lr1 requested-chassis=gw1
+
+OVS_WAIT_FOR_OUTPUT([ovn_as az2 ovn-nbctl show | uuidfilt], [0], [dnl
+switch <0> (ts1)
+    port lsp-ts1-lr1
+        type: remote
+        addresses: [["aa:aa:aa:aa:aa:01 169.254.100.1/24"]]
+])
+
+OVS_WAIT_FOR_OUTPUT([ovn_as az2 ovn-sbctl -f csv -d bare --no-headings --columns logical_port,type list port_binding], [0], [dnl
+lsp-ts1-lr1,remote
+])
+
+check ovn-nbctl lrp-set-gateway-chassis lrp-lr1-ts1 gw1
+OVS_WAIT_UNTIL([ovn_as az2 ovn-sbctl show | grep lsp-ts1-lr1])
+
+ovn_as az2 ovn-nbctl lsp-set-options lsp-ts1-lr1 requested-chassis=""
+check ovn-nbctl lrp-del-gateway-chassis lrp-lr1-ts1 gw1
+OVS_WAIT_WHILE([ovn_as az2 ovn-sbctl show | grep lsp-ts1-lr1])
+
+check ovn-nbctl set logical_router_port lrp-lr1-ts1 mac="\"aa:aa:aa:aa:aa:02\"" \
+              networks="169.254.100.2/24 169.254.200.3/24"
+OVS_WAIT_UNTIL([ovn_as az2 ovn-nbctl show | grep "aa:aa:aa:aa:aa:02 169.254.100.2/24 169.254.200.3/24"])
+
+# Delete the router port from az1, the remote port in az2 should still remain
+# but just lost address.
+check ovn-nbctl lrp-del lrp-lr1-ts1
+OVS_WAIT_WHILE([ovn_as az2 ovn-nbctl show | grep "aa:aa:aa:aa:aa:02 169.254.100.2/24 169.254.200.3/24"])
+AT_CHECK([ovn_as az2 ovn-nbctl show | uuidfilt], [0], [dnl
+switch <0> (ts1)
+    port lsp-ts1-lr1
+        type: remote
+])
+
+# Delete the lsp from az1, the remote port in az2 should be gone
+check ovn-nbctl lsp-del lsp-ts1-lr1
+OVS_WAIT_WHILE([ovn_as az2 ovn-nbctl show | grep lsp-ts1-lr1])
+
+# ts1 should not be local datapath since lsp-ts1-lr1 has been deleted.
+OVN_CLEANUP_SBOX(gw1, [], [], [ts1,lr1])
+OVN_CLEANUP_IC([az1], [az2])
+
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-ic -- route sync])
+
+ovn_init_ic_db
+ovn-ic-nbctl ts-add ts1
+
+for i in 1 2; do
+    ovn_start az$i
+    ovn_as az$i
+    check ovn-ic-nbctl --wait=sb sync
+    # Enable route learning at AZ level
+    check ovn-nbctl set nb_global . options:ic-route-learn=true
+    # Enable route advertising at AZ level
+    check ovn-nbctl set nb_global . options:ic-route-adv=true
+
+    # Create LRP and connect to TS
+    check ovn-nbctl lr-add lr$i
+    check ovn-nbctl lrp-add lr$i lrp-lr$i-ts1 aa:aa:aa:aa:aa:0$i 169.254.100.$i/24
+    check ovn-nbctl lsp-add-router-port ts1 lsp-ts1-lr$i lrp-lr$i-ts1
+
+    # Create static routes
+    check ovn-nbctl lr-route-add lr$i 10.11.$i.0/24 169.254.0.1
+
+    # Create a src-ip route, which shouldn't be synced
+    check ovn-nbctl --policy=src-ip lr-route-add lr$i 10.22.$i.0/24 169.254.0.2
+done
+
+for i in 1 2; do
+    OVS_WAIT_UNTIL([ovn_as az$i ovn-nbctl lr-route-list lr$i | grep learned])
+done
+
+AT_CHECK([ovn_as az1 ovn-nbctl lr-route-list lr1], [0], [dnl
+IPv4 Routes
+Route Table <main>:
+             10.11.1.0/24               169.254.0.1 dst-ip
+             10.11.2.0/24             169.254.100.2 dst-ip (learned)
+             10.22.1.0/24               169.254.0.2 src-ip
+])
+
+# Delete route in AZ1, AZ2's learned route should be deleted.
+ovn_as az1 ovn-nbctl lr-route-del lr1 10.11.1.0/24
+ovn-ic-nbctl --wait=sb sync
+ovn-ic-nbctl --wait=sb sync
+AT_CHECK([ovn_as az2 ovn-nbctl lr-route-list lr2 | grep -c learned], [1], [dnl
+0
+])
+
+# Add the route back
+ovn_as az1 ovn-nbctl lr-route-add lr1 10.11.1.0/24 169.254.0.1
+ovn-ic-nbctl --wait=sb sync
+ovn-ic-nbctl --wait=sb sync
+AT_CHECK([ovn_as az2 ovn-nbctl lr-route-list lr2 | grep -c learned], [0], [dnl
+1
+])
+
+# Disable route-learning for AZ1
+ovn_as az1 ovn-nbctl set nb_global . options:ic-route-learn=false
+ovn-ic-nbctl --wait=sb sync
+AT_CHECK([ovn_as az1 ovn-nbctl lr-route-list lr1], [0], [dnl
+IPv4 Routes
+Route Table <main>:
+             10.11.1.0/24               169.254.0.1 dst-ip
+             10.22.1.0/24               169.254.0.2 src-ip
+])
+
+# AZ1 should still advertise and AZ2 should still learn the route
+AT_CHECK([ovn_as az2 ovn-nbctl lr-route-list lr2 | grep learned], [0], [ignore])
+
+# Disable route-advertising for AZ1
+ovn_as az1 ovn-nbctl set nb_global . options:ic-route-adv=false
+
+# AZ2 shouldn't have the route learned, because AZ1 should have stopped
+# advertising.
+check ovn-ic-nbctl --wait=sb sync
+check ovn-ic-nbctl --wait=sb sync
+AT_CHECK([ovn_as az2 ovn-nbctl lr-route-list lr2], [0], [dnl
+IPv4 Routes
+Route Table <main>:
+             10.11.2.0/24               169.254.0.1 dst-ip
+             10.22.2.0/24               169.254.0.2 src-ip
+])
+
+# Add default route in AZ1
+ovn_as az1 ovn-nbctl lr-route-add lr1 0.0.0.0/0 169.254.0.3
+
+# Re-enable router-advertising & learn for AZ1
+ovn_as az1 ovn-nbctl set nb_global . options:ic-route-adv=true
+ovn_as az1 ovn-nbctl set nb_global . options:ic-route-learn=true
+check ovn-ic-nbctl --wait=sb sync
+check ovn-ic-nbctl --wait=sb sync
+
+# Default route should NOT get advertised or learned, by default.
+AT_CHECK([ovn_as az2 ovn-nbctl lr-route-list lr2], [0], [dnl
+IPv4 Routes
+Route Table <main>:
+             10.11.1.0/24             169.254.100.1 dst-ip (learned)
+             10.11.2.0/24               169.254.0.1 dst-ip
+             10.22.2.0/24               169.254.0.2 src-ip
+])
+
+# Enable default route advertising in AZ1
+ovn_as az1 ovn-nbctl set nb_global . options:ic-route-adv-default=true
+OVS_WAIT_UNTIL([ovn-ic-sbctl list route | grep 0.0.0.0])
+
+# Enable default route learning in AZ2
+ovn_as az2 ovn-nbctl set nb_global . options:ic-route-learn-default=true
+OVS_WAIT_UNTIL([ovn_as az2 ovn-nbctl lr-route-list lr2 | grep learned | grep 0.0.0.0])
+
+# Test directly connected subnet route advertising.
+ovn_as az1 ovn-nbctl lrp-add lr1 lrp-lr1-ls1 aa:aa:aa:aa:bb:01 "192.168.0.1/24"
+OVS_WAIT_UNTIL([ovn_as az2 ovn-nbctl lr-route-list lr2 | grep learned | grep 192.168])
+
+# Delete the directly connected subnet from AZ1, learned route should be
+# removed from AZ2.
+ovn_as az1 ovn-nbctl lrp-del lrp-lr1-ls1
+OVS_WAIT_WHILE([ovn_as az2 ovn-nbctl lr-route-list lr2 | grep learned | grep 192.168])
+
+# Test denylist routes
+# Add back the directly connected 192.168 route.
+ovn_as az1 ovn-nbctl lrp-add lr1 lrp-lr1-ls1 aa:aa:aa:aa:bb:01 "192.168.0.1/24"
+OVS_WAIT_UNTIL([ovn_as az2 ovn-nbctl lr-route-list lr2 | grep learned | grep 192.168])
+# Ensure AZ1 learned AZ2's 10.11.2.0 route as well.
+OVS_WAIT_UNTIL([ovn_as az1 ovn-nbctl lr-route-list lr1 | grep learned | grep 10.11])
+# Now black list 10.11.0.0/16 and 192.168.0.0/16 in AZ2.
+ovn_as az2 ovn-nbctl set nb_global . options:ic-route-denylist="10.11.0.0/16,192.168.0.0/16"
+# AZ2 shouldn't learn 192.168 route any more.
+OVS_WAIT_WHILE([ovn_as az2 ovn-nbctl lr-route-list lr2 | grep learned | grep 192.168])
+# AZ1 shouldn't learn 10.11 any more.
+OVS_WAIT_WHILE([ovn_as az1 ovn-nbctl lr-route-list lr1 | grep learned | grep 10.11])
+
+# cleanup
+ovn-ic-nbctl --if-exists ts-del ts1
+ovn_as az1 ovn-nbctl lr-del lr1
+ovn_as az2 ovn-nbctl lr-del lr2
+
+# Create new transit switches and LRs. Test topology is next:
+# logical router (lr11) - transit switch (ts11) - logical router (lr12)
+# logical router (lr21) - transit switch (ts22) - logical router (lr22)
+#
+# lr12 has static route 10.0.0.0/24 and directly connected network 192.168.0.0/24
+for i in 1 2; do
+    ovn_as az$i
+
+    # Ensure route learning at AZ level
+    check ovn-nbctl set nb_global . options:ic-route-learn=true
+    # Ensure route advertising at AZ level
+    check ovn-nbctl set nb_global . options:ic-route-adv=true
+    # Drop denylist
+    check ovn-nbctl remove nb_global . options ic-route-denylist
+
+    for j in 1 2; do
+        ts=ts$j$j
+        ovn-ic-nbctl --wait=sb --may-exist ts-add $ts
+
+        # Create LRP and connect to TS
+        lr=lr$j$i
+        echo lr: $lr, ts: $ts
+        check ovn-nbctl lr-add $lr
+        check ovn-nbctl lrp-add $lr lrp-$lr-$ts aa:aa:aa:aa:aa:0$j 169.254.100.$i/24
+        check ovn-nbctl lsp-add-router-port $ts lsp-$ts-$lr lrp-$lr-$ts
+    done
+done
+
+# Create directly-connected routes
+ovn_as az2 ovn-nbctl --wait=sb lrp-add lr12 lrp-lr12-ls2 aa:aa:aa:aa:bb:01 "192.168.0.1/24"
+ovn_as az2 ovn-nbctl lr-route-add lr12 10.10.10.0/24 192.168.0.10
+ovn_as az1 ovn-nbctl --wait=sb sync
+
+echo az1
+ovn_as az1 ovn-nbctl show
+echo az2
+ovn_as az2 ovn-nbctl show
+check ovn-ic-nbctl --wait=sb sync
+check ovn-ic-nbctl --wait=sb sync
+
+# Test routes from lr12 were learned to lr11
+AT_CHECK([ovn_as az1 ovn-nbctl lr-route-list lr11 |
+             grep learned | awk '{print $1, $2}' | sort], [0], [dnl
+10.10.10.0/24 169.254.100.2
+192.168.0.0/24 169.254.100.2
+])
+
+# Test routes from lr12 didn't leak as learned to lr21
+AT_CHECK([ovn_as az1 ovn-nbctl lr-route-list lr21], [0], [])
+
+# cleanup
+ovn-ic-nbctl --if-exists ts-del ts1
+ovn_as az1 ovn-nbctl lr-del lr11
+ovn_as az1 ovn-nbctl lr-del lr21
+ovn_as az2 ovn-nbctl lr-del lr12
+ovn_as az2 ovn-nbctl lr-del lr22
+
+# check routes origin advertisement and learning
+
+# setup topology with connected, static and source routes
+ovn-ic-nbctl --wait=sb ts-add ts1
+for i in 1 2; do
+    ovn_as az$i
+
+    # Enable route learning at AZ level
+    check ovn-nbctl set nb_global . options:ic-route-learn=true
+    # Enable route advertising at AZ level
+    check ovn-nbctl set nb_global . options:ic-route-adv=true
+
+    # Create LRP and connect to TS
+    check ovn-nbctl lr-add lr$i
+    check ovn-nbctl lrp-add lr$i lrp-lr$i-ts1 aa:aa:aa:aa:aa:0$i 169.254.100.$i/24
+    check ovn-nbctl lsp-add-router-port ts1 lsp-ts1-lr$i lrp-lr$i-ts1
+
+    check ovn-nbctl lrp-add lr$i lrp-lr$i-p$i 00:00:00:00:00:0$i 192.168.$i.1/24
+
+    # Create static routes
+    check ovn-nbctl --wait=sb lr-route-add lr$i 10.11.$i.0/24 169.254.0.1
+
+    # Create a src-ip route, which shouldn't be synced
+    check ovn-nbctl --policy=src-ip lr-route-add lr$i 10.22.$i.0/24 169.254.0.2
+done
+
+check ovn-ic-nbctl --wait=sb sync
+# check that advertised routes in ic-sb have correct origin
+ovn-ic-sbctl list route
+wait_row_count ic-sb:Route 1 ip_prefix=10.11.1.0/24 origin=static
+wait_row_count ic-sb:Route 1 ip_prefix=192.168.1.1/24 origin=connected
+wait_row_count ic-sb:Route 1 ip_prefix=10.11.2.0/24 origin=static
+wait_row_count ic-sb:Route 1 ip_prefix=192.168.2.1/24 origin=connected
+
+# check that learned routes in ic-sb have correct origin
+
+ovn_as az1
+wait_row_count nb:Logical_Router_Static_Route 1 ip_prefix=10.11.2.0/24 options:origin=static
+wait_row_count nb:Logical_Router_Static_Route 1 ip_prefix=192.168.2.1/24 options:origin=connected
+
+ovn_as az2
+wait_row_count nb:Logical_Router_Static_Route 1 ip_prefix=10.11.1.0/24 options:origin=static
+wait_row_count nb:Logical_Router_Static_Route 1 ip_prefix=192.168.1.1/24 options:origin=connected
+
+OVN_CLEANUP_IC([az1], [az2])
+
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-ic -- route sync -- loadbalancer])
+
+ovn_init_ic_db
+ovn-ic-nbctl ts-add ts1
+
+for i in 1 2; do
+    ovn_start az$i
+    ovn_as az$i
+    check ovn-ic-nbctl --wait=sb sync
+    # Enable route learning at AZ level
+    check ovn-nbctl set nb_global . options:ic-route-learn=true
+    # Enable route advertising at AZ level
+    check ovn-nbctl set nb_global . options:ic-route-adv=true
+
+    # Enable route advertising for loadbalancer VIP
+    check ovn-nbctl set nb_global . options:ic-route-adv-lb=true
+    # Enable route learning for loadbalancer VIP
+    check ovn-nbctl set nb_global . options:ic-route-learn-lb=true
+
+    # Create LRP and connect to TS
+    check ovn-nbctl lr-add lr$i
+    check ovn-nbctl lrp-add lr$i lrp-lr$i-ts1 aa:aa:aa:aa:aa:0$i 169.254.100.$i/24 2001:db8:1::$i/64
+    check ovn-nbctl lsp-add-router-port ts1 lsp-ts1-lr$i lrp-lr$i-ts1
+
+    # Create LB
+    check ovn-nbctl lb-add lb$i 200.1.$i.50:80 1.1.$i.1:80,1.1.$i.2:80
+    check ovn-nbctl lr-lb-add lr$i lb$i
+done
+
+for i in 1 2; do
+    OVS_WAIT_UNTIL([ovn_as az$i ovn-nbctl lr-route-list lr$i | grep learned])
+done
+
+wait_row_count ic-sb:Route 1 ip_prefix=200.1.1.50/32 origin=loadbalancer
+wait_row_count ic-sb:Route 1 ip_prefix=200.1.2.50/32 origin=loadbalancer
+
+AT_CHECK([ovn_as az1 ovn-nbctl lr-route-list lr1], [0], [dnl
+IPv4 Routes
+Route Table <main>:
+               200.1.2.50             169.254.100.2 dst-ip (learned)
+])
+
+AT_CHECK([ovn_as az2 ovn-nbctl lr-route-list lr2], [0], [dnl
+IPv4 Routes
+Route Table <main>:
+               200.1.1.50             169.254.100.1 dst-ip (learned)
+])
+
+# Add another few instances of LB in AZ1, some with same VIP IP.
+check ovn_as az1 ovn-nbctl lb-add lb3 200.1.1.53:80 1.1.1.1:80,1.1.1.2:80,1.1.1.3:80
+check ovn_as az1 ovn-nbctl lb-add lb4 200.1.1.53:8080 1.1.1.1:8080,1.1.1.2:8080
+check ovn_as az1 ovn-nbctl lb-add lb5 200.1.1.54:80 1.1.1.1:80,1.1.1.2:80
+check ovn_as az1 ovn-nbctl lr-lb-add lr1 lb3
+check ovn_as az1 ovn-nbctl lr-lb-add lr1 lb4
+check ovn_as az1 ovn-nbctl lr-lb-add lr1 lb5
+wait_row_count ic-sb:Route 1 ip_prefix=200.1.1.53/32 origin=loadbalancer
+wait_row_count ic-sb:Route 1 ip_prefix=200.1.1.54/32 origin=loadbalancer
+OVS_WAIT_UNTIL([ovn_as az2 ovn-nbctl lr-route-list lr2 | grep learned | grep 200.1.1.53])
+OVS_WAIT_UNTIL([ovn_as az2 ovn-nbctl lr-route-list lr2 | grep learned | grep 200.1.1.54])
+
+AT_CHECK([ovn_as az2 ovn-nbctl lr-route-list lr2], [0], [dnl
+IPv4 Routes
+Route Table <main>:
+               200.1.1.50             169.254.100.1 dst-ip (learned)
+               200.1.1.53             169.254.100.1 dst-ip (learned)
+               200.1.1.54             169.254.100.1 dst-ip (learned)
+])
+
+# Remove one LB.
+check ovn_as az1 ovn-nbctl lr-lb-del lr1 lb5
+OVS_WAIT_WHILE([ovn_as az2 ovn-nbctl lr-route-list lr2 | grep learned | grep 200.1.1.54])
+AT_CHECK([ovn_as az2 ovn-nbctl lr-route-list lr2], [0], [dnl
+IPv4 Routes
+Route Table <main>:
+               200.1.1.50             169.254.100.1 dst-ip (learned)
+               200.1.1.53             169.254.100.1 dst-ip (learned)
+])
+
+# Add load balancer group.
+check ovn_as az1 ovn-nbctl lb-add lb6 250.1.1.11:80 1.1.1.1:80,1.1.1.2:80
+check ovn_as az1 ovn-nbctl lb-add lb7 250.1.1.12:80 1.1.1.1:80,1.1.1.2:80
+lb6=$(ovn_as az1 fetch_column nb:load_balancer _uuid name=lb6)
+lb7=$(ovn_as az1 fetch_column nb:load_balancer _uuid name=lb7)
+
+ovn_as az1
+lbg=$(ovn-nbctl create load_balancer_group name=lbg -- \
+  add load_balancer_group lbg load_balancer $lb6 -- \
+  add load_balancer_group lbg load_balancer $lb7)
+check ovn_as az1 ovn-nbctl add logical_router lr1 load_balancer_group $lbg
+OVS_WAIT_UNTIL([ovn_as az2 ovn-nbctl lr-route-list lr2 | grep learned | grep 250.1.1.11])
+OVS_WAIT_UNTIL([ovn_as az2 ovn-nbctl lr-route-list lr2 | grep learned | grep 250.1.1.12])
+
+AT_CHECK([ovn_as az2 ovn-nbctl lr-route-list lr2], [0], [dnl
+IPv4 Routes
+Route Table <main>:
+               200.1.1.50             169.254.100.1 dst-ip (learned)
+               200.1.1.53             169.254.100.1 dst-ip (learned)
+               250.1.1.11             169.254.100.1 dst-ip (learned)
+               250.1.1.12             169.254.100.1 dst-ip (learned)
+])
+
+# Remove the LB group from LR.
+check ovn_as az1 ovn-nbctl remove logical_router lr1 load_balancer_group $lbg
+OVS_WAIT_WHILE([ovn_as az2 ovn-nbctl lr-route-list lr2 | grep learned | grep 250.1.1.11])
+OVS_WAIT_WHILE([ovn_as az2 ovn-nbctl lr-route-list lr2 | grep learned | grep 250.1.1.12])
+
+AT_CHECK([ovn_as az2 ovn-nbctl lr-route-list lr2], [0], [dnl
+IPv4 Routes
+Route Table <main>:
+               200.1.1.50             169.254.100.1 dst-ip (learned)
+               200.1.1.53             169.254.100.1 dst-ip (learned)
+])
+
+# Disable LB route-advertising for AZ1.
+check ovn_as az1 ovn-nbctl set nb_global . options:ic-route-adv-lb=false
+OVS_WAIT_WHILE([ovn_as az2 ovn-nbctl lr-route-list lr2 | grep learned | grep 200.1.1])
+AT_CHECK([ovn_as az2 ovn-nbctl lr-route-list lr2], [0], [])
+
+# Enable LB route-advertising back for AZ1.
+check ovn_as az1 ovn-nbctl set nb_global . options:ic-route-adv-lb=true
+wait_row_count ic-sb:Route 1 ip_prefix=200.1.1.50/32 origin=loadbalancer
+wait_row_count ic-sb:Route 1 ip_prefix=200.1.1.53/32 origin=loadbalancer
+OVS_WAIT_UNTIL([ovn_as az2 ovn-nbctl lr-route-list lr2 | grep learned | grep 200.1.1.50])
+OVS_WAIT_UNTIL([ovn_as az2 ovn-nbctl lr-route-list lr2 | grep learned | grep 200.1.1.53])
+
+AT_CHECK([ovn_as az2 ovn-nbctl lr-route-list lr2], [0], [dnl
+IPv4 Routes
+Route Table <main>:
+               200.1.1.50             169.254.100.1 dst-ip (learned)
+               200.1.1.53             169.254.100.1 dst-ip (learned)
+])
+
+# Disable LB route-learning for AZ2.
+check ovn_as az2 ovn-nbctl set nb_global . options:ic-route-learn-lb=false
+wait_row_count ic-sb:Route 1 ip_prefix=200.1.1.50/32 origin=loadbalancer
+wait_row_count ic-sb:Route 1 ip_prefix=200.1.1.53/32 origin=loadbalancer
+OVS_WAIT_WHILE([ovn_as az2 ovn-nbctl lr-route-list lr2 | grep learned | grep 200.1.1])
+AT_CHECK([ovn_as az2 ovn-nbctl lr-route-list lr2], [0], [])
+
+# Enable LB route-learning back for AZ2.
+check ovn_as az2 ovn-nbctl set nb_global . options:ic-route-learn-lb=true
+OVS_WAIT_UNTIL([ovn_as az2 ovn-nbctl lr-route-list lr2 | grep learned | grep 200.1.1.50])
+OVS_WAIT_UNTIL([ovn_as az2 ovn-nbctl lr-route-list lr2 | grep learned | grep 200.1.1.53])
+
+AT_CHECK([ovn_as az2 ovn-nbctl lr-route-list lr2], [0], [dnl
+IPv4 Routes
+Route Table <main>:
+               200.1.1.50             169.254.100.1 dst-ip (learned)
+               200.1.1.53             169.254.100.1 dst-ip (learned)
+])
+
+# Add IPv6 LB.
+check ovn_as az1 ovn-nbctl lb-add lb_v6 [[4242::1]]:80 "[[4242::2]]:80"
+check ovn_as az1 ovn-nbctl lr-lb-add lr1 lb_v6
+OVS_WAIT_UNTIL([ovn_as az2 ovn-nbctl lr-route-list lr2 | grep learned | grep 4242])
+
+AT_CHECK([ovn-ic-sbctl list route | grep 'ip_prefix.*4242' -A 2], [0], [dnl
+ip_prefix           : "4242::1/128"
+nexthop             : "2001:db8:1::1"
+origin              : loadbalancer
+])
+
+AT_CHECK([ovn_as az2 ovn-nbctl lr-route-list lr2], [0], [dnl
+IPv4 Routes
+Route Table <main>:
+               200.1.1.50             169.254.100.1 dst-ip (learned)
+               200.1.1.53             169.254.100.1 dst-ip (learned)
+
+IPv6 Routes
+Route Table <main>:
+                  4242::1             2001:db8:1::1 dst-ip (learned)
+])
+
+# Remove IPv6 LB
+check ovn_as az1 ovn-nbctl lr-lb-del lr1 lb_v6
+OVS_WAIT_WHILE([ovn_as az2 ovn-nbctl lr-route-list lr2 | grep learned | grep 4242])
+AT_CHECK([ovn_as az2 ovn-nbctl lr-route-list lr2], [0], [dnl
+IPv4 Routes
+Route Table <main>:
+               200.1.1.50             169.254.100.1 dst-ip (learned)
+               200.1.1.53             169.254.100.1 dst-ip (learned)
+])
+
+# Configure same LB VIP locally as in remote az. Ensure learnt route is removed.
+check ovn_as az2 ovn-nbctl lb-add lb_temp 200.1.1.50:80 1.1.1.1:80,1.1.1.2:80
+check ovn_as az2 ovn-nbctl lr-lb-add lr2 lb_temp
+wait_row_count ic-sb:Route 2 ip_prefix=200.1.1.50/32 origin=loadbalancer
+OVS_WAIT_WHILE([ovn_as az2 ovn-nbctl lr-route-list lr2 | grep learned | grep 200.1.1.50])
+AT_CHECK([ovn_as az2 ovn-nbctl lr-route-list lr2], [0], [dnl
+IPv4 Routes
+Route Table <main>:
+               200.1.1.53             169.254.100.1 dst-ip (learned)
+])
+check ovn_as az2 ovn-nbctl lr-lb-del lr2 lb_temp
+check ovn_as az2 ovn-nbctl lb-del lb_temp
+OVS_WAIT_UNTIL([ovn_as az2 ovn-nbctl lr-route-list lr2 | grep learned | grep 200.1.1.50])
+AT_CHECK([ovn_as az2 ovn-nbctl lr-route-list lr2], [0], [dnl
+IPv4 Routes
+Route Table <main>:
+               200.1.1.50             169.254.100.1 dst-ip (learned)
+               200.1.1.53             169.254.100.1 dst-ip (learned)
+])
+
+# Configure static route in remote az. Route would be learnt. Add local LB VIP
+# same as static route prefix. Ensure route is removed.
+check ovn_as az1 ovn-nbctl lr-route-add lr1 200.1.3.55 169.1.1.1
+OVS_WAIT_UNTIL([ovn_as az2 ovn-nbctl lr-route-list lr2 | grep learned | grep 200.1.3.55])
+AT_CHECK([ovn_as az2 ovn-nbctl lr-route-list lr2], [0], [dnl
+IPv4 Routes
+Route Table <main>:
+               200.1.1.50             169.254.100.1 dst-ip (learned)
+               200.1.1.53             169.254.100.1 dst-ip (learned)
+               200.1.3.55             169.254.100.1 dst-ip (learned)
+])
+
+check ovn_as az2 ovn-nbctl lb-add lb_temp 200.1.3.55:80 1.1.1.1:80,1.1.1.2:80
+check ovn_as az2 ovn-nbctl lr-lb-add lr2 lb_temp
+OVS_WAIT_WHILE([ovn_as az2 ovn-nbctl lr-route-list lr2 | grep learned | grep 200.1.3.55])
+AT_CHECK([ovn_as az2 ovn-nbctl lr-route-list lr2], [0], [dnl
+IPv4 Routes
+Route Table <main>:
+               200.1.1.50             169.254.100.1 dst-ip (learned)
+               200.1.1.53             169.254.100.1 dst-ip (learned)
+])
+
+check ovn_as az2 ovn-nbctl lr-lb-del lr2 lb_temp
+check ovn_as az2 ovn-nbctl lb-del lb_temp
+OVS_WAIT_UNTIL([ovn_as az2 ovn-nbctl lr-route-list lr2 | grep learned | grep 200.1.3.55])
+AT_CHECK([ovn_as az2 ovn-nbctl lr-route-list lr2], [0], [dnl
+IPv4 Routes
+Route Table <main>:
+               200.1.1.50             169.254.100.1 dst-ip (learned)
+               200.1.1.53             169.254.100.1 dst-ip (learned)
+               200.1.3.55             169.254.100.1 dst-ip (learned)
+])
+check ovn_as az1 ovn-nbctl lr-route-del lr1 200.1.3.55 169.1.1.1
+OVS_WAIT_WHILE([ovn_as az2 ovn-nbctl lr-route-list lr2 | grep learned | grep 200.1.3.55])
+AT_CHECK([ovn_as az2 ovn-nbctl lr-route-list lr2], [0], [dnl
+IPv4 Routes
+Route Table <main>:
+               200.1.1.50             169.254.100.1 dst-ip (learned)
+               200.1.1.53             169.254.100.1 dst-ip (learned)
+])
+
+# Create a third az
+ovn_start az3
+ovn_as az3
+check ovn-ic-nbctl --wait=sb sync
+check ovn-nbctl set nb_global . options:ic-route-learn=true
+check ovn-nbctl set nb_global . options:ic-route-adv=true
+
+check ovn-nbctl set nb_global . options:ic-route-adv-lb=true
+check ovn-nbctl set nb_global . options:ic-route-learn-lb=true
+
+check ovn-nbctl lr-add lr3
+check ovn-nbctl lrp-add lr3 lrp-lr3-ts1 aa:aa:aa:aa:aa:03 169.254.100.3/24 2001:db8:1::3/64
+check ovn-nbctl lsp-add-router-port ts1 lsp-ts1-lr3 lrp-lr3-ts1
+
+# Create LB in 3rd az and check that the route propagates to az1 LR
+check ovn_as az3 ovn-nbctl lb-add lb3 200.1.3.50:80 1.1.3.1:80,1.1.3.2:80
+check ovn_as az3 ovn-nbctl lr-lb-add lr3 lb3
+OVS_WAIT_UNTIL([ovn_as az2 ovn-nbctl lr-route-list lr2 | grep learned | grep 200.1.3.50])
+AT_CHECK([ovn_as az2 ovn-nbctl lr-route-list lr2], [0], [dnl
+IPv4 Routes
+Route Table <main>:
+               200.1.1.50             169.254.100.1 dst-ip (learned)
+               200.1.1.53             169.254.100.1 dst-ip (learned)
+               200.1.3.50             169.254.100.3 dst-ip (learned)
+])
+
+# Create LB in az3 with same VIP as az1, check for ECMP route in az2 LR
+check ovn_as az3 ovn-nbctl lb-add lb4 200.1.1.50:80 1.1.3.1:80,1.1.3.2:80
+check ovn_as az3 ovn-nbctl lr-lb-add lr3 lb4
+OVS_WAIT_UNTIL([ovn_as az2 ovn-nbctl lr-route-list lr2 | grep learned | grep ecmp])
+AT_CHECK([ovn_as az2 ovn-nbctl lr-route-list lr2], [0], [dnl
+IPv4 Routes
+Route Table <main>:
+               200.1.1.50             169.254.100.1 dst-ip (learned) ecmp
+               200.1.1.50             169.254.100.3 dst-ip (learned) ecmp
+               200.1.1.53             169.254.100.1 dst-ip (learned)
+               200.1.3.50             169.254.100.3 dst-ip (learned)
+])
+
+OVN_CLEANUP_IC([az1], [az2])
+
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-ic -- route sync -- IPv6 route tables])
+AT_KEYWORDS([IPv6-route-sync])
+
+ovn_init_ic_db
+ovn-ic-nbctl ts-add ts1
+
+for i in 1 2; do
+    ovn_start az$i
+    ovn_as az$i
+    # Enable route learning at AZ level
+    check ovn-nbctl set nb_global . options:ic-route-learn=true
+    # Enable route advertising at AZ level
+    check ovn-nbctl set nb_global . options:ic-route-adv=true
+    check ovn-ic-nbctl --wait=sb sync
+
+    # Create LRP and connect to TS
+    check ovn-nbctl lr-add lr$i
+    check ovn-nbctl lrp-add lr$i lrp-lr$i-ts1 aa:aa:aa:aa:aa:0$i 2001:db8:1::$i/64
+    check ovn-nbctl lsp-add-router-port ts1 lsp-ts1-lr$i lrp-lr$i-ts1
+
+    check ovn-nbctl --wait=sb lrp-add lr$i lrp-lr$i-p$i 00:00:00:00:00:0$i 2002:db8:1::$i/64
+done
+
+check ovn-ic-nbctl --wait=sb sync
+check ovn-ic-nbctl --wait=sb sync
+AT_CHECK([ovn_as az1 ovn-nbctl lr-route-list lr1 | awk '/learned/{print $1, $2}'], [0], [dnl
+2002:db8:1::/64 2001:db8:1::2
+])
+
+# Do not learn routes from link-local nexthops
+for i in 1 2; do
+    ovn_as az$i
+    check ovn-nbctl lrp-del lrp-lr$i-ts1
+    check ovn-nbctl lrp-add lr$i lrp-lr$i-ts1 aa:aa:aa:aa:aa:0$i 169.254.100.$i/24
+done
+
+OVS_WAIT_WHILE([ovn_as az1 ovn-nbctl lr-route-list lr1 | grep learned])
+AT_CHECK([ovn_as az1 ovn-nbctl lr-route-list lr1 | grep -q learned], [1])
+
+OVN_CLEANUP_IC([az1], [az2])
+
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-ic -- route sync -- route tables])
+
+ovn_init_ic_db
+ovn-ic-nbctl ts-add ts1
+
+for i in 1 2; do
+    ovn_start az$i
+    ovn_as az$i
+    check ovn-ic-nbctl --wait=sb sync
+    # Enable route learning at AZ level
+    check ovn-nbctl set nb_global . options:ic-route-learn=true
+    # Enable route advertising at AZ level
+    check ovn-nbctl set nb_global . options:ic-route-adv=true
+
+    # Create LRP and connect to TS
+    check ovn-nbctl lr-add lr$i
+    check ovn-nbctl lrp-add lr$i lrp-lr$i-ts1 aa:aa:aa:aa:aa:0$i 169.254.100.$i/24
+    check ovn-nbctl lsp-add-router-port ts1 lsp-ts1-lr$i lrp-lr$i-ts1
+
+    # Create static routes
+    check ovn-nbctl lr-route-add lr$i 10.11.$i.0/24 169.254.0.1
+
+    # Create a src-ip route, which shouldn't be synced
+    check ovn-nbctl --policy=src-ip --route-table=rtb1 lr-route-add lr$i 10.22.$i.0/24 169.254.0.2
+done
+
+check ovn-ic-nbctl --wait=sb sync
+check ovn-ic-nbctl --wait=sb sync
+AT_CHECK([ovn_as az1 ovn-nbctl lr-route-list lr1], [0], [dnl
+IPv4 Routes
+Route Table <main>:
+             10.11.1.0/24               169.254.0.1 dst-ip
+             10.11.2.0/24             169.254.100.2 dst-ip (learned)
+
+Route Table rtb1:
+             10.22.1.0/24               169.254.0.2 src-ip
+])
+
+# move routes from <main> route table to rtb1
+for i in 1 2; do
+    ovn_as az$i ovn-nbctl lr-route-del lr$i 10.11.$i.0/24 169.254.0.1
+    ovn_as az$i ovn-nbctl --route-table=rtb1 lr-route-add lr$i 10.11.$i.0/24 169.254.0.1
+done
+
+check ovn-ic-nbctl --wait=sb sync
+check ovn-ic-nbctl --wait=sb sync
+# ensure route from rtb1 is not learned to any route table as route table is
+# not set to TS port
+AT_CHECK([ovn_as az1 ovn-nbctl lr-route-list lr1], [0], [dnl
+IPv4 Routes
+Route Table rtb1:
+             10.11.1.0/24               169.254.0.1 dst-ip
+             10.22.1.0/24               169.254.0.2 src-ip
+])
+
+# assign route table rtb1 to TS port on AZ2 and check routes are advertised to IC SB DB
+check ovn_as az2 ovn-nbctl lrp-set-options lrp-lr2-ts1 route_table=rtb1
+check ovn-ic-nbctl --wait=sb sync
+
+# ensure route was not learned as on AZ1 TS port's LRP was not set to route table rtb1
+AT_CHECK([ovn_as az1 ovn-nbctl lr-route-list lr1], [0], [dnl
+IPv4 Routes
+Route Table rtb1:
+             10.11.1.0/24               169.254.0.1 dst-ip
+             10.22.1.0/24               169.254.0.2 src-ip
+])
+
+# set TS port's LRP to route table rtb1 to learn routes from AZ2 from rtb1
+check ovn_as az1 ovn-nbctl lrp-set-options lrp-lr1-ts1 route_table=rtb1
+check ovn-ic-nbctl --wait=sb sync
+
+AT_CHECK([ovn_as az1 ovn-nbctl lr-route-list lr1], [0], [dnl
+IPv4 Routes
+Route Table rtb1:
+             10.11.1.0/24               169.254.0.1 dst-ip
+             10.11.2.0/24             169.254.100.2 dst-ip (learned)
+             10.22.1.0/24               169.254.0.2 src-ip
+])
+
+# Delete route in AZ1, AZ2's learned route should be deleted.
+ovn_as az1 ovn-nbctl --route-table=rtb1 lr-route-del lr1 10.11.1.0/24
+OVS_WAIT_WHILE([ovn_as az2 ovn-nbctl --route-table=rtb1 lr-route-list lr2 | grep learned])
+
+# Add the route back
+ovn_as az1 ovn-nbctl --route-table=rtb1 lr-route-add lr1 10.11.1.0/24 169.254.0.1
+OVS_WAIT_UNTIL([ovn_as az2 ovn-nbctl lr-route-list lr2 | grep learned])
+
+# Disable route-learning for AZ1
+ovn_as az1 ovn-nbctl set nb_global . options:ic-route-learn=false
+OVS_WAIT_WHILE([ovn_as az1 ovn-nbctl lr-route-list lr1 | grep learned])
+AT_CHECK([ovn_as az1 ovn-nbctl lr-route-list lr1], [0], [dnl
+IPv4 Routes
+Route Table rtb1:
+             10.11.1.0/24               169.254.0.1 dst-ip
+             10.22.1.0/24               169.254.0.2 src-ip
+])
+
+# AZ1 should still advertise and AZ2 should still learn the route
+AT_CHECK([ovn_as az2 ovn-nbctl lr-route-list lr2 | grep learned], [0], [ignore])
+AT_CHECK([ovn_as az2 ovn-nbctl lr-route-list lr2], [0], [dnl
+IPv4 Routes
+Route Table rtb1:
+             10.11.1.0/24             169.254.100.1 dst-ip (learned)
+             10.11.2.0/24               169.254.0.1 dst-ip
+             10.22.2.0/24               169.254.0.2 src-ip
+])
+
+# Disable route-advertising for AZ1
+ovn_as az1 ovn-nbctl set nb_global . options:ic-route-adv=false
+
+# AZ2 shouldn't have the route learned, because AZ1 have stopped advertising.
+OVS_WAIT_WHILE([ovn_as az2 ovn-nbctl lr-route-list lr2 | grep learned])
+
+# Add default route in AZ1
+ovn_as az1 ovn-nbctl --route-table=rtb1 lr-route-add lr1 0.0.0.0/0 169.254.0.3
+
+# Re-enable router-advertising & learn for AZ1
+ovn_as az1 ovn-nbctl set nb_global . options:ic-route-adv=true
+ovn_as az1 ovn-nbctl set nb_global . options:ic-route-learn=true
+
+for i in 1 2; do
+    OVS_WAIT_UNTIL([ovn_as az$i ovn-nbctl lr-route-list lr$i | grep learned])
+done
+
+# Default route should NOT get advertised or learned, by default.
+AT_CHECK([ovn-ic-sbctl find route ip_prefix="0.0.0.0/0"], [0], [])
+
+# Enable default route advertising in AZ1, ensure it advertised, but not learned
+ovn_as az1 ovn-nbctl set nb_global . options:ic-route-adv-default=true
+OVS_WAIT_UNTIL([ovn-ic-sbctl find route ip_prefix="0.0.0.0/0" route_table=rtb1 | grep 0.0.0.0])
+OVS_WAIT_WHILE([ovn_as az2 ovn-nbctl --route-table=rtb1 lr-route-list lr2 | grep learned | grep 0.0.0.0])
+
+# Enable default route learning in AZ2
+ovn_as az2 ovn-nbctl set nb_global . options:ic-route-learn-default=true
+OVS_WAIT_UNTIL([ovn_as az2 ovn-nbctl --route-table=rtb1 lr-route-list lr2 | grep learned | grep 0.0.0.0])
+
+# Test directly connected subnet route advertising. Route should go to <main> route table.
+ovn_as az1 ovn-nbctl lrp-add lr1 lrp-lr1-ls1 aa:aa:aa:aa:bb:01 "192.168.0.1/24"
+OVS_WAIT_UNTIL([ovn-ic-sbctl find route ip_prefix="192.168.0.1/24" route_table="\"\"" | grep 192.168.0.1/24])
+OVS_WAIT_UNTIL([ovn_as az2 ovn-nbctl lr-route-list lr2 | grep learned | grep 192.168])
+AT_CHECK([ovn_as az2 ovn-nbctl lr-route-list lr2], [0], [dnl
+IPv4 Routes
+Route Table <main>:
+           192.168.0.0/24             169.254.100.1 dst-ip (learned)
+
+Route Table rtb1:
+             10.11.1.0/24             169.254.100.1 dst-ip (learned)
+             10.11.2.0/24               169.254.0.1 dst-ip
+             10.22.2.0/24               169.254.0.2 src-ip
+                0.0.0.0/0             169.254.100.1 dst-ip (learned)
+])
+
+# Delete the directly connected subnet from AZ1, learned route should be
+# removed from AZ2.
+ovn_as az1 ovn-nbctl lrp-del lrp-lr1-ls1
+OVS_WAIT_WHILE([ovn_as az2 ovn-nbctl lr-route-list lr2 | grep learned | grep 192.168])
+
+# Test denylist routes
+# Add back the directly connected 192.168 route.
+ovn_as az1 ovn-nbctl lrp-add lr1 lrp-lr1-ls1 aa:aa:aa:aa:bb:01 "192.168.0.1/24"
+OVS_WAIT_UNTIL([ovn_as az2 ovn-nbctl lr-route-list lr2 | grep learned | grep 192.168])
+# Now add 10.11.0.0/16 and 192.168.0.0/16 to denylist in AZ2.
+check ovn_as az2 ovn-nbctl set nb_global . options:ic-route-denylist="10.11.0.0/16,192.168.0.0/16"
+# AZ2 shouldn't learn 192.168 route any more.
+OVS_WAIT_WHILE([ovn_as az2 ovn-nbctl lr-route-list lr2 | grep learned | grep 192.168])
+# AZ1 shouldn't learn 10.11 any more.
+OVS_WAIT_WHILE([ovn_as az1 ovn-nbctl lr-route-list lr1 | grep learned | grep 10.11])
+AT_CHECK([ovn_as az2 ovn-nbctl lr-route-list lr2], [0], [dnl
+IPv4 Routes
+Route Table rtb1:
+             10.11.2.0/24               169.254.0.1 dst-ip
+             10.22.2.0/24               169.254.0.2 src-ip
+                0.0.0.0/0             169.254.100.1 dst-ip (learned)
+])
+
+OVN_CLEANUP_IC([az1], [az2])
+
+AT_CLEANUP
+])
+
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-ic -- route sync -- multiple route tables])
+
+ovn_init_ic_db
+ovn-ic-nbctl ts-add ts1
+
+for i in 1 2; do
+    ovn_start az$i
+    ovn_as az$i
+
+    # Enable route learning at AZ level
+    check ovn-nbctl set nb_global . options:ic-route-learn=true
+    # Enable route advertising at AZ level
+    check ovn-nbctl set nb_global . options:ic-route-adv=true
+done
+
+# Create new transit switches and LRs. Test topology is next:
+# VPC1:
+#                       / transit switch (ts11) \
+# logical router (lr11) - transit switch (ts12) - logical router (lr12)
+#                       \ transit switch (ts13) /
+#
+# VPC2:
+#                       / transit switch (ts21) \
+# logical router (lr21)                           logical router (lr22)
+#                       \ transit switch (ts22) /
+#
+# each LR has one connected subnet except TS port
+
+
+# VPC1
+# create lr11, lr12, ts11, ts12, ts13 and connect them
+# assign route tables rtb1, rtb2, rtb3 to ts ports
+for i in 1 2; do
+    ovn_as az$i
+
+    lr=lr1$i
+    check ovn-nbctl lr-add $lr
+
+    for j in 1 2 3; do
+        ts=ts1$j
+        ovn-ic-nbctl --wait=sb --may-exist ts-add $ts
+
+        lrp=lrp-$lr-$ts
+        lsp=lsp-$ts-$lr
+        # Create LRP and connect to TS
+        check ovn-nbctl lrp-add $lr $lrp aa:aa:aa:aa:a$j:0$i 169.254.10$j.$i/24
+        check ovn-nbctl lrp-set-options $lrp route_table=rtb$j
+        check ovn-nbctl lsp-add-router-port $ts $lsp $lrp
+    done
+done
+
+# VPC2
+# create lr21, lr22, ts21, ts22 and connect them
+# assign route tables rtb1, rtb2, rtb3 to ts ports
+for i in 1 2; do
+    ovn_as az$i
+
+    lr=lr2$i
+    check ovn-nbctl lr-add $lr
+
+    for j in 1 2; do
+        ts=ts2$j
+        ovn-ic-nbctl --wait=sb --may-exist ts-add $ts
+
+        lrp=lrp-$lr-$ts
+        lsp=lsp-$ts-$lr
+        # Create LRP and connect to TS
+        check ovn-nbctl lrp-add $lr $lrp aa:aa:aa:aa:a$j:0$i 169.254.10$j.$i/24
+        check ovn-nbctl lrp-set-options $lrp route_table=rtb$j
+        check ovn-nbctl lsp-add-router-port $ts $lsp $lrp
+    done
+done
+
+# Create directly-connected and static routes in VPC1
+ovn_as az2 ovn-nbctl lrp-add lr12 lrp-lr12 aa:aa:aa:aa:bb:01 "192.168.0.1/24"
+ovn_as az2 ovn-nbctl --route-table=rtb1 lr-route-add lr12 10.10.10.0/24 192.168.0.10
+ovn_as az2 ovn-nbctl --route-table=rtb2 lr-route-add lr12 10.10.10.0/24 192.168.0.11
+ovn_as az2 ovn-nbctl --route-table=rtb3 lr-route-add lr12 10.10.10.0/24 192.168.0.12
+
+# Create directly-connected route in VPC2
+ovn_as az2 ovn-nbctl --wait=sb lrp-add lr22 lrp-lr22 aa:aa:aa:aa:bb:01 "192.168.0.1/24"
+check ovn-ic-nbctl --wait=sb sync
+check ovn-ic-nbctl --wait=sb sync
+# Test direct routes from lr12 were learned to lr11
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep 192.168 |
+             grep learned | awk '{print $1, $2, $5}' | sort ], [0], [dnl
+192.168.0.0/24 169.254.101.2 ecmp
+192.168.0.0/24 169.254.102.2 ecmp
+192.168.0.0/24 169.254.103.2 ecmp
+])
+
+# Test static routes from lr12 rtbs rtb1,rtb2,rtb3 were learned to lr11
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl --route-table=rtb1 lr-route-list lr11], [0], [dnl
+IPv4 Routes
+Route Table rtb1:
+            10.10.10.0/24             169.254.101.2 dst-ip (learned)
+])
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl --route-table=rtb2 lr-route-list lr11], [0], [dnl
+IPv4 Routes
+Route Table rtb2:
+            10.10.10.0/24             169.254.102.2 dst-ip (learned)
+])
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl --route-table=rtb3 lr-route-list lr11], [0], [dnl
+IPv4 Routes
+Route Table rtb3:
+            10.10.10.0/24             169.254.103.2 dst-ip (learned)
+])
+
+# Test routes from lr12 didn't leak as learned to lr21
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr21 | grep 192.168 | sort], [0], [dnl
+           192.168.0.0/24             169.254.101.2 dst-ip (learned) ecmp
+           192.168.0.0/24             169.254.102.2 dst-ip (learned) ecmp
+])
+
+OVN_CLEANUP_IC([az1], [az2])
+
+AT_CLEANUP
+])
+
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-ic -- route sync -- multiple route tables IPv6])
+
+ovn_init_ic_db
+ovn-ic-nbctl ts-add ts1
+
+for i in 1 2; do
+    ovn_start az$i
+    ovn_as az$i
+
+    # Enable route learning at AZ level
+    check ovn-nbctl set nb_global . options:ic-route-learn=true
+    # Enable route advertising at AZ level
+    check ovn-nbctl set nb_global . options:ic-route-adv=true
+done
+
+# Create new transit switches and LRs. Test topology is next:
+# VPC1:
+#                       / transit switch (ts11) \
+# logical router (lr11) - transit switch (ts12) - logical router (lr12)
+#                       \ transit switch (ts13) /
+#
+# VPC2:
+#                       / transit switch (ts21) \
+# logical router (lr21)                           logical router (lr22)
+#                       \ transit switch (ts22) /
+#
+# each LR has one connected subnet except TS port
+
+
+# VPC1
+# create lr11, lr12, ts11, ts12, ts13 and connect them
+# assign route tables rtb1, rtb2, rtb3 to ts ports
+for i in 1 2; do
+    ovn_as az$i
+
+    lr=lr1$i
+    check ovn-nbctl lr-add $lr
+
+    for j in 1 2 3; do
+        ts=ts1$j
+        ovn-ic-nbctl --wait=sb --may-exist ts-add $ts
+
+        lrp=lrp-$lr-$ts
+        lsp=lsp-$ts-$lr
+        # Create LRP and connect to TS
+        check ovn-nbctl lrp-add $lr $lrp aa:aa:aa:aa:a$j:0$i 2001:db8:$j::$i/64
+        check ovn-nbctl lrp-set-options $lrp route_table=rtb$j
+        check ovn-nbctl lsp-add-router-port $ts $lsp $lrp
+    done
+done
+
+# VPC2
+# create lr21, lr22, ts21, ts22 and connect them
+# assign route tables rtb1, rtb2, rtb3 to ts ports
+for i in 1 2; do
+    ovn_as az$i
+
+    lr=lr2$i
+    check ovn-nbctl lr-add $lr
+
+    for j in 1 2; do
+        ts=ts2$j
+        ovn-ic-nbctl --wait=sb --may-exist ts-add $ts
+
+        lrp=lrp-$lr-$ts
+        lsp=lsp-$ts-$lr
+        # Create LRP and connect to TS
+        check ovn-nbctl lrp-add $lr $lrp aa:aa:aa:aa:a$j:0$i 2001:db8:$j::$i/64
+        check ovn-nbctl lrp-set-options $lrp route_table=rtb$j
+        check ovn-nbctl lsp-add-router-port $ts $lsp $lrp
+    done
+done
+
+# Create directly-connected and static routes in VPC1
+ovn_as az2 ovn-nbctl lrp-add lr12 lrp-lr12 aa:aa:aa:aa:bb:01 "2001:db8:200::1/64"
+ovn_as az2 ovn-nbctl --route-table=rtb1 lr-route-add lr12 2001:db8:aaaa::/64 2001:db8:200::10
+ovn_as az2 ovn-nbctl --route-table=rtb2 lr-route-add lr12 2001:db8:aaaa::/64 2001:db8:200::11
+ovn_as az2 ovn-nbctl --route-table=rtb3 lr-route-add lr12 2001:db8:aaaa::/64 2001:db8:200::12
+
+# Create directly-connected route in VPC2
+ovn_as az2 ovn-nbctl --wait=sb lrp-add lr22 lrp-lr22 aa:aa:aa:aa:bb:01 "2001:db8:200::1/64"
+
+# Test direct routes from lr12 were learned to lr11
+#
+# We need to wait twice: first time for az2/ic to handle port addition and update ic/sb and
+# second time for az1/ic to handle ic/sb update.
+check ovn-ic-nbctl --wait=sb sync
+check ovn-ic-nbctl --wait=sb sync
+AT_CHECK([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep 2001:db8:200 |
+             grep learned | awk '{print $1, $2, $5}' | sort], [0], [dnl
+2001:db8:200::/64 2001:db8:1::2 ecmp
+2001:db8:200::/64 2001:db8:2::2 ecmp
+2001:db8:200::/64 2001:db8:3::2 ecmp
+])
+
+# Test static routes from lr12 rtbs rtb1,rtb2,rtb3 were learned to lr11
+OVS_WAIT_UNTIL([ovn_as az1 ovn-nbctl --route-table=rtb1 lr-route-list lr11 | grep learned])
+AT_CHECK([ovn_as az1 ovn-nbctl --route-table=rtb1 lr-route-list lr11], [0], [dnl
+IPv6 Routes
+Route Table rtb1:
+       2001:db8:aaaa::/64             2001:db8:1::2 dst-ip (learned)
+])
+OVS_WAIT_UNTIL([ovn_as az1 ovn-nbctl --route-table=rtb2 lr-route-list lr11 | grep learned])
+AT_CHECK([ovn_as az1 ovn-nbctl --route-table=rtb2 lr-route-list lr11], [0], [dnl
+IPv6 Routes
+Route Table rtb2:
+       2001:db8:aaaa::/64             2001:db8:2::2 dst-ip (learned)
+])
+OVS_WAIT_UNTIL([ovn_as az1 ovn-nbctl --route-table=rtb3 lr-route-list lr11 | grep learned])
+AT_CHECK([ovn_as az1 ovn-nbctl --route-table=rtb3 lr-route-list lr11], [0], [dnl
+IPv6 Routes
+Route Table rtb3:
+       2001:db8:aaaa::/64             2001:db8:3::2 dst-ip (learned)
+])
+
+# Test routes from lr12 didn't leak as learned to lr21
+OVS_WAIT_UNTIL([ovn_as az1 ovn-nbctl lr-route-list lr21 | grep "2001:db8:2::2" | grep learned])
+AT_CHECK([ovn_as az1 ovn-nbctl lr-route-list lr21 | grep 2001 | sort], [0], [dnl
+        2001:db8:200::/64             2001:db8:1::2 dst-ip (learned) ecmp
+        2001:db8:200::/64             2001:db8:2::2 dst-ip (learned) ecmp
+])
+
+OVN_CLEANUP_IC([az1], [az2])
+
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-ic -- same routes destination])
+
+ovn_init_ic_db
+ovn-ic-nbctl ts-add ts1
+
+for i in 1 2; do
+    ovn_start az$i
+    ovn_as az$i
+    check ovn-ic-nbctl --wait=sb sync
+
+    # Enable route learning at AZ level
+    check ovn-nbctl set nb_global . options:ic-route-learn=true
+    check ovn-nbctl set nb_global . options:ic-route-learn-default=true
+    # Enable route advertising at AZ level
+    check ovn-nbctl set nb_global . options:ic-route-adv=true
+    check ovn-nbctl set nb_global . options:ic-route-adv-default=true
+
+    lr=lr1$i
+    check ovn-nbctl lr-add $lr
+
+    lrp=lrp-$lr-ts1
+    lsp=lsp-ts1-$lr
+    # Create LRP and connect to TS
+    check ovn-nbctl lrp-add $lr $lrp aa:aa:aa:aa:aa:0$i 169.254.100.$i/24
+    check ovn-nbctl lsp-add-router-port ts1 $lsp $lrp
+    check ovn-nbctl lrp-add $lr lrp-local-subnet 00:00:00:00:00:0$i 192.168.$i.1/24
+    ovn-nbctl list logical-router-static-route
+    check ovn-nbctl lr-route-add $lr 10.0.0.0/24 192.168.$i.10
+    check ovn-nbctl --wait=sb lr-route-add $lr 0.0.0.0/0 192.168.$i.11
+done
+
+check ovn-ic-nbctl --wait=sb sync
+check ovn-ic-nbctl --wait=sb sync
+AT_CHECK([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep dst-ip | sort] , [0], [dnl
+                0.0.0.0/0              192.168.1.11 dst-ip
+              10.0.0.0/24              192.168.1.10 dst-ip
+           192.168.2.0/24             169.254.100.2 dst-ip (learned)
+])
+
+AT_CHECK([ovn_as az2 ovn-nbctl lr-route-list lr12 | grep dst-ip | sort], [0], [dnl
+                0.0.0.0/0              192.168.2.11 dst-ip
+              10.0.0.0/24              192.168.2.10 dst-ip
+           192.168.1.0/24             169.254.100.1 dst-ip (learned)
+])
+
+OVN_CLEANUP_IC([az1], [az2])
+
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-ic -- route sync -- multiple logical routers])
+
+ovn_init_ic_db
+ovn-ic-nbctl ts-add ts1
+
+for i in 1 2; do
+    ovn_start az$i
+    ovn_as az$i
+
+    # Enable route learning at AZ level
+    check ovn-nbctl set nb_global . options:ic-route-learn=true
+    # Enable route advertising at AZ level
+    check ovn-nbctl set nb_global . options:ic-route-adv=true
+done
+
+# Create new transit switches and LRs. Test topology is next:
+#
+# logical router (lr11) - transit switch (ts1) - logical router (lr21)
+#                                              \- logical router (lr22)
+#
+# each LR has one connected subnet except TS port
+
+
+# create lr11, lr21, lr22 and connect them
+
+ovn_as az1
+check ovn-ic-nbctl --wait=sb sync
+
+lr=lr11
+check ovn-nbctl lr-add $lr
+
+lrp=lrp-$lr-ts1
+lsp=lsp-ts1-$lr
+# Create LRP and connect to TS
+check ovn-nbctl lrp-add $lr $lrp aa:aa:aa:aa:a1:01 169.254.10.11/24
+check ovn-nbctl lsp-add-router-port ts1 $lsp $lrp
+
+ovn_as az2
+for i in 1 2; do
+    lr=lr2$i
+    check ovn-nbctl lr-add $lr
+
+    lrp=lrp-$lr-ts1
+    lsp=lsp-ts1-$lr
+    # Create LRP and connect to TS
+    check ovn-nbctl lrp-add $lr $lrp aa:aa:aa:aa:a2:0$i 169.254.10.2$i/24
+    check ovn-nbctl lsp-add-router-port ts1 $lsp $lrp
+done
+
+# Create directly-connected routes
+ovn_as az1 ovn-nbctl lrp-add lr11 lrp-lr11 aa:aa:aa:aa:bb:01 "192.168.0.1/24"
+ovn_as az2 ovn-nbctl lrp-add lr21 lrp-lr21 aa:aa:aa:aa:bc:01 "192.168.1.1/24"
+ovn_as az2 ovn-nbctl --wait=sb lrp-add lr22 lrp-lr22 aa:aa:aa:aa:bc:02 "192.168.2.1/24"
+
+# Test direct routes from lr21 and lr22 were learned to lr11
+check ovn-ic-nbctl --wait=sb sync
+check ovn-ic-nbctl --wait=sb sync
+AT_CHECK([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep 192.168 |
+             grep learned | awk '{print $1, $2}' | sort ], [0], [dnl
+192.168.1.0/24 169.254.10.21
+192.168.2.0/24 169.254.10.22
+])
+
+# Test direct routes from lr11 and lr22 were learned to lr21
+AT_CHECK([ovn_as az2 ovn-nbctl lr-route-list lr21 | grep 192.168 |
+             grep learned | awk '{print $1, $2}' | sort ], [0], [dnl
+192.168.0.0/24 169.254.10.11
+192.168.2.0/24 169.254.10.22
+])
+
+# Test direct routes from lr11 and lr21 were learned to lr22
+AT_CHECK([ovn_as az2 ovn-nbctl lr-route-list lr22 | grep 192.168 |
+             grep learned | awk '{print $1, $2}' | sort ], [0], [dnl
+192.168.0.0/24 169.254.10.11
+192.168.1.0/24 169.254.10.21
+])
+
+OVN_CLEANUP_IC([az1], [az2])
+
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-ic -- sync ISB status to INB])
+ovn_init_ic_db
+net_add n1
+
+ovn_start az1
+sim_add gw-az1
+as gw-az1
+
+check ovs-vsctl add-br br-phys
+ovn_az_attach az1 n1 br-phys 192.168.1.1
+check ovs-vsctl set open . external-ids:ovn-is-interconn=true
+as az1
+
+# pause ovn-ic instance
+check ovn-appctl -t ic/ovn-ic pause
+
+# run sync command in the background this commands
+# supposed to stuck since ovn-ic is paused.
+ovn-ic-nbctl --wait=sb sync &
+
+OVS_WAIT_UNTIL([test $(ovn-ic-nbctl get ic_nb_global . nb_ic_cfg) -gt $(ovn-ic-nbctl get ic_nb_global . sb_ic_cfg)])
+AT_CHECK([ovn-ic-nbctl get ic_nb_global . nb_ic_cfg], [0], [dnl
+1
+])
+AT_CHECK([ovn-ic-nbctl get ic_nb_global . sb_ic_cfg], [0], [dnl
+0
+])
+
+# resume ovn-ic instance
+check ovn-appctl -t ic/ovn-ic resume
+OVS_WAIT_UNTIL([test $(ovn-ic-nbctl get ic_nb_global . nb_ic_cfg) -eq $(ovn-ic-nbctl get ic_nb_global . sb_ic_cfg)])
+AT_CHECK([ovn-ic-nbctl get ic_nb_global . nb_ic_cfg], [0], [dnl
+1
+])
+AT_CHECK([ovn-ic-nbctl get ic_nb_global . sb_ic_cfg], [0], [dnl
+1
+])
+
+OVN_CLEANUP_IC([az1])
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-ic -- route sync -- IPv6 denylist filter])
+AT_KEYWORDS([IPv6-route-sync-denylist])
+
+ovn_init_ic_db
+check ovn-ic-nbctl ts-add ts1
+
+for i in 1 2; do
+    ovn_start az$i
+    ovn_as az$i
+    # Enable route learning at AZ level
+    check ovn-nbctl set nb_global . options:ic-route-learn=true
+    # Enable route advertising at AZ level
+    check ovn-nbctl set nb_global . options:ic-route-adv=true
+    # Enable denylist single filter for IPv6
+    check ovn-nbctl set nb_global . options:ic-route-denylist=" \
+            2003:db08:1::/64,2004:aaaa::/32,2005:1234::/21"
+
+    check ovn-ic-nbctl --wait=sb sync
+    # Create LRP and connect to TS
+    check ovn-nbctl lr-add lr$i
+    check ovn-nbctl lrp-add lr$i lrp-lr$i-ts1 aa:aa:aa:aa:aa:0$i \
+            2001:db8:1::$i/64
+    check ovn-nbctl lsp-add-router-port ts1 lsp-ts1-lr$i lrp-lr$i-ts1
+
+    check ovn-nbctl lrp-add lr$i lrp-lr$i-p$i 00:00:00:00:00:0$i \
+            2002:db8:1::$i/64
+
+    # Create denylisted LRPs and connect to TS
+    check ovn-nbctl lrp-add lr$i lrp-lr$i-p-ext$i \
+            11:11:11:11:11:1$i 2003:db88:1::$i/64
+
+    check ovn-nbctl lrp-add lr$i lrp-lr$i-p-ext1$i \
+            11:11:11:11:12:1$i 2003:db08:1::$i/64
+
+    check ovn-nbctl lrp-add lr$i lrp-lr$i-p-ext2$i \
+            22:22:22:22:22:2$i 2004:aaaa:bbb::$i/48
+
+    # filtered by 2005:1234::/21 - (2005:1000: - 2005:17ff:)
+    check ovn-nbctl lrp-add lr$i lrp-lr$i-p-ext3$i \
+            33:33:33:33:33:3$i 2005:1734:5678::$i/50
+
+    # additional not filtered prefix -> different subnet bits
+    check ovn-nbctl --wait=sb lrp-add lr$i lrp-lr$i-p-ext4$i \
+            44:44:44:44:44:4$i 2005:1834:5678::$i/50
+done
+
+check ovn-ic-nbctl --wait=sb sync
+check ovn-ic-nbctl --wait=sb sync
+AT_CHECK([ovn_as az1 ovn-nbctl lr-route-list lr1 |
+    awk '/learned/{print $1, $2}' ], [0], [dnl
+2002:db8:1::/64 2001:db8:1::2
+2003:db88:1::/64 2001:db8:1::2
+2005:1834:5678::/50 2001:db8:1::2
+])
+
+for i in 1 2; do
+    ovn_as az$i
+
+    # Drop denylist
+    check ovn-nbctl remove nb_global . options ic-route-denylist
+done
+
+check ovn-ic-nbctl --wait=sb sync
+check ovn-ic-nbctl --wait=sb sync
+AT_CHECK([ovn_as az1 ovn-nbctl lr-route-list lr1 |
+    awk '/learned/{print $1, $2}' | sort ], [0], [dnl
+2002:db8:1::/64 2001:db8:1::2
+2003:db08:1::/64 2001:db8:1::2
+2003:db88:1::/64 2001:db8:1::2
+2004:aaaa:bbb::/48 2001:db8:1::2
+2005:1734:5678::/50 2001:db8:1::2
+2005:1834:5678::/50 2001:db8:1::2
+])
+
+for i in 1 2; do
+    ovn_as az$i
+
+    check ovn-nbctl set nb_global . \
+            options:ic-route-denylist="2003:db88:1::/64,2004:db8:1::/64"
+
+    # Create an 'extra' denylisted LRP and connect to TS
+    check ovn-nbctl lrp-add lr$i lrp-lr$i-p-ext5$i \
+            55:55:55:55:55:5$i 2004:db8:1::$i/64
+done
+
+check ovn-ic-nbctl --wait=sb sync
+AT_CHECK([ovn_as az1 ovn-nbctl lr-route-list lr1 |
+    awk '/learned/{print $1, $2}' | sort ], [0], [dnl
+2002:db8:1::/64 2001:db8:1::2
+2003:db08:1::/64 2001:db8:1::2
+2004:aaaa:bbb::/48 2001:db8:1::2
+2005:1734:5678::/50 2001:db8:1::2
+2005:1834:5678::/50 2001:db8:1::2
+])
+
+OVN_CLEANUP_IC([az1], [az2])
+
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([interconnection])
+AT_KEYWORDS([slowtest])
+
+ovn_init_ic_db
+# The number needs to stay relatively low due to high memory consumption
+# with address sanitizers enabled.
+n_az=3
+n_ts=3
+for i in `seq 1 $n_az`; do
+    ovn_start az$i
+done
+
+net_add n1
+
+# 1 HV and 1 GW per AZ
+for az in `seq 1 $n_az`; do
+    sim_add hv$az
+    as hv$az
+    check ovs-vsctl add-br br-phys
+    ovn_az_attach az$az n1 br-phys 192.168.$az.1 16
+    for p in `seq 1 $n_ts`; do
+        check ovs-vsctl -- add-port br-int vif$p -- \
+            set interface vif$p external-ids:iface-id=lsp$az-$p \
+            options:tx_pcap=hv$az/vif$p-tx.pcap \
+            options:rxq_pcap=hv$az/vif$p-rx.pcap \
+            ofport-request=$p
+    done
+
+    sim_add gw$az
+    as gw$az
+    check ovs-vsctl add-br br-phys
+    ovn_az_attach az$az n1 br-phys 192.168.$az.2 16
+    check ovs-vsctl set open . external-ids:ovn-is-interconn=true
+done
+
+for ts in `seq 1 $n_ts`; do
+    AT_CHECK([ovn-ic-nbctl --wait=sb create Transit_Switch name=ts$ts], [0], [ignore])
+done
+
+for az in `seq 1 $n_az`; do
+    ovn_as az$az
+    check ovn-nbctl set nb_global . options:ic-route-learn=true
+    check ovn-nbctl set nb_global . options:ic-route-adv=true
+
+    # Each AZ has n_ts LSPi->LSi->LRi connecting to each TSi
+    echo
+    echo "az$az"
+    for i in `seq 1 $n_ts`; do
+        lsp_mac=00:00:00:0$az:0$i:00
+        lrp_ls_mac=00:00:00:0$az:0$i:01
+        lrp_ts_mac=00:00:00:0$az:0$i:02
+        lsp_ip=10.$az.$i.123
+        lrp_ls_ip=10.$az.$i.1
+        lrp_ts_ip=169.254.$i.$az
+
+        check ovn-nbctl ls-add ls$az-$i
+        check ovn-nbctl lsp-add ls$az-$i lsp$az-$i
+        check ovn-nbctl lsp-set-addresses lsp$az-$i "$lsp_mac $lsp_ip"
+
+        check ovn-nbctl lr-add lr$az-$i
+
+        check ovn-nbctl lrp-add lr$az-$i lrp-lr$az-$i-ls$az-$i $lrp_ls_mac $lrp_ls_ip/24
+        check ovn-nbctl lsp-add-router-port ls$az-$i lsp-ls$az-$i-lr$az-$i lrp-lr$az-$i-ls$az-$i
+
+        check ovn-nbctl -- lrp-add lr$az-$i lrp-lr$az-$i-ts$i $lrp_ts_mac $lrp_ts_ip/24 \
+                        -- lsp-add-router-port ts$i lsp-ts$i-lr$az-$i lrp-lr$az-$i-ts$i \
+                        -- lrp-set-gateway-chassis lrp-lr$az-$i-ts$i gw$az
+    done
+    check ovn-nbctl --wait=hv sync
+    ovn-sbctl list Port_Binding > az$az.ports
+    wait_for_ports_up
+done
+
+# Pre-populate the hypervisors' ARP tables so that we don't lose any
+# packets for ARP resolution (native tunneling doesn't queue packets
+# for ARP resolution).
+OVN_POPULATE_ARP
+
+for i in `seq 1 $n_az`; do
+    check ovn_as az$i ovn-nbctl --wait=hv sync
+    ovn_as az$i ovn-sbctl dump-flows > az$i/sbflows
+done
+
+# Allow some time for ovn-northd and ovn-controller to catch up.
+# XXX This should be more systematic.
+sleep 2
+
+# Populate requested-chassis options for remote lsps
+for az in $(seq 1 $n_az); do
+    ovn_as az${az}
+    for ts in $(seq 1 $n_ts); do
+        for i in $(seq 1 $n_ts); do
+            if [[ $i -eq ${az} ]]; then
+                continue
+            fi
+            check ovn-nbctl lsp-set-options lsp-ts${ts}-lr${i}-${ts} requested-chassis=gw$i
+        done
+    done
+done
+
+ovn-ic-nbctl show > ic-nbctl.dump
+AT_CAPTURE_FILE([ic-nbctl.dump])
+
+(echo "---------ISB dump-----"
+ ovn-ic-sbctl show
+ echo "---------------------"
+ ovn-ic-sbctl list gateway
+ echo "---------------------"
+ ovn-ic-sbctl list datapath_binding
+ echo "---------------------"
+ ovn-ic-sbctl list port_binding
+ echo "---------------------"
+ ovn-ic-sbctl list route
+ echo "---------------------") > ic-sbctl.dump
+AT_CAPTURE_FILE([ic-sbctl.dump])
+
+AT_CAPTURE_FILE([expected])
+AT_CAPTURE_FILE([received])
+check_packets() {
+    > expected
+    > received
+    for az in `seq 1 $n_az`; do
+        for i in `seq 1 $n_ts`; do
+            pcap=hv$az/vif$i-tx.pcap
+            echo "--- $pcap" | tee -a expected >> received
+            if test -e $az-$i.expected; then
+                sort $az-$i.expected >> expected
+            fi
+            if test -e $pcap; then
+                $PYTHON "$ovs_srcdir/utilities/ovs-pcap.in" $pcap | sort >> received
+            fi
+            echo | tee -a expected >> received
+        done
+    done
+
+    $at_diff expected received >/dev/null
+}
+
+# Send packets between AZs on each TS
+for s_az in $(seq 1 $n_az); do
+    ovn_as az${s_az}
+    as hv${s_az}
+    for d_az in $(seq 1 $n_az); do
+        if test $s_az = $d_az; then
+            continue
+        fi
+
+        for i in $(seq 1 $n_ts); do
+            echo
+            AS_BOX([packet from az$s_az to az$d_az via ts$i])
+            lsp_smac=00:00:00:0${s_az}:0$i:00
+            lsp_dmac=00:00:00:0${d_az}:0$i:00
+            lrp_ls_smac=00:00:00:0${s_az}:0$i:01
+            lrp_ls_dmac=00:00:00:0${d_az}:0$i:01
+            lsp_sip=10.${s_az}.$i.123
+            lsp_dip=10.${d_az}.$i.123
+
+            ovn_inport=lsp${s_az}-$i
+            packet="inport==\"$ovn_inport\" && eth.src==$lsp_smac && eth.dst==$lrp_ls_smac &&
+                    ip4 && ip.ttl==64 && ip4.src==$lsp_sip && ip4.dst==$lsp_dip &&
+                    udp && udp.src==53 && udp.dst==4369"
+            echo "sending: $packet"
+            AT_CHECK([ovn_trace --ovs "$packet" > ${s_az}-${d_az}-$i.ovn-trace])
+            OVS_WAIT_UNTIL([ovn-appctl -t ovn-controller inject-pkt "$packet"])
+            ovs_inport=$(ovs-vsctl --bare --columns=ofport find Interface external-ids:iface-id="$ovn_inport")
+
+            ovs_packet=$(echo $packet | ovstest test-ovn expr-to-packets)
+            echo ovs_inport=$ovs_inport ovs_packet=$ovs_packet
+            AT_CHECK([ovs-appctl ofproto/trace br-int in_port="$ovs_inport" "$ovs_packet" > ${s_az}-${d_az}-$i.ovs-trace])
+
+            # Packet to Expect
+            # The TTL should be decremented by 2.
+            packet="eth.src==$lrp_ls_dmac && eth.dst==$lsp_dmac &&
+                    ip4 && ip.ttl==62 && ip4.src==$lsp_sip && ip4.dst==$lsp_dip &&
+                    udp && udp.src==53 && udp.dst==4369"
+            echo $packet | ovstest test-ovn expr-to-packets >> ${d_az}-$i.expected
+        done
+    done
+done
+OVS_WAIT_UNTIL([check_packets], [$at_diff -F'^---' expected received])
+
+ovn_as az1 OVN_CLEANUP_SBOX([hv1])
+ovn_as az2 OVN_CLEANUP_SBOX([hv2])
+ovn_as az3 OVN_CLEANUP_SBOX([hv3])
+
+for az in `seq 1 $n_az`; do
+    ovn_as az$az
+    OVN_CLEANUP_SBOX([gw$az])
+    OVN_CLEANUP_AZ([az$az])
+done
+
+OVN_CLEANUP_IC
+
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([interconnection - static multicast])
+
+# Logical network:
+#
+#       AZ1                     |                     AZ2
+#   ---------------------------------------------------------------------
+#                               |
+#                               |     +-- LR2 --- LS2 --- LSP2 (sender)
+#                               |     |            |
+#                               |     |            +----- LSP4 (receiver)
+#                               |    /
+#     LSP1  --- LS1 --- LR1 --- TS ---
+#   (receiver)                  |    \
+#                               |     +-- LR3 --- LS3 --- LSP3 (receiver)
+#
+# LS1, LS2, LS3 configured to flood unregistered IP multicast.
+# LR1, LR2, LR3 configured to relay IP multicast.
+# LR1-LS1 configured to flood IP multicast traffic unconditionally.
+# LR3-LS3 configured to flood IP multicast traffic unconditionally.
+
+AT_CAPTURE_FILE([exp])
+AT_CAPTURE_FILE([rcv])
+check_packets() {
+    > exp
+    > rcv
+    if test "$1" = --uniq; then
+        sort="sort -u"; shift
+    else
+        sort=sort
+    fi
+    for tuple in "$@"; do
+        set $tuple; pcap=$1 type=$2
+        echo "--- $pcap" | tee -a exp >> rcv
+        $sort "$type" >> exp
+        $PYTHON "$ovs_srcdir/utilities/ovs-pcap.in" $pcap | $sort >> rcv
+        echo | tee -a exp >> rcv
+    done
+
+    $at_diff exp rcv >/dev/null
+}
+
+ovn_init_ic_db
+ovn_start az1
+ovn_start az2
+
+net_add n1
+
+sim_add hv1
+as hv1
+check ovs-vsctl add-br br-phys
+ovn_az_attach az1 n1 br-phys 192.168.1.1 16
+check ovs-vsctl -- add-port br-int hv1-vif1 \
+    -- set interface hv1-vif1 external-ids:iface-id=lsp1 \
+       options:tx_pcap=hv1/vif1-tx.pcap \
+       options:rxq_pcap=hv1/vif1-rx.pcap
+check ovs-vsctl set open . external-ids:ovn-is-interconn=true
+
+sim_add hv2
+as hv2
+check ovs-vsctl add-br br-phys
+ovn_az_attach az2 n1 br-phys 192.168.2.1 16
+check ovs-vsctl -- add-port br-int hv2-vif1 \
+    -- set interface hv2-vif1 external-ids:iface-id=lsp2 \
+       options:tx_pcap=hv2/vif1-tx.pcap \
+       options:rxq_pcap=hv2/vif1-rx.pcap
+check ovs-vsctl -- add-port br-int hv2-vif2 \
+    -- set interface hv2-vif2 external-ids:iface-id=lsp3 \
+       options:tx_pcap=hv2/vif2-tx.pcap \
+       options:rxq_pcap=hv2/vif2-rx.pcap
+check ovs-vsctl -- add-port br-int hv2-vif3 \
+    -- set interface hv2-vif3 external-ids:iface-id=lsp4 \
+       options:tx_pcap=hv2/vif3-tx.pcap \
+       options:rxq_pcap=hv2/vif3-rx.pcap
+check ovs-vsctl set open . external-ids:ovn-is-interconn=true
+
+AT_CHECK([ovn-ic-nbctl --wait=sb create Transit_Switch name=ts], [0], [ignore])
+
+ovn_as az1
+check ovn-nbctl lr-add lr1 \
+    -- lrp-add lr1 lr1-ts 00:00:00:01:00:01 42.42.42.1/24 \
+    -- lrp-add lr1 lr1-ls1 00:00:00:01:01:00 43.43.43.1/24 \
+    -- lrp-set-gateway-chassis lr1-ts hv1
+check ovn-nbctl ls-add ls1 \
+    -- lsp-add-router-port ls1 ls1-lr1 lr1-ls1 \
+    -- lsp-add ls1 lsp1
+check ovn-nbctl lsp-add-router-port ts ts-lr1 lr1-ts
+wait_for_ports_up
+
+ovn_as az2
+check ovn-nbctl lr-add lr2 \
+    -- lrp-add lr2 lr2-ts 00:00:00:02:00:01 42.42.42.2/24 \
+    -- lrp-add lr2 lr2-ls2 00:00:00:02:01:00 44.44.44.1/24 \
+    -- lrp-set-gateway-chassis lr2-ts hv2
+check ovn-nbctl ls-add ls2 \
+    -- lsp-add-router-port ls2 ls2-lr2 lr2-ls2 \
+    -- lsp-add ls2 lsp2 \
+    -- lsp-add ls2 lsp4
+check ovn-nbctl lsp-add-router-port ts ts-lr2 lr2-ts
+
+check ovn-nbctl lr-add lr3 \
+    -- lrp-add lr3 lr3-ts 00:00:00:02:00:02 42.42.42.3/24 \
+    -- lrp-add lr3 lr3-ls3 00:00:00:02:02:00 44.44.45.1/24 \
+    -- lrp-set-gateway-chassis lr3-ts hv2
+check ovn-nbctl ls-add ls3 \
+    -- lsp-add-router-port ls3 ls3-lr3 lr3-ls3 \
+    -- lsp-add ls3 lsp3
+check ovn-nbctl lsp-add-router-port ts ts-lr3 lr3-ts
+
+wait_for_ports_up
+check ovn-ic-nbctl --wait=sb sync
+check ovn-ic-nbctl --wait=sb sync
+
+ovn_as az1
+check ovn-nbctl lsp-set-options ts-lr2 requested-chassis=hv2
+check ovn-nbctl lsp-set-options ts-lr3 requested-chassis=hv2
+
+ovn_as az2
+check ovn-nbctl lsp-set-options ts-lr1 requested-chassis=hv1
+
+dnl Enable unregistered IP multicast flooding and IP multicast relay.
+ovn_as az1
+check ovn-nbctl set logical_switch ls1 other_config:mcast_snoop="true" \
+    other_config:mcast_flood_unregistered="true"
+check ovn-nbctl set logical_router lr1 options:mcast_relay="true"
+check ovn-nbctl set logical_router_port lr1-ls1 options:mcast_flood="true"
+
+ovn_as az2
+check ovn-nbctl set logical_switch ls2 other_config:mcast_snoop="true" \
+    other_config:mcast_flood_unregistered="true"
+check ovn-nbctl set logical_router lr2 options:mcast_relay="true"
+check ovn-nbctl set logical_router_port lr2-ts options:mcast_flood="true"
+check ovn-nbctl set logical_switch ls3 other_config:mcast_snoop="true" \
+    other_config:mcast_flood_unregistered="true"
+check ovn-nbctl set logical_router lr3 options:mcast_relay="true"
+check ovn-nbctl set logical_router_port lr3-ls3 options:mcast_flood="true"
+
+check ovn_as az1 ovn-nbctl --wait=hv sync
+check ovn_as az2 ovn-nbctl --wait=hv sync
+
+# Pre-populate the hypervisors' ARP tables so that we don't lose any
+# packets for ARP resolution (native tunneling doesn't queue packets
+# for ARP resolution).
+OVN_POPULATE_ARP
+
+# Send an IP multicast packet from lsp2, it should be forwarded
+# statically to lsp1, lsp3 and lsp4.
+> expected_az1
+> expected_az2
+> expected_az2_switched
+send_ip_multicast_pkt hv2-vif1 hv2 \
+    000000000001 01005e000144 \
+    $(ip_to_hex 44 44 44 2) $(ip_to_hex 239 0 1 68) 1e 20 7c6b 11 \
+    e518e518000aed350000
+store_ip_multicast_pkt \
+    000000010100 01005e000144 \
+    $(ip_to_hex 44 44 44 2) $(ip_to_hex 239 0 1 68) 1e 1e 7e6b 11 \
+    e518e518000aed350000 expected_az1
+store_ip_multicast_pkt \
+    000000020200 01005e000144 \
+    $(ip_to_hex 44 44 44 2) $(ip_to_hex 239 0 1 68) 1e 1e 7e6b 11 \
+    e518e518000aed350000 expected_az2
+store_ip_multicast_pkt \
+    000000000001 01005e000144 \
+    $(ip_to_hex 44 44 44 2) $(ip_to_hex 239 0 1 68) 1e 20 7c6b 11 \
+    e518e518000aed350000 expected_az2_switched
+
+OVS_WAIT_UNTIL(
+  [check_packets 'hv1/vif1-tx.pcap expected_az1' \
+                 'hv2/vif2-tx.pcap expected_az2' \
+                 'hv2/vif3-tx.pcap expected_az2_switched'],
+  [$at_diff -F'^---' exp rcv])
+
+# Send an IP multicast packet from lsp2 towards 224.0.0.x, it should be
+# forwarded statically only to lsp3.
+as hv1 reset_pcap_file hv1-vif1 hv1/vif1
+as hv2 reset_pcap_file hv2-vif2 hv2/vif2
+as hv2 reset_pcap_file hv2-vif3 hv2/vif3
+> expected_az1
+> expected_az2
+> expected_az2_switched
+send_ip_multicast_pkt hv2-vif1 hv2 \
+    000000000001 01005e000144 \
+    $(ip_to_hex 44 44 44 2) $(ip_to_hex 224 0 0 1) 1e 20 8cae 11 \
+    e518e518000aed350000
+store_ip_multicast_pkt \
+    000000000001 01005e000144 \
+    $(ip_to_hex 44 44 44 2) $(ip_to_hex 224 0 0 1) 1e 20 8cae 11 \
+    e518e518000aed350000 expected_az2_switched
+
+OVS_WAIT_UNTIL(
+  [check_packets 'hv1/vif1-tx.pcap expected_az1' \
+                 'hv2/vif2-tx.pcap expected_az2' \
+                 'hv2/vif3-tx.pcap expected_az2_switched'],
+  [$at_diff -F'^---' exp rcv])
+
+OVN_CLEANUP_SBOX([hv1],["/IGMP Querier enabled without a valid IPv4 or IPv6 address/d
+/IGMP Querier enabled with invalid ETH src address/d"])
+
+OVN_CLEANUP_SBOX([hv2],["/IGMP Querier enabled without a valid IPv4 or IPv6 address/d
+/IGMP Querier enabled with invalid ETH src address/d"])
+
+OVN_CLEANUP_IC([az1],[az2])
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([interconnection - IGMP/MLD multicast])
+AT_KEYWORDS([IP-multicast])
+
+# Logical network:
+#
+#       AZ1                     |                     AZ2
+#   ---------------------------------------------------------------------
+#                               |
+#                               |     +-- LR2 --- LS2 --- LSP2 (sender)
+#                               |    /
+#     LSP1  --- LS1 --- LR1 --- TS ---
+#   (receiver)                  |    \
+#                               |     +-- LR3 --- LS3 --- LSP3 (receiver)
+#
+# LS1, LS2, LS3, TS configured to snoop IP multicast.
+# LR1, LR2, LR3 configured to relay IP multicast.
+# LR1-TS configured to flood IP multicast traffic unconditionally.
+# LR2-TS configured to flood IP multicast traffic unconditionally.
+# LR3-TS configured to flood IP multicast traffic unconditionally.
+
+AT_CAPTURE_FILE([exp])
+AT_CAPTURE_FILE([rcv])
+check_packets() {
+    > exp
+    > rcv
+    if test "$1" = --uniq; then
+        sort="sort -u"; shift
+    else
+        sort=sort
+    fi
+    for tuple in "$@"; do
+        set $tuple; pcap=$1 type=$2
+        echo "--- $pcap" | tee -a exp >> rcv
+        $sort "$type" >> exp
+        $PYTHON "$ovs_srcdir/utilities/ovs-pcap.in" $pcap | $sort >> rcv
+        echo | tee -a exp >> rcv
+    done
+
+    $at_diff exp rcv >/dev/null
+}
+
+ovn_init_ic_db
+ovn_start az1
+ovn_start az2
+
+net_add n1
+
+sim_add hv1
+as hv1
+check ovs-vsctl add-br br-phys
+ovn_az_attach az1 n1 br-phys 192.168.1.1 16
+check ovs-vsctl -- add-port br-int hv1-vif1 \
+    -- set interface hv1-vif1 external-ids:iface-id=lsp1 \
+       options:tx_pcap=hv1/vif1-tx.pcap \
+       options:rxq_pcap=hv1/vif1-rx.pcap
+check ovs-vsctl set open . external-ids:ovn-is-interconn=true
+
+sim_add hv2
+as hv2
+check ovs-vsctl add-br br-phys
+ovn_az_attach az2 n1 br-phys 192.168.2.1 16
+check ovs-vsctl -- add-port br-int hv2-vif1 \
+    -- set interface hv2-vif1 external-ids:iface-id=lsp2 \
+       options:tx_pcap=hv2/vif1-tx.pcap \
+       options:rxq_pcap=hv2/vif1-rx.pcap
+check ovs-vsctl -- add-port br-int hv2-vif2 \
+    -- set interface hv2-vif2 external-ids:iface-id=lsp3 \
+       options:tx_pcap=hv2/vif2-tx.pcap \
+       options:rxq_pcap=hv2/vif2-rx.pcap
+check ovs-vsctl -- add-port br-int hv2-vif3 \
+    -- set interface hv2-vif3 external-ids:iface-id=lsp4 \
+       options:tx_pcap=hv2/vif3-tx.pcap \
+       options:rxq_pcap=hv2/vif3-rx.pcap
+check ovs-vsctl set open . external-ids:ovn-is-interconn=true
+
+AT_CHECK([ovn-ic-nbctl --wait=sb create Transit_Switch name=ts], [0], [ignore])
+check ovn_as az1 ovn-nbctl wait-until logical_switch ts
+check ovn_as az2 ovn-nbctl wait-until logical_switch ts
+
+ovn_as az1
+check ovn-nbctl lr-add lr1 \
+    -- lrp-add lr1 lr1-ts 00:00:00:01:00:01 42.42.42.1/24 4242::1/64 \
+    -- lrp-add lr1 lr1-ls1 00:00:00:01:01:00 43.43.43.1/24 4343::1/64\
+    -- lrp-set-gateway-chassis lr1-ts hv1
+check ovn-nbctl ls-add ls1 \
+    -- lsp-add-router-port ls1 ls1-lr1 lr1-ls1 \
+    -- lsp-add ls1 lsp1
+check ovn-nbctl lsp-add-router-port ts ts-lr1 lr1-ts
+wait_for_ports_up
+
+ovn_as az2
+check ovn-nbctl lr-add lr2 \
+    -- lrp-add lr2 lr2-ts 00:00:00:02:00:01 42.42.42.2/24 4242::2/64 \
+    -- lrp-add lr2 lr2-ls2 00:00:00:02:01:00 44.44.44.1/24 4444::1/64 \
+    -- lrp-set-gateway-chassis lr2-ts hv2
+check ovn-nbctl ls-add ls2 \
+    -- lsp-add-router-port ls2 ls2-lr2 lr2-ls2 \
+    -- lsp-add ls2 lsp2
+check ovn-nbctl lsp-add-router-port ts ts-lr2 lr2-ts
+check ovn-nbctl lsp-add ts lsp4 \
+    -- lsp-set-addresses lsp4 unknown
+
+check ovn-nbctl lr-add lr3 \
+    -- lrp-add lr3 lr3-ts 00:00:00:02:00:02 42.42.42.3/24 4242::3/64 \
+    -- lrp-add lr3 lr3-ls3 00:00:00:02:02:00 44.44.45.1/24 4445::1/64 \
+    -- lrp-set-gateway-chassis lr3-ts hv2
+check ovn-nbctl ls-add ls3 \
+    -- lsp-add-router-port ls3 ls3-lr3 lr3-ls3 \
+    -- lsp-add ls3 lsp3
+check ovn-nbctl lsp-add-router-port ts ts-lr3 lr3-ts
+
+wait_for_ports_up
+check ovn-ic-nbctl --wait=sb sync
+check ovn-ic-nbctl --wait=sb sync
+ovn_as az1
+check ovn-nbctl lsp-set-options ts-lr2 requested-chassis=hv2
+check ovn-nbctl lsp-set-options ts-lr3 requested-chassis=hv2
+
+ovn_as az2
+check ovn-nbctl lsp-set-options ts-lr1 requested-chassis=hv1
+
+dnl Enable IP multicast snooping and IP multicast relay.  Reports are
+dnl forwarded statically.
+ovn_as az1
+check ovn-nbctl set logical_switch ls1 other_config:mcast_snoop="true"
+check ovn-nbctl set Logical_Switch_Port ls1-lr1 options:mcast_flood_reports="true"
+check ovn-nbctl set logical_router lr1 options:mcast_relay="true"
+check ovn-nbctl set logical_router_port lr1-ts options:mcast_flood="true"
+check ovn-nbctl set logical_switch ts other_config:mcast_snoop="true"
+check ovn-nbctl set logical_switch_port ts-lr1 options:mcast_flood_reports="true"
+check ovn-nbctl set logical_switch_port ts-lr2 options:mcast_flood_reports="true"
+check ovn-nbctl set logical_switch_port ts-lr3 options:mcast_flood_reports="true"
+
+ovn_as az2
+check ovn-nbctl set logical_switch ls2 other_config:mcast_snoop="true"
+check ovn-nbctl set Logical_Switch_Port ls2-lr2 options:mcast_flood_reports="true"
+check ovn-nbctl set logical_router lr2 options:mcast_relay="true"
+check ovn-nbctl set logical_router_port lr2-ts options:mcast_flood="true"
+check ovn-nbctl set logical_switch ls3 other_config:mcast_snoop="true"
+check ovn-nbctl set Logical_Switch_Port ls3-lr3 options:mcast_flood_reports="true"
+check ovn-nbctl set logical_router lr3 options:mcast_relay="true"
+check ovn-nbctl set logical_router_port lr3-ts options:mcast_flood="true"
+check ovn-nbctl set logical_switch ts other_config:mcast_snoop="true"
+check ovn-nbctl set logical_switch_port ts-lr1 options:mcast_flood_reports="true"
+check ovn-nbctl set logical_switch_port ts-lr2 options:mcast_flood_reports="true"
+check ovn-nbctl set logical_switch_port ts-lr3 options:mcast_flood_reports="true"
+
+check ovn_as az1 ovn-nbctl --wait=hv sync
+check ovn_as az2 ovn-nbctl --wait=hv sync
+
+# Pre-populate the hypervisors' ARP tables so that we don't lose any
+# packets for ARP resolution (native tunneling doesn't queue packets
+# for ARP resolution).
+OVN_POPULATE_ARP
+
+# Inject IGMP Join for 239.0.1.68 on LSP1.
+send_igmp_v3_report hv1-vif1 hv1 \
+    000000000001 $(ip_to_hex 10 0 0 1) f9f8 \
+    $(ip_to_hex 239 0 1 68) 04 e9b9 \
+    /dev/null
+
+# Inject MLD Join for ff0a:dead:beef::1 on LSP1.
+send_mld_v2_report hv1-vif1 hv1 \
+    000000000001 10000000000000000000000000000001 \
+    ff0adeadbeef00000000000000000001 04 c0e4 \
+    /dev/null
+
+# Inject IGMP Join for 239.0.1.68 on LSP3.
+send_igmp_v3_report hv2-vif2 hv2 \
+    000000000001 $(ip_to_hex 10 0 0 1) f9f8 \
+    $(ip_to_hex 239 0 1 68) 04 e9b9 \
+    /dev/null
+
+# Inject MLD Join for ff0a:dead:beef::1 on LSP3.
+send_mld_v2_report hv2-vif2 hv2 \
+    000000000001 10000000000000000000000000000001 \
+    ff0adeadbeef00000000000000000001 04 c0e4 \
+    /dev/null
+
+# Inject IGMP Join for 239.0.1.68 on LSP4.
+send_igmp_v3_report hv2-vif3 hv2 \
+    000000000001 $(ip_to_hex 10 0 0 42) f9cf \
+    $(ip_to_hex 239 0 1 68) 04 e9b9 \
+    /dev/null
+
+# Inject MLD Join for ff0a:dead:beef::1 on LSP3.
+send_mld_v2_report hv2-vif3 hv2 \
+    000000000001 10000000000000000000000000000042 \
+    ff0adeadbeef00000000000000000001 04 c0a3 \
+    /dev/null
+
+# Check that the IGMP and MLD groups are learned on both AZs (on the LS
+# and TS).
+ovn_as az1
+wait_row_count IGMP_Group 2 address=239.0.1.68
+wait_row_count IGMP_Group 2 address='"ff0a:dead:beef::1"'
+check ovn-nbctl --wait=hv sync
+
+ovn_as az2
+wait_row_count IGMP_Group 2 address=239.0.1.68
+wait_row_count IGMP_Group 2 address='"ff0a:dead:beef::1"'
+check ovn-nbctl --wait=hv sync
+
+# Send an IP multicast packet from LSP2, it should be forwarded
+# to lsp1 and lsp3.
+> expected_az1
+> expected_az2
+> expected_az2-lsp4
+send_ip_multicast_pkt hv2-vif1 hv2 \
+    000000000001 01005e000144 \
+    $(ip_to_hex 44 44 44 2) $(ip_to_hex 239 0 1 68) 1e 20 7c6b 11 \
+    e518e518000aed350000
+store_ip_multicast_pkt \
+    000000010100 01005e000144 \
+    $(ip_to_hex 44 44 44 2) $(ip_to_hex 239 0 1 68) 1e 1e 7e6b 11 \
+    e518e518000aed350000 expected_az1
+store_ip_multicast_pkt \
+    000000020200 01005e000144 \
+    $(ip_to_hex 44 44 44 2) $(ip_to_hex 239 0 1 68) 1e 1e 7e6b 11 \
+    e518e518000aed350000 expected_az2
+store_ip_multicast_pkt \
+    000000020001 01005e000144 \
+    $(ip_to_hex 44 44 44 2) $(ip_to_hex 239 0 1 68) 1e 1f 7d6b 11 \
+    e518e518000aed350000 expected_az2-lsp4
+
+send_ip6_multicast_pkt hv2-vif1 hv2 \
+    000000000001 333300000001 \
+    00100000000000000000000000000042 ff0adeadbeef00000000000000000001 \
+    000e 40 11 \
+    93407a69000e2b4e61736461640a
+store_ip6_multicast_pkt \
+    000000010100 333300000001 \
+    00100000000000000000000000000042 ff0adeadbeef00000000000000000001 \
+    000e 3e 11 \
+    93407a69000e2b4e61736461640a \
+    expected_az1
+store_ip6_multicast_pkt \
+    000000020200 333300000001 \
+    00100000000000000000000000000042 ff0adeadbeef00000000000000000001 \
+    000e 3e 11 \
+    93407a69000e2b4e61736461640a \
+    expected_az2
+store_ip6_multicast_pkt \
+    000000020001 333300000001 \
+    00100000000000000000000000000042 ff0adeadbeef00000000000000000001 \
+    000e 3f 11 \
+    93407a69000e2b4e61736461640a \
+    expected_az2-lsp4
+
+OVS_WAIT_UNTIL(
+  [check_packets 'hv1/vif1-tx.pcap expected_az1' \
+                 'hv2/vif2-tx.pcap expected_az2' \
+                 'hv2/vif3-tx.pcap expected_az2-lsp4'],
+  [$at_diff -F'^---' exp rcv])
+
+OVN_CLEANUP_SBOX([hv1], ["/IGMP Querier enabled without a valid IPv4/d
+/IGMP Querier enabled with invalid ETH src/d"])
+
+OVN_CLEANUP_SBOX([hv2], ["/IGMP Querier enabled without a valid IPv4/d
+/IGMP Querier enabled with invalid ETH src/d"])
+
+OVN_CLEANUP_IC([az1],[az2])
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([interconnection - IGMP/MLD multicast - TS flood])
+AT_KEYWORDS([IP-multicast])
+
+# Logical network:
+#
+#       AZ1                     |                     AZ2
+#   ---------------------------------------------------------------------
+#                               |
+#                               |     +-- LR2 --- LS2 --- LSP2 (sender)
+#                               |    /
+#     LSP1  --- LS1 --- LR1 --- TS ---
+#   (receiver)                  |    \
+#                               |     +-- LR3 --- LS3 --- LSP3 (receiver)
+#
+# LS1, LS2, LS3, TS configured to snoop IP multicast.
+# LR1, LR2, LR3 configured to relay IP multicast.
+# LR1-TS configured to flood IP multicast traffic unconditionally.
+# LR2-TS configured to flood IP multicast traffic unconditionally.
+# LR3-TS configured to flood IP multicast traffic unconditionally.
+
+AT_CAPTURE_FILE([exp])
+AT_CAPTURE_FILE([rcv])
+check_packets() {
+    > exp
+    > rcv
+    if test "$1" = --uniq; then
+        sort="sort -u"; shift
+    else
+        sort=sort
+    fi
+    for tuple in "$@"; do
+        set $tuple; pcap=$1 type=$2
+        echo "--- $pcap" | tee -a exp >> rcv
+        $sort "$type" >> exp
+        $PYTHON "$ovs_srcdir/utilities/ovs-pcap.in" $pcap | $sort >> rcv
+        echo | tee -a exp >> rcv
+    done
+
+    $at_diff exp rcv >/dev/null
+}
+
+ovn_init_ic_db
+ovn_start az1
+ovn_start az2
+
+net_add n1
+
+sim_add hv1
+as hv1
+check ovs-vsctl add-br br-phys
+ovn_az_attach az1 n1 br-phys 192.168.1.1 16
+check ovs-vsctl -- add-port br-int hv1-vif1 \
+    -- set interface hv1-vif1 external-ids:iface-id=lsp1 \
+       options:tx_pcap=hv1/vif1-tx.pcap \
+       options:rxq_pcap=hv1/vif1-rx.pcap
+check ovs-vsctl set open . external-ids:ovn-is-interconn=true
+
+sim_add hv2
+as hv2
+check ovs-vsctl add-br br-phys
+ovn_az_attach az2 n1 br-phys 192.168.2.1 16
+check ovs-vsctl -- add-port br-int hv2-vif1 \
+    -- set interface hv2-vif1 external-ids:iface-id=lsp2 \
+       options:tx_pcap=hv2/vif1-tx.pcap \
+       options:rxq_pcap=hv2/vif1-rx.pcap
+check ovs-vsctl -- add-port br-int hv2-vif2 \
+    -- set interface hv2-vif2 external-ids:iface-id=lsp3 \
+       options:tx_pcap=hv2/vif2-tx.pcap \
+       options:rxq_pcap=hv2/vif2-rx.pcap
+check ovs-vsctl set open . external-ids:ovn-is-interconn=true
+
+AT_CHECK([ovn-ic-nbctl --wait=sb create Transit_Switch name=ts], [0], [ignore])
+check ovn_as az1 ovn-nbctl wait-until logical_switch ts
+check ovn_as az2 ovn-nbctl wait-until logical_switch ts
+
+ovn_as az1
+check ovn-nbctl lr-add lr1 \
+    -- lrp-add lr1 lr1-ts 00:00:00:01:00:01 42.42.42.1/24 4242::1/64 \
+    -- lrp-add lr1 lr1-ls1 00:00:00:01:01:00 43.43.43.1/24 4343::1/64\
+    -- lrp-set-gateway-chassis lr1-ts hv1
+check ovn-nbctl ls-add ls1 \
+    -- lsp-add-router-port ls1 ls1-lr1 lr1-ls1 \
+    -- lsp-add ls1 lsp1
+check ovn-nbctl lsp-add-router-port ts ts-lr1 lr1-ts
+wait_for_ports_up
+
+ovn_as az2
+check ovn-nbctl lr-add lr2 \
+    -- lrp-add lr2 lr2-ts 00:00:00:02:00:01 42.42.42.2/24 4242::2/64 \
+    -- lrp-add lr2 lr2-ls2 00:00:00:02:01:00 44.44.44.1/24 4444::1/64 \
+    -- lrp-set-gateway-chassis lr2-ts hv2
+check ovn-nbctl ls-add ls2 \
+    -- lsp-add-router-port ls2 ls2-lr2 lr2-ls2 \
+    -- lsp-add ls2 lsp2
+check ovn-nbctl lsp-add-router-port ts ts-lr2 lr2-ts
+
+check ovn-nbctl lr-add lr3 \
+    -- lrp-add lr3 lr3-ts 00:00:00:02:00:02 42.42.42.3/24 4242::3/64 \
+    -- lrp-add lr3 lr3-ls3 00:00:00:02:02:00 44.44.45.1/24 4445::1/64 \
+    -- lrp-set-gateway-chassis lr3-ts hv2
+check ovn-nbctl ls-add ls3 \
+    -- lsp-add-router-port ls3 ls3-lr3 lr3-ls3 \
+    -- lsp-add ls3 lsp3
+check ovn-nbctl lsp-add-router-port ts ts-lr3 lr3-ts
+
+wait_for_ports_up
+check ovn-ic-nbctl --wait=sb sync
+check ovn-ic-nbctl --wait=sb sync
+ovn_as az1
+check ovn-nbctl lsp-set-options ts-lr2 requested-chassis=hv2
+check ovn-nbctl lsp-set-options ts-lr3 requested-chassis=hv2
+
+ovn_as az2
+check ovn-nbctl lsp-set-options ts-lr1 requested-chassis=hv1
+
+dnl Enable IP multicast snooping and IP multicast relay.  Reports are
+dnl forwarded statically.
+ovn_as az1
+check ovn-nbctl set logical_switch ls1 other_config:mcast_snoop="true"
+check ovn-nbctl set logical_router lr1 options:mcast_relay="true"
+check ovn-nbctl set logical_router_port lr1-ts options:mcast_flood="true"
+check ovn-nbctl set logical_switch ts other_config:mcast_snoop="true"
+check ovn-nbctl set logical_switch ts other_config:mcast_flood_unregistered="true"
+
+ovn_as az2
+check ovn-nbctl set logical_switch ls2 other_config:mcast_snoop="true"
+check ovn-nbctl set logical_router lr2 options:mcast_relay="true"
+check ovn-nbctl set logical_router_port lr2-ts options:mcast_flood="true"
+check ovn-nbctl set logical_switch ls3 other_config:mcast_snoop="true"
+check ovn-nbctl set logical_router lr3 options:mcast_relay="true"
+check ovn-nbctl set logical_router_port lr3-ts options:mcast_flood="true"
+check ovn-nbctl set logical_switch ts other_config:mcast_snoop="true"
+check ovn-nbctl set logical_switch ts other_config:mcast_flood_unregistered="true"
+
+check ovn_as az1 ovn-nbctl --wait=hv sync
+check ovn_as az2 ovn-nbctl --wait=hv sync
+
+# Pre-populate the hypervisors' ARP tables so that we don't lose any
+# packets for ARP resolution (native tunneling doesn't queue packets
+# for ARP resolution).
+OVN_POPULATE_ARP
+
+# Inject IGMP Join for 239.0.1.68 on LSP1.
+send_igmp_v3_report hv1-vif1 hv1 \
+    000000000001 $(ip_to_hex 10 0 0 1) f9f8 \
+    $(ip_to_hex 239 0 1 68) 04 e9b9 \
+    /dev/null
+
+# Inject MLD Join for ff0a:dead:beef::1 on LSP1.
+send_mld_v2_report hv1-vif1 hv1 \
+    000000000001 10000000000000000000000000000001 \
+    ff0adeadbeef00000000000000000001 04 c0e4 \
+    /dev/null
+
+# Inject IGMP Join for 239.0.1.68 on LSP3.
+send_igmp_v3_report hv2-vif2 hv2 \
+    000000000001 $(ip_to_hex 10 0 0 1) f9f8 \
+    $(ip_to_hex 239 0 1 68) 04 e9b9 \
+    /dev/null
+
+# Inject MLD Join for ff0a:dead:beef::1 on LSP3.
+send_mld_v2_report hv2-vif2 hv2 \
+    000000000001 10000000000000000000000000000001 \
+    ff0adeadbeef00000000000000000001 04 c0e4 \
+    /dev/null
+
+# Check that the IGMP and MLD groups are learned on both AZs (on the LS
+# and TS).
+ovn_as az1
+wait_row_count IGMP_Group 2 address=239.0.1.68
+wait_row_count IGMP_Group 2 address='"ff0a:dead:beef::1"'
+check ovn-nbctl --wait=hv sync
+
+ovn_as az2
+wait_row_count IGMP_Group 2 address=239.0.1.68
+wait_row_count IGMP_Group 2 address='"ff0a:dead:beef::1"'
+check ovn-nbctl --wait=hv sync
+
+# Send an IP multicast packet from LSP2, it should be forwarded
+# to lsp1 and lsp3.
+> expected_az1
+> expected_az2
+send_ip_multicast_pkt hv2-vif1 hv2 \
+    000000000001 01005e000144 \
+    $(ip_to_hex 44 44 44 2) $(ip_to_hex 239 0 1 68) 1e 20 7c6b 11 \
+    e518e518000aed350000
+store_ip_multicast_pkt \
+    000000010100 01005e000144 \
+    $(ip_to_hex 44 44 44 2) $(ip_to_hex 239 0 1 68) 1e 1e 7e6b 11 \
+    e518e518000aed350000 expected_az1
+store_ip_multicast_pkt \
+    000000020200 01005e000144 \
+    $(ip_to_hex 44 44 44 2) $(ip_to_hex 239 0 1 68) 1e 1e 7e6b 11 \
+    e518e518000aed350000 expected_az2
+
+send_ip6_multicast_pkt hv2-vif1 hv2 \
+    000000000001 333300000001 \
+    00100000000000000000000000000042 ff0adeadbeef00000000000000000001 \
+    000e 40 11 \
+    93407a69000e2b4e61736461640a
+store_ip6_multicast_pkt \
+    000000010100 333300000001 \
+    00100000000000000000000000000042 ff0adeadbeef00000000000000000001 \
+    000e 3e 11 \
+    93407a69000e2b4e61736461640a \
+    expected_az1
+store_ip6_multicast_pkt \
+    000000020200 333300000001 \
+    00100000000000000000000000000042 ff0adeadbeef00000000000000000001 \
+    000e 3e 11 \
+    93407a69000e2b4e61736461640a \
+    expected_az2
+
+OVS_WAIT_UNTIL(
+  [check_packets 'hv1/vif1-tx.pcap expected_az1' \
+                 'hv2/vif2-tx.pcap expected_az2'],
+  [$at_diff -F'^---' exp rcv])
+
+OVN_CLEANUP_SBOX([hv1], ["/IGMP Querier enabled without a valid IPv4/d
+/IGMP Querier enabled with invalid ETH src/d"])
+
+OVN_CLEANUP_SBOX([hv2], ["/IGMP Querier enabled without a valid IPv4/d
+/IGMP Querier enabled with invalid ETH src/d"])
+
+OVN_CLEANUP_IC([az1],[az2])
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-ic -- route tag -- tagging and filtering routes])
+
+ovn_init_ic_db
+ovn-ic-nbctl ts-add ts1
+
+for i in 1 2; do
+    ovn_start az$i
+    ovn_as az$i
+
+    # Enable route learning at AZ level
+    check ovn-nbctl set nb_global . options:ic-route-learn=true
+    # Enable route advertising at AZ level
+    check ovn-nbctl set nb_global . options:ic-route-adv=true
+done
+
+# Create new transit switches and LRs. Test topology is next:
+# VPC1:
+#                       / transit switch (ts11) \
+# logical router (lr11) - transit switch (ts12) - logical router (lr12)
+#                       \                       /
+#                        transit switch (tspeer)
+# VPC2:                 /                       \
+# logical router (lr21) - transit switch (ts21) - logical router (lr22)
+#                       \ transit switch (ts22) /
+#
+
+# VPC1
+# create lr11, lr12, ts11, ts12 and connect them
+for i in 1 2; do
+    ovn_as az$i
+
+    lr=lr1$i
+    check ovn-nbctl lr-add $lr
+
+    for j in 1 2; do
+        ts=ts1$j
+        ovn-ic-nbctl --wait=sb --may-exist ts-add $ts
+
+        lrp=lrp-$lr-$ts
+        lsp=lsp-$ts-$lr
+        # Create LRP and connect to TS
+        check ovn-nbctl lrp-add $lr $lrp aa:aa:aa:aa:a$j:0$i 169.254.10$j.$i/24
+        check ovn-nbctl lsp-add-router-port $ts $lsp $lrp
+    done
+done
+
+# VPC2
+# create lr21, lr22, ts21, ts22 and connect them
+for i in 1 2; do
+    ovn_as az$i
+
+    lr=lr2$i
+    check ovn-nbctl lr-add $lr
+
+    for j in 1 2; do
+        ts=ts2$j
+        ovn-ic-nbctl --wait=sb --may-exist ts-add $ts
+
+        lrp=lrp-$lr-$ts
+        lsp=lsp-$ts-$lr
+        # Create LRP and connect to TS
+        check ovn-nbctl lrp-add $lr $lrp aa:aa:aa:aa:a$j:0$i 169.254.10$j.$i/24
+        check ovn-nbctl lsp-add-router-port $ts $lsp $lrp
+    done
+done
+
+# Create directly-connected route in VPC1
+ovn_as az2 ovn-nbctl lrp-add lr12 lrp-lr12 aa:aa:aa:aa:bb:01 "192.168.0.1/24"
+
+# Create directly-connected route in VPC2
+ovn_as az2 ovn-nbctl --wait=sb lrp-add lr22 lrp-lr22 aa:aa:aa:aa:cc:01 "192.168.1.1/24"
+
+check ovn-ic-nbctl --wait=sb sync
+
+# Test direct routes from lr12 were learned to lr11
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep 192.168 |
+             grep learned | awk '{print $1, $2, $5}' | sort ], [0], [dnl
+192.168.0.0/24 169.254.101.2 ecmp
+192.168.0.0/24 169.254.102.2 ecmp
+])
+
+# Test direct routes from lr22 were learned to lr21
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr21 | grep 192.168 |
+             grep learned | awk '{print $1, $2, $5}' | sort ], [0], [dnl
+192.168.1.0/24 169.254.101.2 ecmp
+192.168.1.0/24 169.254.102.2 ecmp
+])
+
+# Create peering TS
+ovn-ic-nbctl --wait=sb --may-exist ts-add tspeer
+
+# Create LRPs and connect to the peering TS
+ovn_as az1
+check ovn-nbctl lrp-add lr11 lrp-lr11-tspeer aa:aa:aa:aa:11:01 169.254.103.11/24
+check ovn-nbctl lsp-add-router-port tspeer lsp-tspeer-lr11 lrp-lr11-tspeer
+
+ovn_as az2
+check ovn-nbctl lrp-add lr12 lrp-lr12-tspeer aa:aa:aa:aa:12:01 169.254.103.12/24
+check ovn-nbctl lsp-add-router-port tspeer lsp-tspeer-lr12 lrp-lr12-tspeer
+
+ovn_as az1
+check ovn-nbctl lrp-add lr21 lrp-lr21-tspeer aa:aa:aa:aa:21:01 169.254.103.21/24
+check ovn-nbctl lsp-add-router-port tspeer lsp-tspeer-lr21 lrp-lr21-tspeer
+
+ovn_as az2
+check ovn-nbctl lrp-add lr22 lrp-lr22-tspeer aa:aa:aa:aa:22:01 169.254.103.22/24
+check ovn-nbctl lsp-add-router-port tspeer lsp-tspeer-lr22 lrp-lr22-tspeer
+
+check ovn-ic-nbctl --wait=sb sync
+
+# Test direct routes from lr12/lr22 were learned to lr11
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep 192.168 |
+             grep learned | awk '{print $1, $2}' | sort ], [0], [dnl
+192.168.0.0/24 169.254.101.2
+192.168.0.0/24 169.254.102.2
+192.168.0.0/24 169.254.103.12
+192.168.1.0/24 169.254.103.22
+])
+
+# Test direct routes from lr22/lr12 were learned to lr21
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr21 | grep 192.168 |
+             grep learned | awk '{print $1, $2}' | sort ], [0], [dnl
+192.168.0.0/24 169.254.103.12
+192.168.1.0/24 169.254.101.2
+192.168.1.0/24 169.254.102.2
+192.168.1.0/24 169.254.103.22
+])
+
+# VPC1: Create a route tag for VPC1 mark its own routes via lrp-lr12
+ovn_as az2 ovn-nbctl set logical_router_port lrp-lr12-tspeer options:ic-route-tag=vpc1
+
+# Test advertised routes with the vpc1 route tag present
+ovn-ic-sbctl list route
+wait_row_count ic-sb:Route 1 ip_prefix=192.168.0.1/24 nexthop=169.254.103.12 origin=connected external_ids:ic-route-tag=vpc1
+
+# Filter routes on VPC1 lrp-lr11-tspeer with the route tag vpc1 present
+ovn_as az1 ovn-nbctl set logical_router_port lrp-lr11-tspeer options:ic-route-filter-tag=vpc1
+
+# Test remaining direct routes from lr12 were learned to lr11
+# Routes from the 169.254.101.2 nexthop have been filtered
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep 192.168 |
+             grep learned | awk '{print $1, $2}' | sort ], [0], [dnl
+192.168.0.0/24 169.254.101.2
+192.168.0.0/24 169.254.102.2
+192.168.1.0/24 169.254.103.22
+])
+
+# Remove the route tag used for advertisement
+ovn_as az2 ovn-nbctl remove logical_router_port lrp-lr12-tspeer options ic-route-tag=vpc1
+
+# Test advertised routes with the vpc1 route tag present
+ovn-ic-sbctl list route
+wait_row_count ic-sb:Route 0 ip_prefix=192.168.0.1/24 nexthop=169.254.103.12 origin=connected external_ids:ic-route-tag=vpc1
+
+# Test the original direct routes from lr12/lr22 were learned to lr11
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep 192.168 |
+             grep learned | awk '{print $1, $2}' | sort ], [0], [dnl
+192.168.0.0/24 169.254.101.2
+192.168.0.0/24 169.254.102.2
+192.168.0.0/24 169.254.103.12
+192.168.1.0/24 169.254.103.22
+])
+
+# Remove route tag filter and add route tag on lrp-lr12-tspeer advertised routes
+ovn_as az1 ovn-nbctl remove logical_router_port lrp-lr11-tspeer options ic-route-filter-tag=vpc1
+ovn_as az2 ovn-nbctl set logical_router_port lrp-lr12-tspeer options:ic-route-tag=vpc1
+
+# Test if all the routes are learned because we no longer have the filter tag option enabled
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep 192.168 |
+             grep learned | awk '{print $1, $2}' | sort ], [0], [dnl
+192.168.0.0/24 169.254.101.2
+192.168.0.0/24 169.254.102.2
+192.168.0.0/24 169.254.103.12
+192.168.1.0/24 169.254.103.22
+])
+
+OVN_CLEANUP_IC([az1], [az2])
+
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([spine-leaf: 3 AZs, 3 HVs, 3 LSs, connected via transit spine switch])
+AT_KEYWORDS([spine leaf])
+AT_SKIP_IF([test $HAVE_SCAPY = no])
+
+ovn_init_ic_db
+
+ovn_start az1
+ovn_start az2
+ovn_start az3
+
+# Logical network:
+# Single network 172.16.1.0/24.  Three switches with VIF ports on HVs in three
+# separate AZs, connected to a spine transit switch via 'switch' ports.
+# Third switch has a port with unknown address, but we're only sending packets
+# between ports on other two switches.
+
+ovn-ic-nbctl ts-add spine
+ovn_as az1 check ovn-nbctl ls-add ls1
+ovn_as az2 check ovn-nbctl ls-add ls2
+ovn_as az3 check ovn-nbctl ls-add ls3
+
+# Connect ls1 to spine.
+ovn_as az1
+check ovn-nbctl lsp-add spine spine-to-ls1
+check ovn-nbctl lsp-add ls1 ls1-to-spine
+check ovn-nbctl lsp-set-type spine-to-ls1 switch peer=ls1-to-spine
+check ovn-nbctl lsp-set-type ls1-to-spine switch peer=spine-to-ls1
+
+# Connect ls2 to spine.
+ovn_as az2
+check ovn-nbctl lsp-add spine spine-to-ls2
+check ovn-nbctl lsp-add ls2 ls2-to-spine
+check ovn-nbctl lsp-set-type spine-to-ls2 switch peer=ls2-to-spine
+check ovn-nbctl lsp-set-type ls2-to-spine switch peer=spine-to-ls2
+
+# Connect ls3 to spine.
+ovn_as az3
+check ovn-nbctl lsp-add spine spine-to-ls3
+check ovn-nbctl lsp-add ls3 ls3-to-spine
+check ovn-nbctl lsp-set-type spine-to-ls3 switch peer=ls3-to-spine
+check ovn-nbctl lsp-set-type ls3-to-spine switch peer=spine-to-ls3
+
+# Create logical port ls1-lp1 in ls1
+ovn_as az1 check ovn-nbctl lsp-add ls1 ls1-lp1 \
+-- lsp-set-addresses ls1-lp1 "f0:00:00:01:02:01 172.16.1.1"
+# Create logical port ls1-lp2 in ls1
+ovn_as az1 check ovn-nbctl lsp-add ls1 ls1-lp2 \
+-- lsp-set-addresses ls1-lp2 "f0:00:00:01:02:02 172.16.1.2"
+
+# Create logical port ls2-lp1 in ls2
+ovn_as az2 check ovn-nbctl lsp-add ls2 ls2-lp1 \
+-- lsp-set-addresses ls2-lp1 "f0:00:00:01:02:03 172.16.1.3"
+# Create logical port ls2-lp2 in ls2
+ovn_as az2 check ovn-nbctl lsp-add ls2 ls2-lp2 \
+-- lsp-set-addresses ls2-lp2 "f0:00:00:01:02:04 172.16.1.4"
+
+# Create logical port ls3-lp1 in ls3 with unknown address.
+check ovn-nbctl lsp-add ls3 ls3-lp1 -- lsp-set-addresses ls3-lp1 unknown
+
+# Create hypervisors and OVS ports corresponding to logical ports.
+net_add n1
+
+sim_add hv1
+as hv1
+check ovs-vsctl add-br br-phys
+ovn_az_attach az1 n1 br-phys 192.168.1.1 16
+check ovs-vsctl set open . external-ids:ovn-is-interconn=true
+ovs-vsctl -- add-port br-int vif1 -- \
+    set interface vif1 external-ids:iface-id=ls1-lp1 \
+    options:tx_pcap=hv1/vif1-tx.pcap \
+    options:rxq_pcap=hv1/vif1-rx.pcap \
+    ofport-request=1
+ovs-vsctl -- add-port br-int vif2 -- \
+    set interface vif2 external-ids:iface-id=ls1-lp2 \
+    options:tx_pcap=hv1/vif2-tx.pcap \
+    options:rxq_pcap=hv1/vif2-rx.pcap \
+    ofport-request=2
+
+sim_add hv2
+as hv2
+check ovs-vsctl add-br br-phys
+ovn_az_attach az2 n1 br-phys 192.168.2.1 16
+check ovs-vsctl set open . external-ids:ovn-is-interconn=true
+ovs-vsctl -- add-port br-int vif3 -- \
+    set interface vif3 external-ids:iface-id=ls2-lp1 \
+    options:tx_pcap=hv2/vif3-tx.pcap \
+    options:rxq_pcap=hv2/vif3-rx.pcap \
+    ofport-request=3
+ovs-vsctl -- add-port br-int vif4 -- \
+    set interface vif4 external-ids:iface-id=ls2-lp2 \
+    options:tx_pcap=hv2/vif4-tx.pcap \
+    options:rxq_pcap=hv2/vif4-rx.pcap \
+    ofport-request=4
+
+sim_add hv3
+as hv3
+check ovs-vsctl add-br br-phys
+ovn_az_attach az3 n1 br-phys 192.168.3.1 16
+check ovs-vsctl set open . external-ids:ovn-is-interconn=true
+ovs-vsctl -- add-port br-int vif5 -- \
+    set interface vif5 external-ids:iface-id=ls3-lp1 \
+    options:tx_pcap=hv3/vif5-tx.pcap \
+    options:rxq_pcap=hv3/vif5-rx.pcap \
+    ofport-request=5
+
+# Bind transit switch ports to their chassis.
+check ovn_as az1 ovn-nbctl lsp-set-options spine-to-ls1 requested-chassis=hv1
+check ovn_as az2 ovn-nbctl lsp-set-options spine-to-ls2 requested-chassis=hv2
+check ovn_as az3 ovn-nbctl lsp-set-options spine-to-ls3 requested-chassis=hv3
+
+# Pre-populate the hypervisors' ARP tables so that we don't lose any
+# packets for ARP resolution (native tunneling doesn't queue packets
+# for ARP resolution).
+OVN_POPULATE_ARP
+
+ovn_as az1
+check ovn-nbctl --wait=hv sync
+ovn-sbctl dump-flows > az1/sbflows
+
+ovn_as az2
+check ovn-nbctl --wait=hv sync
+ovn-sbctl dump-flows > az2/sbflows
+
+ovn_as az3
+check ovn-nbctl --wait=hv sync
+ovn-sbctl dump-flows > az3/sbflows
+
+dnl Check that FDB learning is enabled for remote ports in the egress pipeline.
+AT_CHECK([grep -E "ls_out.*fdb.*spine-to-" az1/sbflows | ovn_strip_lflows], [0], [dnl
+  table=??(ls_out_lookup_fdb  ), priority=100  , match=(inport == "spine-to-ls2"), action=(reg0[[11]] = lookup_fdb(inport, eth.src); next;)
+  table=??(ls_out_lookup_fdb  ), priority=100  , match=(inport == "spine-to-ls3"), action=(reg0[[11]] = lookup_fdb(inport, eth.src); next;)
+  table=??(ls_out_put_fdb     ), priority=100  , match=(inport == "spine-to-ls2" && reg0[[11]] == 0), action=(put_fdb(inport, eth.src); next;)
+  table=??(ls_out_put_fdb     ), priority=100  , match=(inport == "spine-to-ls3" && reg0[[11]] == 0), action=(put_fdb(inport, eth.src); next;)
+])
+AT_CHECK([grep -E "ls_out.*fdb.*spine-to-" az2/sbflows | ovn_strip_lflows], [0], [dnl
+  table=??(ls_out_lookup_fdb  ), priority=100  , match=(inport == "spine-to-ls1"), action=(reg0[[11]] = lookup_fdb(inport, eth.src); next;)
+  table=??(ls_out_lookup_fdb  ), priority=100  , match=(inport == "spine-to-ls3"), action=(reg0[[11]] = lookup_fdb(inport, eth.src); next;)
+  table=??(ls_out_put_fdb     ), priority=100  , match=(inport == "spine-to-ls1" && reg0[[11]] == 0), action=(put_fdb(inport, eth.src); next;)
+  table=??(ls_out_put_fdb     ), priority=100  , match=(inport == "spine-to-ls3" && reg0[[11]] == 0), action=(put_fdb(inport, eth.src); next;)
+])
+AT_CHECK([grep -E "ls_out.*fdb.*spine-to-" az3/sbflows | ovn_strip_lflows], [0], [dnl
+  table=??(ls_out_lookup_fdb  ), priority=100  , match=(inport == "spine-to-ls1"), action=(reg0[[11]] = lookup_fdb(inport, eth.src); next;)
+  table=??(ls_out_lookup_fdb  ), priority=100  , match=(inport == "spine-to-ls2"), action=(reg0[[11]] = lookup_fdb(inport, eth.src); next;)
+  table=??(ls_out_put_fdb     ), priority=100  , match=(inport == "spine-to-ls1" && reg0[[11]] == 0), action=(put_fdb(inport, eth.src); next;)
+  table=??(ls_out_put_fdb     ), priority=100  , match=(inport == "spine-to-ls2" && reg0[[11]] == 0), action=(put_fdb(inport, eth.src); next;)
+])
+
+check ovn-ic-nbctl --wait=sb sync
+
+ovn-ic-nbctl show > ic-nbctl.dump
+AT_CAPTURE_FILE([ic-nbctl.dump])
+
+(echo "---------ISB dump-----"
+ ovn-ic-sbctl show
+ echo "---------------------"
+ ovn-ic-sbctl list gateway
+ echo "---------------------"
+ ovn-ic-sbctl list datapath_binding
+ echo "---------------------"
+ ovn-ic-sbctl list port_binding
+ echo "---------------------"
+ ovn-ic-sbctl list route
+ echo "---------------------") > ic-sbctl.dump
+AT_CAPTURE_FILE([ic-sbctl.dump])
+
+# Send ip packets between the two ports.
+src_mac="f0:00:00:01:02:01"
+dst_mac="f0:00:00:01:02:03"
+src_ip=172.16.1.1
+dst_ip=172.16.1.3
+packet=$(fmt_pkt "Ether(dst='${dst_mac}', src='${src_mac}')/ \
+                  IP(src='${src_ip}', dst='${dst_ip}')/ \
+                  UDP(sport=1538, dport=4369)")
+
+# Check that datapath is not doing any extra work and sends the packet out
+# through the tunnels.  We expect the packet to enter the spine switch, be
+# sent to userspace for FDB learning, then get broadcasted to other two
+# zones via remote ports.
+AT_CHECK([ovn_as az1 as hv1 ovs-appctl ofproto/trace --names \
+                br-int in_port=vif1 $packet > ofproto-trace-1])
+AT_CAPTURE_FILE([ofproto-trace-1])
+AT_CHECK([grep 'Megaflow:' ofproto-trace-1], [0], [dnl
+Megaflow: recirc_id=0,eth,ip,in_port=vif1,dl_src=f0:00:00:01:02:01,dl_dst=f0:00:00:01:02:03,nw_ecn=0,nw_frag=no
+])
+AT_CHECK([cat ofproto-trace-1 | tail -1 \
+            | grep -oE 'tnl_push|userspace|clone|br-phys_n1|vif[[0-9]]'], [0], [dnl
+userspace
+clone
+tnl_push
+br-phys_n1
+tnl_push
+br-phys_n1
+])
+
+# Actually send the packet.
+check as hv1 ovs-appctl netdev-dummy/receive vif1 $packet
+
+# Wait for the FDB entries to be created and propagated to OpenFlow.  Only
+# one entry will be created - the entry for spine-to-ls1 port in the spine
+# switch.
+ovn_as az1
+wait_row_count FDB 1
+check ovn-nbctl --wait=hv sync
+
+# Two entries are expected in the other zones - one for the remote port on
+# the spine switch and one for the switch port on the leaf.
+ovn_as az2
+wait_row_count FDB 2
+check ovn-nbctl --wait=hv sync
+ovn_as az3
+wait_row_count FDB 2
+check ovn-nbctl --wait=hv sync
+
+# FDB entry was created from the userspace() action in the datapath, but
+# those actions will be updated to not have it shortly, so just wait for
+# that to happen and don't try to catch the action while it's still in the
+# datapath.
+as hv2 ovs-appctl revalidator/wait
+as hv3 ovs-appctl revalidator/wait
+
+# It's a little problematic to trace the other side, but we can check datapath
+# actions.  Note: 'actions:br-phys' is a stray tunnel packet destined for the
+# other zone, but OVS from the 'main' namespace didn't learn addresses yet,
+# so it broadcasts.
+AT_CHECK([as hv2 ovs-appctl dpctl/dump-flows --names \
+            | grep actions | sed 's/.*\(actions:.*\)/\1/' | sort], [0], [dnl
+actions:br-phys
+actions:tnl_pop(genev_sys_6081)
+actions:vif3
+])
+AT_CHECK([as hv3 ovs-appctl dpctl/dump-flows --names \
+            | grep actions | sed 's/.*\(actions:.*\)/\1/' | sort], [0], [dnl
+actions:br-phys
+actions:tnl_pop(genev_sys_6081)
+actions:vif5
+])
+
+# No modifications expected.
+AT_CHECK([echo $packet > expected])
+
+AT_CHECK([touch empty])
+
+# Check that it is delivered where needed and not delivered where not.
+OVN_CHECK_PACKETS([hv1/vif1-tx.pcap], [empty])
+OVN_CHECK_PACKETS([hv1/vif2-tx.pcap], [empty])
+OVN_CHECK_PACKETS([hv2/vif3-tx.pcap], [expected])
+OVN_CHECK_PACKETS([hv2/vif4-tx.pcap], [empty])
+OVN_CHECK_PACKETS([hv3/vif5-tx.pcap], [expected])
+
+# Trace a reply packet.
+reply=$(fmt_pkt "Ether(dst='${src_mac}', src='${dst_mac}')/ \
+                 IP(src='${dst_ip}', dst='${src_ip}')/ \
+                 UDP(sport=4369, dport=1538)")
+# For the reply packet we expect only one userspace action for FDB update on
+# the spine switch and only one tunnel push and send, because we already
+# learned that MAC of vif1 is behind spine-ls1 and no longer need to broadcast
+# to zone 3.
+AT_CHECK([ovn_as az2 as hv2 ovs-appctl ofproto/trace --names \
+                br-int in_port=vif3 $reply > ofproto-trace-2])
+AT_CAPTURE_FILE([ofproto-trace-2])
+AT_CHECK([grep 'Megaflow:' ofproto-trace-2], [0], [dnl
+Megaflow: recirc_id=0,eth,ip,in_port=vif3,dl_src=f0:00:00:01:02:03,dl_dst=f0:00:00:01:02:01,nw_ecn=0,nw_frag=no
+])
+AT_CHECK([cat ofproto-trace-2 | tail -1 \
+            | grep -oE 'tnl_push|userspace|clone|br-phys_n1|vif[[0-9]]'], [0], [dnl
+userspace
+tnl_push
+br-phys_n1
+])
+
+# Now actually send it.
+check as hv2 ovs-appctl netdev-dummy/receive vif3 $reply
+
+AT_CHECK([echo $reply > reply])
+# Check that it is delivered where needed and not delivered where not.
+OVN_CHECK_PACKETS([hv1/vif1-tx.pcap], [reply])
+OVN_CHECK_PACKETS([hv1/vif2-tx.pcap], [empty])
+OVN_CHECK_PACKETS([hv2/vif3-tx.pcap], [expected])
+OVN_CHECK_PACKETS([hv2/vif4-tx.pcap], [empty])
+OVN_CHECK_PACKETS([hv3/vif5-tx.pcap], [expected])
+
+# Zones 1 and 2 should have 2 FDB entries now each.  One for a remote port and
+# one per side of a switch-switch port connecting ls[12] with the spine.  Zone
+# 3 still only has two entries created for the original request from vif1.
+ovn_as az1
+wait_row_count FDB 3
+check ovn-nbctl --wait=hv sync
+ovn_as az2
+wait_row_count FDB 3
+check ovn-nbctl --wait=hv sync
+ovn_as az3
+wait_row_count FDB 2
+check ovn-nbctl --wait=hv sync
+
+# Packets should flow directly to the destination (via tunnels) in both
+# directions now.
+AT_CHECK([as hv1 ovs-appctl ofproto/trace --names \
+            br-int in_port=vif1 $packet | tail -2 \
+            | grep -oE 'Megaflow.*|tnl_push|userspace|clone|br-phys_n1|vif[[0-9]]'], [0], [dnl
+Megaflow: recirc_id=0,eth,ip,in_port=vif1,dl_src=f0:00:00:01:02:01,dl_dst=f0:00:00:01:02:03,nw_ecn=0,nw_frag=no
+tnl_push
+br-phys_n1
+])
+AT_CHECK([as hv2 ovs-appctl ofproto/trace --names \
+            br-int in_port=vif3 $reply | tail -2 \
+            | grep -oE 'Megaflow.*|tnl_push|userspace|clone|br-phys_n1|vif[[0-9]]'], [0], [dnl
+Megaflow: recirc_id=0,eth,ip,in_port=vif3,dl_src=f0:00:00:01:02:03,dl_dst=f0:00:00:01:02:01,nw_ecn=0,nw_frag=no
+tnl_push
+br-phys_n1
+])
+
+# Send and check one more time.
+check as hv1 ovs-appctl netdev-dummy/receive vif1 $packet
+check as hv2 ovs-appctl netdev-dummy/receive vif3 $reply
+
+AT_CHECK([cp expected expected-vif5])
+AT_CHECK([echo $packet >> expected])
+AT_CHECK([echo $reply >> reply])
+OVN_CHECK_PACKETS([hv1/vif1-tx.pcap], [reply])
+OVN_CHECK_PACKETS([hv1/vif2-tx.pcap], [empty])
+OVN_CHECK_PACKETS([hv2/vif3-tx.pcap], [expected])
+OVN_CHECK_PACKETS([hv2/vif4-tx.pcap], [empty])
+OVN_CHECK_PACKETS([hv3/vif5-tx.pcap], [expected-vif5])
+
+OVN_CLEANUP_IC([az1], [az2], [az3])
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-ic -- Delete route lsp orphan])
+
+ovn_init_ic_db
+
+for i in 1 2; do
+    ovn_start az$i
+    ovn_as az$i
+
+    # Enable route learning at AZ level
+    check ovn-nbctl set nb_global . options:ic-route-learn=true
+    # Enable route advertising at AZ level
+    check ovn-nbctl set nb_global . options:ic-route-adv=true
+done
+
+# Create new transit switches and LRs. Test topology is next:
+#
+#                       / transit switch (ts11) \
+# logical router (lr11) -                       - logical router (lr12)
+#                       \ transit switch (ts12) /
+#
+
+# Create lr11, lr12, ts11, ts12 and connect them
+for i in 1 2; do
+    ovn_as az$i
+
+    lr=lr1$i
+    check ovn-nbctl lr-add $lr
+
+    for j in 1 2; do
+        ts=ts1$j
+        check ovn-ic-nbctl --wait=sb --may-exist ts-add $ts
+
+        lrp=lrp-$lr-$ts
+        lsp=lsp-$ts-$lr
+        # Create LRP and connect to TS
+        check ovn-nbctl lrp-add $lr $lrp aa:aa:aa:aa:a$j:0$i 169.254.10$j.$i/24
+        check ovn-nbctl lsp-add-router-port $ts $lsp $lrp
+    done
+done
+
+# Create directly-connected route in lr11
+check ovn_as az2 ovn-nbctl lrp-add lr12 lrp-lr12 aa:aa:aa:aa:bb:01 "192.168.0.1/24"
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep 192.168 |
+             grep learned | awk '{print $1, $2}' | sort ], [0], [dnl
+192.168.0.0/24 169.254.101.2
+192.168.0.0/24 169.254.102.2
+])
+
+check ovn_as az2 ovn-nbctl lrp-del lrp-lr12-ts12
+
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep 192.168 |
+             grep learned | awk '{print $1, $2}' | sort ], [0], [dnl
+192.168.0.0/24 169.254.101.2
+])
+
+
+OVN_CLEANUP_IC([az1], [az2])
+
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-ic -- Delete route lrp orphan])
+
+ovn_init_ic_db
+
+for i in 1 2; do
+    ovn_start az$i
+    ovn_as az$i
+
+    # Enable route learning at AZ level
+    check ovn-nbctl set nb_global . options:ic-route-learn=true
+    # Enable route advertising at AZ level
+    check ovn-nbctl set nb_global . options:ic-route-adv=true
+done
+
+# Create new transit switches and LRs. Test topology is next:
+#
+#                       / transit switch (ts11) \
+# logical router (lr11) -                       - logical router (lr12)
+#                       \ transit switch (ts12) /
+#
+
+# Create lr11, lr12, ts11, ts12 and connect them
+for i in 1 2; do
+    ovn_as az$i
+
+    lr=lr1$i
+    check ovn-nbctl lr-add $lr
+
+    for j in 1 2; do
+        ts=ts1$j
+        check ovn-ic-nbctl --wait=sb --may-exist ts-add $ts
+
+        lrp=lrp-$lr-$ts
+        lsp=lsp-$ts-$lr
+        # Create LRP and connect to TS
+        check ovn-nbctl lrp-add $lr $lrp aa:aa:aa:aa:a$j:0$i 169.254.10$j.$i/24
+        check ovn-nbctl lsp-add-router-port $ts $lsp $lrp
+    done
+done
+
+# Create directly-connected route in lr11
+check ovn_as az2 ovn-nbctl lrp-add lr12 lrp-lr12 aa:aa:aa:aa:bb:01 "192.168.0.1/24"
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep 192.168 |
+             grep learned | awk '{print $1, $2}' | sort ], [0], [dnl
+192.168.0.0/24 169.254.101.2
+192.168.0.0/24 169.254.102.2
+])
+
+check ovn_as az2 ovn-nbctl lsp-del lsp-ts12-lr12
+
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep 192.168 |
+             grep learned | awk '{print $1, $2}' | sort ], [0], [dnl
+192.168.0.0/24 169.254.101.2
+])
+
+
+OVN_CLEANUP_IC([az1], [az2])
+
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-ic -- Check loop with lsp orphan in same subnet of new lsp in other TS])
+
+ovn_init_ic_db
+
+for i in 1 2; do
+    ovn_start az$i
+    ovn_as az$i
+
+    # Enable route learning at AZ level
+    check ovn-nbctl set nb_global . options:ic-route-learn=true
+    # Enable route advertising at AZ level
+    check ovn-nbctl set nb_global . options:ic-route-adv=true
+done
+
+# Create new transit switches and LRs. Test topology is next:
+#
+#                       / transit switch (ts11) \
+# logical router (lr11) -                       - logical router (lr12)
+#                       \ transit switch (ts12) /
+#
+
+# Create lr11, lr12 and ts11 and connect them
+for i in 1 2; do
+    ovn_as az$i
+
+    lr=lr1$i
+    check ovn-nbctl lr-add $lr
+
+    for j in 1; do
+        ts=ts1$j
+        check ovn-ic-nbctl --wait=sb --may-exist ts-add $ts
+
+        lrp=lrp-$lr-$ts
+        lsp=lsp-$ts-$lr
+        # Create LRP and connect to TS
+        check ovn-nbctl lrp-add $lr $lrp aa:aa:aa:aa:a$j:0$i 169.254.10$j.$i/24
+        check ovn-nbctl lsp-add-router-port $ts $lsp $lrp
+    done
+done
+
+# Create directly-connected route in lr11
+check ovn_as az2 ovn-nbctl lrp-add lr12 lrp-lr12 aa:aa:aa:aa:bb:01 "192.168.0.1/24"
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep 192.168 |
+             grep learned | awk '{print $1, $2}' | sort ], [0], [dnl
+192.168.0.0/24 169.254.101.2
+])
+
+# Delete LRP connection from lr11 to ts11, keep lsp orphan
+check ovn_as az1 ovn-nbctl lrp-del lrp-lr11-ts11
+
+# Create ts12, and connect lr11 and lr21 to it in the same subnet of ts11 where
+# exist one lsp orphan
+for i in 1 2; do
+    ovn_as az$i
+    ts=ts12
+
+    lr=lr1$i
+    for j in 1; do
+        check ovn-ic-nbctl --wait=sb --may-exist ts-add $ts
+
+        lrp=lrp-$lr-$ts
+        lsp=lsp-$ts-$lr
+        # Create LRP and connect to TS
+        check ovn-nbctl lrp-add $lr $lrp aa:aa:aa:aa:a$j:0$i 169.254.10$j.$i$i/24
+        check ovn-nbctl lsp-add-router-port $ts $lsp $lrp
+    done
+done
+
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep 192.168 |
+             grep learned | awk '{print $1, $2}' | sort ], [0], [dnl
+192.168.0.0/24 169.254.101.22
+])
+
+check ovn_as az1 ovn-nbctl set logical_router lr11 enable=false
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep 192.168 |
+             grep learned | awk '{print $1, $2}' | sort ], [0], [dnl
+])
+
+check ovn_as az1 ovn-nbctl set logical_router lr11 enable=true
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep 192.168 |
+             grep learned | awk '{print $1, $2}' | sort ], [0], [dnl
+192.168.0.0/24 169.254.101.22
+])
+
+OVN_CLEANUP_IC([az1], [az2])
+
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-ic -- prefix filter -- filtering routes])
+ovn_init_ic_db
+ovn-ic-nbctl ts-add ts1
+for i in 1 2; do
+    ovn_start az$i
+    ovn_as az$i
+    # Enable route learning at AZ level.
+    check ovn-nbctl set nb_global . options:ic-route-learn=true
+    # Enable route advertising at AZ level.
+    check ovn-nbctl set nb_global . options:ic-route-adv=true
+done
+
+# Create new transit switches and LRs. Test topology is next:
+# logical router (lr11) - transit switch (ts1) - logical router (lr12)
+
+# Create lr11, lr12 and connect them to ts1.
+for i in 1 2; do
+    ovn_as az$i
+    lr=lr1$i
+    check ovn-nbctl lr-add $lr
+    lrp=lrp-$lr-ts1
+    lsp=lsp-ts1-$lr
+    # Create LRP and connect to TS.
+    check ovn-nbctl lrp-add $lr $lrp aa:aa:aa:aa:ab:0$i 169.254.101.$i/24 fe80:10::$i/64
+    check ovn-nbctl lsp-add-router-port ts1 $lsp $lrp
+done
+
+# Create directly-connected route in lr12.
+ovn_as az2 check ovn-nbctl lrp-add lr12 lrp-lr12-1 aa:aa:aa:aa:bb:01 "192.168.12.1/24" "2001:db12::1/64"
+ovn_as az2 check ovn-nbctl lrp-add lr12 lrp-lr12-2 aa:aa:aa:aa:bb:02 "192.168.2.1/24" "2001:db22::1/64"
+
+# Create directly-connected route in lr11.
+ovn_as az1 check ovn-nbctl --wait=sb lrp-add lr11 lrp-lr11 aa:aa:aa:aa:cc:01 "192.168.11.1/24" "2001:db11::1/64"
+check ovn-ic-nbctl --wait=sb sync
+
+# Test direct routes from lr12 were learned to lr11.
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep 192.168 |
+    grep learned | awk '{print $1, $2}' | sort ], [0], [dnl
+192.168.12.0/24 169.254.101.2
+192.168.2.0/24 169.254.101.2
+])
+
+# Test direct routes from lr11 were learned to lr12.
+OVS_WAIT_FOR_OUTPUT([ovn_as az2 ovn-nbctl lr-route-list lr12 | grep 192.168 |
+    grep learned | awk '{print $1, $2}' | sort ], [0], [dnl
+192.168.11.0/24 169.254.101.1
+])
+
+ovn_as az2 check ovn-nbctl set logical_router_port lrp-lr12-ts1 options:ic-route-filter-adv=192.168.12.0/24
+# Test direct routes from lr12 were learned to lr11.
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep 192.168 |
+    grep learned | awk '{print $1, $2}' | sort ], [0], [dnl
+192.168.12.0/24 169.254.101.2
+])
+
+# Set ic-route-filter-adv with invalid CIDR to advertise just the valid route.
+ovn_as az2 check ovn-nbctl set logical_router_port lrp-lr12-ts1 options:ic-route-filter-adv="192.168.12.0/24,invalid"
+# Test direct routes from lr12 were learned to lr11.
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep 192.168 |
+    grep learned | awk '{print $1, $2}' | sort ], [0], [dnl
+192.168.12.0/24 169.254.101.2
+])
+
+ovn_as az2 check ovn-nbctl remove logical_router_port lrp-lr12-ts1 options ic-route-filter-adv
+ovn_as az1 check ovn-nbctl set logical_router_port lrp-lr11-ts1 options:ic-route-filter-learn=192.168.2.0/24
+
+# Test direct routes from lr12 were learned to lr11.
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep 192.168 |
+    grep learned | awk '{print $1, $2}' | sort ], [0], [dnl
+192.168.2.0/24 169.254.101.2
+])
+
+ovn_as az1 check ovn-nbctl remove logical_router_port lrp-lr11-ts1 options ic-route-filter-learn
+
+# Test direct routes from lr12 were learned to lr11.
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep 2001 |
+    grep learned | awk '{print $1, $2}' | sort ], [0], [dnl
+2001:db12::/64 fe80:10::2
+2001:db22::/64 fe80:10::2
+])
+ovn_as az2 check ovn-nbctl set logical_router_port lrp-lr12-ts1 options:ic-route-filter-adv=2001:db22::/64
+
+# Test direct routes from lr12 were learned to lr11.
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep 2001 |
+    grep learned | awk '{print $1, $2}' | sort ], [0], [dnl
+2001:db22::/64 fe80:10::2
+])
+
+ovn_as az2 check ovn-nbctl remove logical_router_port lrp-lr12-ts1 options ic-route-filter-adv
+
+# Test direct routes from lr12 were learned to lr11.
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep 2001 |
+    grep learned | awk '{print $1, $2}' | sort ], [0], [dnl
+2001:db12::/64 fe80:10::2
+2001:db22::/64 fe80:10::2
+])
+
+ovn_as az1 check ovn-nbctl set logical_router_port lrp-lr11-ts1 options:ic-route-filter-learn=2001:db12::/64
+
+# Test direct routes from lr12 were learned to lr11.
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep 2001 |
+    grep learned | awk '{print $1, $2}' | sort ], [0], [dnl
+2001:db12::/64 fe80:10::2
+])
+
+OVN_CLEANUP_IC([az1], [az2])
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-ic -- Check ovn-ic adv and learn from SB Learned Route])
+
+ovn_init_ic_db
+
+for i in 1 2; do
+    ovn_start az$i
+    ovn_as az$i
+
+    # Enable route learning at AZ level
+    check ovn-nbctl set nb_global . options:ic-route-learn=true
+    # Enable route advertising at AZ level
+    check ovn-nbctl set nb_global . options:ic-route-adv=true
+done
+
+# Create new transit switches and LRs. Test topology is next:
+#
+#
+# logical router (lr11) - transit switch (ts11) - logical router (lr12)
+#
+#
+
+# Create lr11, lr12 and ts11 and connect them
+for i in 1 2; do
+    ovn_as az$i
+
+    lr=lr1$i
+    check ovn-nbctl lr-add $lr
+
+    ts=ts11
+    check ovn-ic-nbctl --wait=sb --may-exist ts-add $ts
+
+    lrp=lrp-$lr-$ts
+    lsp=lsp-$ts-$lr
+    # Create LRP and connect to TS
+    check ovn-nbctl lrp-add $lr $lrp aa:aa:aa:aa:a1:0$i 169.254.101.$i/24
+    check ovn-nbctl lsp-add-router-port $ts $lsp $lrp
+done
+
+# Create directly-connected route in lr11
+check ovn_as az2 ovn-nbctl lrp-add lr12 lrp-lr12 aa:aa:aa:aa:bb:01 "192.168.0.1/24"
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep 192.168 |
+             grep learned | awk '{print $1, $2}' | sort ], [0], [dnl
+192.168.0.0/24 169.254.101.2
+])
+
+ovn_as az2
+check ovn-nbctl --wait=sb set Logical_Router lr12 option:dynamic-routing=true \
+    option:dynamic-routing-redistribute="connected,static"
+check ovn_as az2 ovn-nbctl --wait=sb lrp-add lr12 lr12-dr1 00:00:00:00:ff:01 10.0.0.1/24
+dr1=$(fetch_column port_binding _uuid logical_port=lr12-dr1)
+datapath=$(fetch_column datapath_binding _uuid external_ids:name=lr12)
+
+check_uuid ovn-sbctl create Learned_Route \
+    datapath=$datapath                    \
+    logical_port=$dr1                     \
+    ip_prefix=192.168.1.0/24              \
+    nexthop=10.0.0.20
+
+# Check Learned_Route adv in ovn-ic
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep 192.168 |
+             grep learned | awk '{print $1, $2}' | sort ], [0], [dnl
+192.168.0.0/24 169.254.101.2
+192.168.1.0/24 169.254.101.2
+])
+
+ovn_as az2
+learned=$(fetch_column Learned_Route _uuid ip_prefix=192.168.1.0/24)
+check ovn-sbctl destroy Learned_Route $learned
+
+# Check Learned_Route removed is not adv and learned.
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep 192.168 |
+             grep learned | awk '{print $1, $2}' | sort ], [0], [dnl
+192.168.0.0/24 169.254.101.2
+])
+
+
+# Duplicate routes, SB learn route by two paths.
+ovn_as az2
+check_uuid ovn-sbctl create Learned_Route \
+               datapath=$datapath         \
+               logical_port=$dr1          \
+               ip_prefix=192.168.1.0/24   \
+               nexthop=10.0.0.20
+
+check ovn-nbctl --wait=sb lrp-add lr12 lr12-dr2 00:00:00:00:ff:02 169.254.254.1/24
+dr2=$(fetch_column port_binding _uuid logical_port=lr12-dr2)
+
+check_uuid ovn-sbctl create Learned_Route \
+    datapath=$datapath                    \
+    logical_port=$dr2                     \
+    ip_prefix=192.168.1.0/24              \
+    nexthop=169.254.254.3
+
+check_uuid ovn-sbctl create Learned_Route \
+    datapath=$datapath                    \
+    logical_port=$dr2                     \
+    ip_prefix=192.168.2.0/24              \
+    nexthop=169.254.254.3
+
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep 192.168 |
+             grep learned | awk '{print $1, $2}' | sort ], [0], [dnl
+192.168.0.0/24 169.254.101.2
+192.168.1.0/24 169.254.101.2
+192.168.2.0/24 169.254.101.2
+])
+
+# Insert the same route Learned Route in the lr11 and don't learn by ovn-ic.
+ovn_as az1
+check ovn-nbctl --wait=sb set Logical_Router lr11 option:dynamic-routing=true \
+    option:dynamic-routing-redistribute="connected,static"
+datapath_lr11=$(fetch_column datapath_binding _uuid external_ids:name=lr11)
+check ovn-nbctl --wait=sb lrp-add lr11 lr11-dr1 00:00:00:00:ff:03 169.254.254.2/24
+sw1_dr1=$(fetch_column port_binding _uuid logical_port=lr11-dr1)
+check_uuid ovn-sbctl create Learned_Route \
+    datapath=$datapath_lr11               \
+    logical_port=$sw1_dr1                 \
+    ip_prefix=192.168.1.0/24              \
+    nexthop=169.254.254.3
+
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep 192.168 |
+             grep learned | awk '{print $1, $2}' | sort ], [0], [dnl
+192.168.0.0/24 169.254.101.2
+192.168.2.0/24 169.254.101.2
+])
+
+OVS_WAIT_FOR_OUTPUT([ovn_as az2 ovn-nbctl lr-route-list lr12 | grep 192.168 |
+             grep learned | awk '{print $1, $2}' | sort ], [0], [dnl
+])
+
+OVN_CLEANUP_IC([az1], [az2])
+
+AT_CLEANUP
+])
+
+AT_BANNER([OVN Interconnection Service Monitor synchronization])
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-ic -- Service Monitor synchronization: mock_test])
+
+ovn_init_ic_db
+ovn_start az1
+ovn_start az2
+ovn_start az3
+
+#┌─────────────────────────────────────────────────────────────────────────────┐
+#│               Service Monitor Sync Check (Cross-AZ LB Setup)                │
+#├───────────────┬───────────────┬─────────────────────────────────────────────┤
+#│     AZ1       │     AZ2       │      AZ3 (Backends only)                    │
+#├───────────────┼───────────────┼─────────────────────────────────────────────┤
+#│  ┌─────────┐  │  ┌─────────┐  │  ┌─────────┐  ┌─────────┐  ┌─────────┐      │
+#│  │  LB1    │  │  │  LB2    │  │  │ lport5  │  │ lport6  │  │ lport7  │      │
+#│  ├─────────┤  │  ├─────────┤  │  │ (AZ3)   │  │ (AZ3)   │  │ (AZ3)   │      │
+#│  │ - lport1├──┼──┤ - lport3│  │  └─────────┘  └─────────┘  └─────────┘      │
+#│  │   (AZ1) │  │  │   (AZ2) │  │                                             │
+#│  │ - lport3├──┼──┤ - lport5│  │                                             │
+#│  │   (AZ2) │  │  │   (AZ3) │  │                                             │
+#│  │ - lport5│  │  └─────────┘  │                                             │
+#│  │   (AZ3) │  │               │                                             │
+#│  │ - lport4│  │  ┌─────────┐  │                                             │
+#│  │   (AZ2) │  │  │  LB3    │  │                                             │
+#│  └─────────┘  │  ├─────────┤  │                                             │
+#│               │  │ - lport5├──┼───────────────────┐                         │
+#│               │  │   (AZ3) │  │                   │                         │
+#│               │  │ - lport6│  │                   │                         │
+#│               │  │   (AZ3) │  │                   │                         │
+#│               │  │ - lport2├──┘                   │                         │
+#│               │  │   (AZ1) │                      │                         │
+#│               │  └─────────┘                      │                         │
+#│               │                                   │                         │
+#│               │                                   │                         │
+#│               └───────────────────────────────────┘                         │
+#└───────────────┴───────────────┴─────────────────────────────────────────────┘
+#
+#  Physical Backend Locations:
+#  - AZ1: lport1, lport2
+#  - AZ2: lport3, lport4
+#  - AZ3: lport5, lport6 , lport7
+#
+#  Load Balancer Configurations:
+#  - LB1 (AZ1): lport1(AZ1), lport3(AZ2), lport5(AZ3), lport4(az2)
+#  - LB2 (AZ2): lport3(AZ2), lport1(AZ3)
+#  - LB3 (AZ2): lport5(AZ3), lport6(AZ3), lport2(AZ1)
+
+
+# AZ1 Configuration
+ovn_as az1
+# change the MAC address for more convenient search of logical flows
+check ovn-nbctl set NB_Global . options:svc_monitor_mac="11:11:11:11:11:11"
+
+check ovn-nbctl ls-add az1_ls1
+check ovn-nbctl lsp-add az1_ls1 lport1_az1
+check ovn-nbctl lsp-add az1_ls1 lport2_az1
+
+check ovn-nbctl lb-add az1_lb1 10.10.10.1:80 1.1.1.1:10880,5.5.5.1:10880,3.3.3.1:10880,4.4.4.1:10880
+check ovn-nbctl ls-lb-add az1_ls1 az1_lb1
+AT_CHECK([ovn-nbctl --wait=sb \
+          -- --id=@hc create Load_Balancer_Health_Check vip="10.10.10.1\:80" \
+             options:failure_count=100 \
+          -- add Load_Balancer . health_check @hc | uuidfilt], [0], [<0>
+])
+
+# We will leave one backend without a service monitor since it is not expected to participate in load balancing.
+check ovn-nbctl set load_balancer az1_lb1 ip_port_mappings:1.1.1.1=lport1_az1:1.1.1.9
+check ovn-nbctl set load_balancer az1_lb1 ip_port_mappings:3.3.3.1=lport3_az2:3.3.3.9:az2
+check ovn-nbctl --wait=sb set load_balancer az1_lb1 ip_port_mappings:5.5.5.1=lport5_az3:5.5.5.9:az3
+
+# Сheck that all remote and local service monitors have been created.
+check_row_count sb:Service_Monitor 3
+
+check_column "3.3.3.1" sb:Service_Monitor ip logical_port=lport3_az2
+check_column 10880 sb:Service_Monitor port logical_port=lport3_az2
+check_column tcp sb:Service_Monitor protocol logical_port=lport3_az2
+check_column "3.3.3.9" sb:Service_Monitor src_ip logical_port=lport3_az2
+check_column false sb:Service_Monitor ic_learned logical_port=lport3_az2
+check_column true sb:Service_Monitor remote logical_port=lport3_az2
+
+check_column "1.1.1.1" sb:Service_Monitor ip logical_port=lport1_az1
+check_column 10880 sb:Service_Monitor port logical_port=lport1_az1
+check_column tcp sb:Service_Monitor protocol logical_port=lport1_az1
+check_column "1.1.1.9" sb:Service_Monitor src_ip logical_port=lport1_az1
+check_column false sb:Service_Monitor ic_learned logical_port=lport1_az1
+check_column false sb:Service_Monitor remote logical_port=lport1_az1
+
+check_column "5.5.5.1" sb:Service_Monitor ip logical_port=lport5_az3
+check_column 10880 sb:Service_Monitor port logical_port=lport5_az3
+check_column tcp sb:Service_Monitor protocol logical_port=lport5_az3
+check_column "5.5.5.9" sb:Service_Monitor src_ip logical_port=lport5_az3
+check_column false sb:Service_Monitor ic_learned logical_port=lport5_az3
+check_column true sb:Service_Monitor remote logical_port=lport5_az3
+
+check_row_count ic-sb:Service_Monitor 2
+
+check_column "5.5.5.1" ic-sb:Service_Monitor ip logical_port=lport5_az3
+check_column 10880 ic-sb:Service_Monitor port logical_port=lport5_az3
+check_column tcp ic-sb:Service_Monitor protocol logical_port=lport5_az3
+check_column "5.5.5.9" ic-sb:Service_Monitor src_ip logical_port=lport5_az3
+check_column az3 ic-sb:Service_Monitor target_availability_zone logical_port=lport5_az3
+check_column az1 ic-sb:Service_Monitor source_availability_zone logical_port=lport5_az3
+
+check_column az2 ic-sb:Service_Monitor target_availability_zone logical_port=lport3_az2
+check_column az1 ic-sb:Service_Monitor source_availability_zone logical_port=lport3_az2
+
+# Check that logical flows are created only for local service monitors.
+AT_CHECK([ovn-sbctl lflow-list az1_ls1 | grep 'ls_in_arp_rsp'| ovn_strip_lflows], [0], [dnl
+  table=??(ls_in_arp_rsp      ), priority=0    , match=(1), action=(next;)
+  table=??(ls_in_arp_rsp      ), priority=110  , match=(arp.tpa == 1.1.1.9 && arp.op == 1), action=(eth.dst = eth.src; eth.src = 11:11:11:11:11:11; arp.op = 2; /* ARP reply */ arp.tha = arp.sha; arp.sha = 11:11:11:11:11:11; arp.tpa = arp.spa; arp.spa = 1.1.1.9; outport = inport; flags.loopback = 1; output;)
+])
+
+# AZ2 Configuration
+ovn_as az2
+# change the MAC address for more convenient search of logical flows
+check ovn-nbctl set NB_Global . options:svc_monitor_mac="12:12:12:12:12:12"
+
+check ovn-nbctl ls-add az2_ls1
+check ovn-nbctl lsp-add az2_ls1 lport3_az2
+check ovn-nbctl lsp-add az2_ls1 lport4_az2
+
+check ovn-nbctl lb-add az2_lb1 20.20.20.1:80 3.3.3.1:10880,1.1.1.1:10880
+check ovn-nbctl ls-lb-add az2_ls1 az2_lb1
+AT_CHECK([ovn-nbctl --wait=sb \
+          -- --id=@hc create Load_Balancer_Health_Check vip="20.20.20.1\:80" \
+             options:failure_count=100 \
+          -- add Load_Balancer . health_check @hc | uuidfilt], [0], [<0>
+])
+
+# Create a cross-cutting backend with a balancer in the first availability zone to check that everything works correctly
+check ovn-nbctl set load_balancer az2_lb1 ip_port_mappings:3.3.3.1=lport3_az2:3.3.3.9
+check ovn-nbctl --wait=sb set load_balancer az2_lb1 ip_port_mappings:1.1.1.1=lport1_az1:1.1.1.9:az1
+
+check_row_count sb:Service_Monitor 2
+check_row_count ic-sb:Service_Monitor 3
+
+ovn_as az1
+check_row_count sb:Service_Monitor 3
+
+# Check that the local backend, which intersects with the one created in another availability zone, remains local
+check_column false sb:Service_Monitor ic_learned logical_port=lport1_az1
+check_column false sb:Service_Monitor remote logical_port=lport1_az1
+
+ovn_as az2
+check_column false sb:Service_Monitor ic_learned logical_port=lport1_az1
+check_column true sb:Service_Monitor remote logical_port=lport1_az1
+
+# Сheck that all remote and local service monitors have been created.
+check_column az2 ic-sb:Service_Monitor target_availability_zone logical_port=lport3_az2
+check_column az1 ic-sb:Service_Monitor source_availability_zone logical_port=lport3_az2
+
+check_column az1 ic-sb:Service_Monitor target_availability_zone logical_port=lport1_az1
+check_column az2 ic-sb:Service_Monitor source_availability_zone logical_port=lport1_az1
+
+check_column az3 ic-sb:Service_Monitor target_availability_zone logical_port=lport5_az3
+check_column az1 ic-sb:Service_Monitor source_availability_zone logical_port=lport5_az3
+
+# AZ3 Configuration
+ovn_as az3
+check ovn-nbctl set NB_Global . options:svc_monitor_mac="13:13:13:13:13:13"
+check ovn-nbctl --wait=sb ls-add az3_ls1
+
+# Check there no Service_Monitor when we have no ports.
+check_row_count sb:Service_Monitor 0
+check_row_count nb:Load_Balancer 0
+
+check ovn-nbctl lsp-add az3_ls1 lport5_az3
+check ovn-nbctl lsp-add az3_ls1 lport6_az3
+check ovn-nbctl --wait=sb lsp-add az3_ls1 lport7_az3
+
+# Check there is one Service Monitor learned from az1.
+check_row_count sb:Service_Monitor 1
+
+check_column "5.5.5.1" sb:Service_Monitor ip logical_port=lport5_az3
+check_column 10880 sb:Service_Monitor port logical_port=lport5_az3
+check_column tcp sb:Service_Monitor protocol logical_port=lport5_az3
+check_column "5.5.5.9" sb:Service_Monitor src_ip logical_port=lport5_az3
+check_column true sb:Service_Monitor ic_learned logical_port=lport5_az3
+check_column false sb:Service_Monitor remote logical_port=lport5_az3
+
+# Check that logical flows are created for ic_learned service monitors when we have no load balancers.
+AT_CHECK([ovn-sbctl lflow-list az3_ls1 | grep 'ls_in_arp_rsp' | ovn_strip_lflows], [0], [dnl
+  table=??(ls_in_arp_rsp      ), priority=0    , match=(1), action=(next;)
+  table=??(ls_in_arp_rsp      ), priority=110  , match=(arp.tpa == 5.5.5.9 && arp.op == 1), action=(eth.dst = eth.src; eth.src = 13:13:13:13:13:13; arp.op = 2; /* ARP reply */ arp.tha = arp.sha; arp.sha = 13:13:13:13:13:13; arp.tpa = arp.spa; arp.spa = 5.5.5.9; outport = inport; flags.loopback = 1; output;)
+])
+
+# Add more lb in AZ2, change port for one backend, check we will have one more
+# records for this Service_Monitor
+ovn_as az2
+check ovn-nbctl lb-add az2_lb2 20.20.20.2:80 2.2.2.1:10880,5.5.5.1:10880,6.6.6.1:10880
+check ovn-nbctl ls-lb-add az2_ls1 az2_lb2
+AT_CHECK([ovn-nbctl --wait=sb \
+          -- --id=@hc create Load_Balancer_Health_Check vip="20.20.20.2\:80" \
+             options:failure_count=100 \
+          -- add Load_Balancer az2_lb2 health_check @hc | uuidfilt], [0], [<0>
+])
+
+# We will leave one backend without a service monitor since it is not expected to participate in load balancing.
+check ovn-nbctl set load_balancer az2_lb2 ip_port_mappings:2.2.2.1=lport2_az1:2.2.2.9:az1
+check ovn-nbctl --wait=sb set load_balancer az2_lb2 ip_port_mappings:6.6.6.1=lport6_az3:6.6.6.9:az3
+
+ovn_as az1
+check_row_count sb:Service_Monitor 4
+check_column true sb:Service_Monitor ic_learned logical_port=lport2_az1
+check_column false sb:Service_Monitor remote logical_port=lport2_az1
+
+ovn_as az2
+check_row_count sb:Service_Monitor 4
+
+AT_CHECK([ovn-sbctl lflow-list az2_ls1 | grep 'ls_in_arp_rsp'| ovn_strip_lflows], [0], [dnl
+  table=??(ls_in_arp_rsp      ), priority=0    , match=(1), action=(next;)
+  table=??(ls_in_arp_rsp      ), priority=110  , match=(arp.tpa == 3.3.3.9 && arp.op == 1), action=(eth.dst = eth.src; eth.src = 12:12:12:12:12:12; arp.op = 2; /* ARP reply */ arp.tha = arp.sha; arp.sha = 12:12:12:12:12:12; arp.tpa = arp.spa; arp.spa = 3.3.3.9; outport = inport; flags.loopback = 1; output;)
+])
+
+ovn_as az3
+check_row_count sb:Service_Monitor 2
+AT_CHECK([ovn-sbctl lflow-list az3_ls1 | grep 'ls_in_arp_rsp' | ovn_strip_lflows], [0], [dnl
+  table=??(ls_in_arp_rsp      ), priority=0    , match=(1), action=(next;)
+  table=??(ls_in_arp_rsp      ), priority=110  , match=(arp.tpa == 5.5.5.9 && arp.op == 1), action=(eth.dst = eth.src; eth.src = 13:13:13:13:13:13; arp.op = 2; /* ARP reply */ arp.tha = arp.sha; arp.sha = 13:13:13:13:13:13; arp.tpa = arp.spa; arp.spa = 5.5.5.9; outport = inport; flags.loopback = 1; output;)
+  table=??(ls_in_arp_rsp      ), priority=110  , match=(arp.tpa == 6.6.6.9 && arp.op == 1), action=(eth.dst = eth.src; eth.src = 13:13:13:13:13:13; arp.op = 2; /* ARP reply */ arp.tha = arp.sha; arp.sha = 13:13:13:13:13:13; arp.tpa = arp.spa; arp.spa = 6.6.6.9; outport = inport; flags.loopback = 1; output;)
+])
+
+# Check status propogation: since this is a mock test, the statuses will be changed
+# manually, waiting for the desired behavior of the code
+# az1: az1_lb1 10.10.10.1:80 1.1.1.1:10880,5.5.5.1:10880,3.3.3.1:10880,4.4.4.1:10880
+# (4.4.4.1 - does not have a service monitor)
+# az2: az2_lb1 20.20.20.1:80 3.3.3.1:10880,1.1.1.1:10880
+#      az2_lb2 20.20.20.2:80 2.2.2.1:10880,5.5.5.1:10880,6.6.6.1:10880
+# (5.5.5.1 - does not have a service monitor)
+
+# Check that if the service monitors are not initialized, balancing is performed on all but the 4th
+ovn_as az1
+AT_CHECK([ovn-sbctl lflow-list az1_ls1 | grep ls_in_lb | grep backends | ovn_strip_lflows], [0], [dnl
+  table=??(ls_in_lb           ), priority=120  , match=(ct.new && ip4.dst == 10.10.10.1 && reg1[[16..23]] == 6 && reg1[[0..15]] == 80), action=(reg4 = 10.10.10.1; reg2[[0..15]] = 80; ct_lb_mark(backends=1.1.1.1:10880,5.5.5.1:10880,3.3.3.1:10880);)
+])
+
+# Check that if the service monitors are not initialized, balancing is performed on all but the 5th
+ovn_as az2
+AT_CHECK([ovn-sbctl lflow-list az2_ls1 | grep ls_in_lb | grep backends | ovn_strip_lflows], [0], [dnl
+  table=??(ls_in_lb           ), priority=120  , match=(ct.new && ip4.dst == 20.20.20.1 && reg1[[16..23]] == 6 && reg1[[0..15]] == 80), action=(reg4 = 20.20.20.1; reg2[[0..15]] = 80; ct_lb_mark(backends=3.3.3.1:10880,1.1.1.1:10880);)
+  table=??(ls_in_lb           ), priority=120  , match=(ct.new && ip4.dst == 20.20.20.2 && reg1[[16..23]] == 6 && reg1[[0..15]] == 80), action=(reg4 = 20.20.20.2; reg2[[0..15]] = 80; ct_lb_mark(backends=2.2.2.1:10880,6.6.6.1:10880);)
+])
+
+# Change statuses
+ovn_as az1
+svc_lport1_uuid=$(ovn-sbctl -d bare --no-headings --columns _uuid find Service_Monitor logical_port=lport1_az1)
+check ovn-sbctl set Service_Monitor $svc_lport1_uuid status="offline"
+check_column offline ic-sb:Service_Monitor status logical_port=lport1_az1
+
+# Since port1 is a backend in another availability zone, we check that the status has also been updated there
+ovn_as az1
+AT_CHECK([ovn-sbctl lflow-list az1_ls1 | grep ls_in_lb | grep backends | ovn_strip_lflows], [0], [dnl
+  table=??(ls_in_lb           ), priority=120  , match=(ct.new && ip4.dst == 10.10.10.1 && reg1[[16..23]] == 6 && reg1[[0..15]] == 80), action=(reg4 = 10.10.10.1; reg2[[0..15]] = 80; ct_lb_mark(backends=5.5.5.1:10880,3.3.3.1:10880);)
+])
+
+# Check the status in the interconet db.
+check_column offline ic-sb:Service_Monitor status logical_port=lport1_az1
+
+ovn_as az2
+check_column offline sb:Service_Monitor status logical_port=lport1_az1
+AT_CHECK([ovn-sbctl lflow-list az2_ls1 | grep ls_in_lb | grep backends | ovn_strip_lflows], [0], [dnl
+  table=??(ls_in_lb           ), priority=120  , match=(ct.new && ip4.dst == 20.20.20.1 && reg1[[16..23]] == 6 && reg1[[0..15]] == 80), action=(reg4 = 20.20.20.1; reg2[[0..15]] = 80; ct_lb_mark(backends=3.3.3.1:10880);)
+  table=??(ls_in_lb           ), priority=120  , match=(ct.new && ip4.dst == 20.20.20.2 && reg1[[16..23]] == 6 && reg1[[0..15]] == 80), action=(reg4 = 20.20.20.2; reg2[[0..15]] = 80; ct_lb_mark(backends=2.2.2.1:10880,6.6.6.1:10880);)
+])
+
+# Change all statuses to offline to check online propogation.
+ovn_as az3
+svc_lport6_uuid=$(ovn-sbctl -d bare --no-headings --columns _uuid find Service_Monitor logical_port=lport6_az3)
+check ovn-sbctl set Service_Monitor $svc_lport6_uuid status="offline"
+check_column offline ic-sb:Service_Monitor status logical_port=lport6_az3
+
+ovn_as az2
+check_column offline sb:Service_Monitor status logical_port=lport6_az3
+
+ovn_as az2
+ovn-sbctl list service_m
+
+svc_lport3_uuid=$(ovn-sbctl -d bare --no-headings --columns _uuid find Service_Monitor logical_port=lport3_az2)
+check ovn-sbctl set Service_Monitor $svc_lport3_uuid status="offline"
+check_column offline sb:Service_Monitor status logical_port=lport3_az2
+check_column offline ic-sb:Service_Monitor status logical_port=lport3_az2
+
+ovn_as az2
+check_column offline sb:Service_Monitor status logical_port=lport3_az2
+
+ovn_as az1
+svc_lport2_uuid=$(ovn-sbctl -d bare --no-headings --columns _uuid find Service_Monitor logical_port=lport2_az1)
+check ovn-sbctl set Service_Monitor $svc_lport2_uuid status="offline"
+check_column offline sb:Service_Monitor status logical_port=lport2_az1
+check_column offline ic-sb:Service_Monitor status logical_port=lport2_az1
+
+ovn_as az3
+svc_lport5_uuid=$(ovn-sbctl -d bare --no-headings --columns _uuid find Service_Monitor logical_port=lport5_az3)
+check ovn-sbctl set Service_Monitor $svc_lport5_uuid status="offline"
+
+check_column offline sb:Service_Monitor status logical_port=lport5_az3
+check_column offline ic-sb:Service_Monitor status logical_port=lport5_az3
+
+ovn_as az1
+check_column offline sb:Service_Monitor status logical_port=lport5_az3
+
+ovn_as az1
+AT_CHECK([ovn-sbctl lflow-list az1_ls1 | grep ls_in_lb | grep backends | ovn_strip_lflows], [0], [dnl])
+
+ovn_as az2
+AT_CHECK([ovn-sbctl lflow-list az2_ls1 | grep ls_in_lb | grep backends | ovn_strip_lflows], [0], [dnl])
+
+ovn_as az1
+# Change one backend and check that it is correctly removed from the databases
+az1_lb1_uuid=$(ovn-nbctl --bare --no-headings --columns=_uuid find Load_Balancer name=az1_lb1)
+
+check_row_count sb:Service_Monitor 1 logical_port=lport3_az2
+check ovn-nbctl set Load_Balancer $az1_lb1_uuid vip='"10.10.10.1:80"="1.1.1.1:10880,5.5.5.1:10880,2.2.2.1:10880"'
+check ovn-nbctl --wait=sb set load_balancer az1_lb1 ip_port_mappings:2.2.2.1=lport2_az1:2.2.2.9
+check_row_count sb:Service_Monitor 0 logical_port=lport3_az2
+
+# Check deletion from ICSB.
+check_row_count ic-sb:Service_Monitor 0 logical_port=lport3_az2
+
+ovn_as az3
+svc_lport6_uuid=$(ovn-sbctl -d bare --no-headings --columns _uuid find Service_Monitor logical_port=lport6_az3)
+check ovn-sbctl set Service_Monitor $svc_lport6_uuid status="online"
+check_column online ic-sb:Service_Monitor status logical_port=lport6_az3
+
+ovn_as az2
+check_column online sb:Service_Monitor status logical_port=lport6_az3
+check_row_count sb:Service_Monitor 1 logical_port=lport3_az2
+check_column offline sb:Service_Monitor status logical_port=lport3_az2
+
+# Need to check that the 3.3.3.1 backend retained its previous status
+# and after deleting the record from the interconnect database - the old
+# information remained in sbdb of the target availability zone.
+AT_CHECK([ovn-sbctl lflow-list az2_ls1 | grep ls_in_lb | grep backends | ovn_strip_lflows], [0], [dnl
+  table=??(ls_in_lb           ), priority=120  , match=(ct.new && ip4.dst == 20.20.20.2 && reg1[[16..23]] == 6 && reg1[[0..15]] == 80), action=(reg4 = 20.20.20.2; reg2[[0..15]] = 80; ct_lb_mark(backends=6.6.6.1:10880);)
+])
+
+ovn_as az1
+# set other statuses to online state.
+svc_lport1_uuid=$(ovn-sbctl -d bare --no-headings --columns _uuid find Service_Monitor logical_port=lport1_az1)
+lport1_uuid=$(ovn-sbctl -d bare --no-headings --columns _uuid find Port_Binding logical_port=lport1_az1)
+check ovn-sbctl set Port_Binding $lport1_uuid up=true
+check ovn-sbctl set Service_Monitor $svc_lport1_uuid status="online"
+check_column online ic-sb:Service_Monitor status logical_port=lport1_az1
+
+svc_lport2_uuid=$(ovn-sbctl -d bare --no-headings --columns _uuid find Service_Monitor logical_port=lport2_az1)
+lport2_uuid=$(ovn-sbctl -d bare --no-headings --columns _uuid find Port_Binding logical_port=lport2_az1)
+check ovn-sbctl set Port_Binding $lport2_uuid up=true
+check ovn-sbctl set Service_Monitor $svc_lport2_uuid status="online"
+check_column online ic-sb:Service_Monitor status logical_port=lport2_az1
+
+ovn_as az1
+AT_CHECK([ovn-sbctl lflow-list az1_ls1 | grep ls_in_lb | grep backends | ovn_strip_lflows], [0], [dnl
+  table=??(ls_in_lb           ), priority=120  , match=(ct.new && ip4.dst == 10.10.10.1 && reg1[[16..23]] == 6 && reg1[[0..15]] == 80), action=(reg4 = 10.10.10.1; reg2[[0..15]] = 80; ct_lb_mark(backends=1.1.1.1:10880,2.2.2.1:10880);)
+])
+
+ovn_as az2
+AT_CHECK([ovn-sbctl lflow-list az2_ls1 | grep ls_in_lb | grep backends | ovn_strip_lflows], [0], [dnl
+  table=??(ls_in_lb           ), priority=120  , match=(ct.new && ip4.dst == 20.20.20.1 && reg1[[16..23]] == 6 && reg1[[0..15]] == 80), action=(reg4 = 20.20.20.1; reg2[[0..15]] = 80; ct_lb_mark(backends=1.1.1.1:10880);)
+  table=??(ls_in_lb           ), priority=120  , match=(ct.new && ip4.dst == 20.20.20.2 && reg1[[16..23]] == 6 && reg1[[0..15]] == 80), action=(reg4 = 20.20.20.2; reg2[[0..15]] = 80; ct_lb_mark(backends=2.2.2.1:10880,6.6.6.1:10880);)
+])
+
+# Check deletion.
+ovn_as az1
+check ovn-nbctl --wait=sb lb-del az1_lb1
+# az1_lb1 had : 1.1.1.1:10880,5.5.5.1:10880,2.2.2.1:10880,4.4.4.1:10880 backends
+#      (4.4.4.1 - no hc, 5.5.5.1 - no hc)
+# az2: az2_lb1 20.20.20.1:80 3.3.3.1:10880,1.1.1.1:10880
+#      az2_lb2 20.20.20.2:80 2.2.2.1:10880,5.5.5.1:10880,6.6.6.1:10880
+
+# Despite the balancer being removed, records for lport1 and lport2 should no
+# be removed as they participate in balancing in other availability zones.
+check_row_count sb:Service_Monitor 2
+check_row_count sb:Service_Monitor 1 logical_port=lport1_az1
+check_row_count sb:Service_Monitor 1 logical_port=lport2_az1
+check_row_count ic-sb:Service_Monitor 3
+
+ovn_as az2
+# Need to check that there is no service_monitor left in az3,
+# in az1 there will be one service monitors for 1.1.1.1 (used by az2_lb1)
+# and in az2 there will be two service monitor for 3.3.3.1 and 1.1.1.1
+check ovn-nbctl --wait=sb lb-del az2_lb2
+
+ovn_as az1
+# Check that the ic_learned records have been deleted
+check_row_count sb:Service_Monitor 1
+check_row_count ic-sb:Service_Monitor 1
+
+ovn_as az2
+check_row_count sb:Service_Monitor 2
+
+ovn_as az3
+check_row_count sb:Service_Monitor 0
+
+ovn_as az2
+check ovn-nbctl --wait=sb lb-del az2_lb1
+check_row_count sb:Service_Monitor 0
+check_row_count ic-sb:Service_Monitor 0
+
+# We expect something around 20 Service_Monitor updates.
+# Make sure there is no fight between ic and northd, which used to cause
+# up to more than 2000 updates.
+for az in az1 az2 az3; do
+    svc_update_count=$(grep -c Service_Monitor $az/ovn-sb/ovn-sb.db)
+    check test $svc_update_count -lt 50
+done
+
+OVN_CLEANUP_IC([az1], [az2], [az3])
+AT_CLEANUP
+])
+
+AT_BANNER([Learning routes backward compatibility])
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-ic -- Backward compatibility of learning routes in the same AZ])
+
+ovn_init_ic_db
+ovn_start az1
+
+# Enable route learning at AZ level
+check ovn-nbctl set nb_global . options:ic-route-learn=true
+# Enable route advertising at AZ level
+check ovn-nbctl set nb_global . options:ic-route-adv=true
+
+# Create a fake availability zone to announce a route from.
+# This route will not have an lr-id in its external_ids, simulating
+# the behavior of the legacy code. The system is expected to
+# learn this route to maintain backward compatibility.
+check_uuid ovn-ic-sbctl create Availability_Zone name=fake_az
+fake_az_uuid=$(fetch_column ic-sb:availability-zone _uuid name="fake_az")
+check_uuid ovn-ic-sbctl create Gateway name=fake_az_gw availability_zone=$fake_az_uuid \
+    encap=@encap -- --id=@encap create encap type=geneve ip="192.168.0.2"
+
+check ovn-ic-nbctl ts-add ts1
+check ovn-ic-nbctl ts-add ts2
+
+check ovn-nbctl lr-add lr1
+check ovn-nbctl lrp-add lr1 lrp-lr1-ts1 aa:aa:aa:aa:aa:02 169.254.100.1/24
+check ovn-nbctl lsp-add-router-port ts1 lsp-ts1-lr1 lrp-lr1-ts1
+
+# Check ISB
+check_row_count ic-sb:Datapath_Binding 1 transit_switch=ts1
+check_row_count ic-sb:Datapath_Binding 1 transit_switch=ts2
+
+check_uuid ovn-ic-sbctl create Route availability_zone=$fake_az_uuid \
+    ip_prefix="172.31.0.0/24" nexthop="169.254.100.2" origin=connected \
+    transit_switch=ts1
+
+AT_CHECK([ovn-ic-sbctl find Route nexthop="169.254.100.2" | grep external_ids], [0], [dnl
+external_ids        : {}
+])
+
+AT_CHECK([ovn-nbctl lr-route-list lr1], [0], [dnl
+IPv4 Routes
+Route Table <main>:
+            172.31.0.0/24             169.254.100.2 dst-ip (learned)
+])
+
+OVN_CLEANUP_IC([az1])
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-ic -- prefix filter -- deny route adv])
+ovn_init_ic_db
+ovn-ic-nbctl ts-add ts1
+for i in 1 2; do
+    ovn_start az$i
+    ovn_as az$i
+    check ovn-nbctl set nb_global . options:ic-route-learn=true
+    check ovn-nbctl set nb_global . options:ic-route-adv=true
+done
+
+# Create routers and connect to transit switch
+for i in 1 2; do
+    ovn_as az$i
+    lr=lr1$i
+    check ovn-nbctl lr-add $lr
+    lrp=lrp-$lr-ts1
+    lsp=lsp-ts1-$lr
+    check ovn-nbctl lrp-add $lr $lrp aa:aa:aa:aa:ab:0$i 169.254.101.$i/24 fe80:10::$i/64
+    check ovn-nbctl lsp-add-router-port ts1 $lsp $lrp
+done
+
+# Add directly connected routes to lr12 (first two test prefixes reused)
+ovn_as az2 check ovn-nbctl lrp-add lr12 lrp-lr12-1 aa:aa:aa:aa:cc:01 "192.168.100.1/24" "2001:db12::1/64"
+ovn_as az2 check ovn-nbctl lrp-add lr12 lrp-lr12-2 aa:aa:aa:aa:cc:02 "192.168.200.1/24" "2001:db22::1/64"
+
+# Sync IC DB
+check ovn-ic-nbctl --wait=sb sync
+
+# Validate lr11 learns both IPv4 and IPv6 routes from lr12
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep -E '192.168|2001' | grep learned | awk '{print $1, $2}' | sort], [0], [dnl
+192.168.100.0/24 169.254.101.2
+192.168.200.0/24 169.254.101.2
+2001:db12::/64 fe80:10::2
+2001:db22::/64 fe80:10::2
+])
+
+# Set deny-adv on lrp-lr12-ts1 for 192.168.100.0/24
+ovn_as az2 check ovn-nbctl set logical_router_port lrp-lr12-ts1 options:ic-route-deny-adv=192.168.100.0/24
+
+# Only 192.168.200.0/24 should now be learned
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep 192.168 | grep learned | awk '{print $1, $2}' | sort], [0], [dnl
+192.168.200.0/24 169.254.101.2
+])
+
+# Add IPv6 deny prefix too
+ovn_as az2 check ovn-nbctl set logical_router_port lrp-lr12-ts1 options:ic-route-deny-adv="192.168.100.0/24,2001:db12::/64"
+
+# Only 2001:db22::/64 should be learned now
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep 2001 | grep learned | awk '{print $1, $2}' | sort], [0], [dnl
+2001:db22::/64 fe80:10::2
+])
+
+# Remove deny-adv and validate all are learned again
+ovn_as az2 check ovn-nbctl remove logical_router_port lrp-lr12-ts1 options ic-route-deny-adv
+
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep learned | awk '{print $1, $2}' | sort], [0], [dnl
+192.168.100.0/24 169.254.101.2
+192.168.200.0/24 169.254.101.2
+2001:db12::/64 fe80:10::2
+2001:db22::/64 fe80:10::2
+])
+
+# --- Test ic-route-deny-learn ---
+
+# Set deny-learn on lrp-lr11-ts1 for 192.168.200.0/24 and 2001:db22::/64
+ovn_as az1 check ovn-nbctl set logical_router_port lrp-lr11-ts1 options:ic-route-deny-learn="192.168.200.0/24,2001:db22::/64"
+
+# Now lr11 should only learn 192.168.100.0/24 and 2001:db12::/64
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep -E '192.168|2001' | grep learned | awk '{print $1, $2}' | sort], [0], [dnl
+192.168.100.0/24 169.254.101.2
+2001:db12::/64 fe80:10::2
+])
+
+# Remove deny-learn and confirm full route learning resumes
+ovn_as az1 check ovn-nbctl remove logical_router_port lrp-lr11-ts1 options ic-route-deny-learn
+
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep -E '192.168|2001' | grep learned | awk '{print $1, $2}' | sort], [0], [dnl
+192.168.100.0/24 169.254.101.2
+192.168.200.0/24 169.254.101.2
+2001:db12::/64 fe80:10::2
+2001:db22::/64 fe80:10::2
+])
+
+# --- Test setting deny options on logical router ---
+
+# Set deny-adv on lr12 for 192.168.100.0/24
+ovn_as az2 check ovn-nbctl set logical_router lr12 options:ic-route-deny-adv="192.168.100.0/24"
+
+# Sync again after router option is applied
+check ovn-ic-nbctl --wait=sb sync
+
+# Only 192.168.200.0/24 should now be learned
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep 192.168 | grep learned | awk '{print $1, $2}' | sort], [0], [dnl
+192.168.200.0/24 169.254.101.2
+])
+
+# Set deny-learn on lr11 for 2001:db22::/64
+ovn_as az1 check ovn-nbctl set logical_router lr11 options:ic-route-deny-learn="2001:db22::/64"
+
+# Only 2001:db12::/64 should now be learned
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep 2001 | grep learned | awk '{print $1, $2}' | sort], [0], [dnl
+2001:db12::/64 fe80:10::2
+])
+
+# Clean up router-level options
+ovn_as az2 check ovn-nbctl remove logical_router lr12 options ic-route-deny-adv
+ovn_as az1 check ovn-nbctl remove logical_router lr11 options ic-route-deny-learn
+
+# Confirm all routes are back
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep learned | awk '{print $1, $2}' | sort], [0], [dnl
+192.168.100.0/24 169.254.101.2
+192.168.200.0/24 169.254.101.2
+2001:db12::/64 fe80:10::2
+2001:db22::/64 fe80:10::2
+])
+
+# --- Test ic-route-denylist (global option) ---
+
+# Set global denylist to block 192.168.100.0/24 and 2001:db12::/64
+ovn_as az2 check ovn-nbctl set nb_global . options:ic-route-denylist="192.168.100.0/24,2001:db12::/64"
+
+# Now lr11 should only learn 192.168.200.0/24 and 2001:db22::/64
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep -E '192.168|2001' | grep learned | awk '{print $1, $2}' | sort], [0], [dnl
+192.168.200.0/24 169.254.101.2
+2001:db22::/64 fe80:10::2
+])
+
+# Remove global denylist
+ovn_as az2 check ovn-nbctl remove nb_global . options ic-route-denylist
+
+# Confirm all routes are learned again
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep -E '192.168|2001' | grep learned | awk '{print $1, $2}' | sort], [0], [dnl
+192.168.100.0/24 169.254.101.2
+192.168.200.0/24 169.254.101.2
+2001:db12::/64 fe80:10::2
+2001:db22::/64 fe80:10::2
+])
+
+# --- Test combination of deny options ---
+
+# Set all deny filters
+ovn_as az2 check ovn-nbctl set logical_router_port lrp-lr12-ts1 options:ic-route-deny-adv="192.168.100.0/24"
+ovn_as az1 check ovn-nbctl set logical_router_port lrp-lr11-ts1 options:ic-route-deny-learn="192.168.200.0/24"
+ovn_as az2 check ovn-nbctl set nb_global . options:ic-route-denylist="2001:db12::/64"
+
+# Validate only 2001:db22::/64 is learned
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep -E '192.168|2001' | grep learned | awk '{print $1, $2}' | sort], [0], [dnl
+2001:db22::/64 fe80:10::2
+])
+
+# Clean up for interaction tests
+ovn_as az2 check ovn-nbctl remove logical_router_port lrp-lr12-ts1 options ic-route-deny-adv
+ovn_as az1 check ovn-nbctl remove logical_router_port lrp-lr11-ts1 options ic-route-deny-learn
+ovn_as az2 check ovn-nbctl remove nb_global . options ic-route-denylist
+
+# --- Test interactions between different filter options ---
+
+# Test ic-route-filter-adv vs ic-route-deny-adv precedence
+# Set both filter-adv (allow) and deny-adv (deny) for same CIDR - deny should take precedence
+ovn_as az2 check ovn-nbctl set logical_router_port lrp-lr12-ts1 options:ic-route-filter-adv="192.168.100.0/24,192.168.200.0/24"
+ovn_as az2 check ovn-nbctl set logical_router_port lrp-lr12-ts1 options:ic-route-deny-adv="192.168.100.0/24"
+
+# Only 192.168.200.0/24 should be learned (192.168.100.0/24 denied despite being in filter-adv)
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep 192.168 | grep learned | awk '{print $1, $2}' | sort], [0], [dnl
+192.168.200.0/24 169.254.101.2
+])
+
+# Clean up
+ovn_as az2 check ovn-nbctl remove logical_router_port lrp-lr12-ts1 options ic-route-filter-adv
+ovn_as az2 check ovn-nbctl remove logical_router_port lrp-lr12-ts1 options ic-route-deny-adv
+
+# Test cross-router interaction: filter-adv on lr12 vs deny-learn on lr11
+# lr12 allows advertising 192.168.100.0/24, but lr11 denies learning it
+ovn_as az2 check ovn-nbctl set logical_router_port lrp-lr12-ts1 options:ic-route-filter-adv="192.168.100.0/24"
+ovn_as az1 check ovn-nbctl set logical_router_port lrp-lr11-ts1 options:ic-route-deny-learn="192.168.100.0/24"
+
+# 192.168.100.0/24 should not be learned (deny-learn takes precedence over filter-adv)
+# No routes should be learned since only 192.168.100.0/24 is allowed to be advertised but it's denied for learning
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep 192.168 | grep learned | wc -l], [0], [0
+])
+
+# Clean up interaction tests
+ovn_as az2 check ovn-nbctl remove logical_router_port lrp-lr12-ts1 options ic-route-filter-adv
+ovn_as az1 check ovn-nbctl remove logical_router_port lrp-lr11-ts1 options ic-route-deny-learn
+
+
+OVN_CLEANUP_IC([az1], [az2])
+AT_CLEANUP
+])
+
+AT_BANNER([OVN Interconnection Controller Transit Router])
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-ic -- Add transit router])
+
+ovn_init_ic_db
+ovn_start az1
+ovn_start az2
+
+check ovn-ic-nbctl --wait=sb sync
+AT_CHECK([ovn-ic-sbctl show], [0], [dnl
+availability-zone az1
+availability-zone az2
+])
+
+ovn_as az1
+check ovn-ic-nbctl tr-add tr0
+wait_row_count Datapath_Binding 1
+az1_tunnel_key=$(ovn_as az1 ovn-sbctl --bare --columns=tunnel_key find Datapath_Binding)
+check_row_count nb:Logical_Router 1 options:requested-tnl-key="${az1_tunnel_key}"
+
+ovn_as az2
+wait_row_count Datapath_Binding 1
+az2_tunnel_key=$(ovn_as az2 ovn-sbctl --bare --columns=tunnel_key find Datapath_Binding)
+check_row_count nb:Logical_Router 1 options:requested-tnl-key="${az2_tunnel_key}"
+check test "${az1_tunnel_key}"=="${az2_tunnel_key}"
+check ovn-ic-nbctl tr-del tr0
+wait_row_count Datapath_Binding 0
+
+OVN_CLEANUP_IC([az1], [az2])
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-ic -- Add transit router remote port])
+
+ovn_init_ic_db
+net_add n1
+net_add n2
+ovn_start az1
+ovn_start az2
+
+OVS_WAIT_UNTIL([test 2 = `ovn-ic-sbctl show | wc -l`])
+
+check ovn-ic-nbctl --wait=sb sync
+AT_CHECK([ovn-ic-sbctl show], [0], [dnl
+availability-zone az1
+availability-zone az2
+])
+
+sim_add hv1
+as hv1
+ovs-vsctl add-br br-phys
+ovn_az_attach az1 n1 br-phys 192.168.0.1
+ovs-vsctl set open . external-ids:ovn-is-interconn=true
+wait_row_count Chassis 1 name=hv1
+
+sim_add hv2
+as hv2
+ovs-vsctl add-br br-phys
+ovn_az_attach az2 n2 br-phys 192.168.0.2
+ovs-vsctl set open . external-ids:ovn-is-interconn=true
+wait_row_count Chassis 1 name=hv2
+
+ovn_as az1
+check ovn-ic-nbctl tr-add tr0
+check ovn-ic-nbctl trp-add tr0 tr0-p0 00:00:00:11:22:00 192.168.10.10/24 192.168.10.20/24 chassis=hv2
+wait_row_count Port_Binding 1
+
+# Check that port type is correctly set to remote
+check_row_count sb:Port_Binding 1 logical_port=tr0-p0
+check_row_count sb:Port_Binding 1 type=remote
+az1_tunnel_key=$(ovn-sbctl --bare --columns=tunnel_key find Port_Binding)
+az1_mac=$(ovn-sbctl --bare --columns=mac find Port_Binding)
+check_row_count nb:Logical_Router_Port 1 options:requested-tnl-key="${az1_tunnel_key}"
+
+ovn_as az2
+wait_row_count Port_Binding 1
+# Check that port type is correctly set to local
+check_row_count sb:Port_Binding 1 logical_port=tr0-p0
+check_row_count sb:Port_Binding 1 type=patch
+az2_tunnel_key=$(ovn-sbctl --bare --columns=tunnel_key find Port_Binding)
+az2_mac=$(ovn-sbctl --bare --columns=mac find Port_Binding)
+# Check that nbctl port tunnel_key matches sbctl
+check_row_count nb:Logical_Router_Port 1 options:requested-tnl-key="${az1_tunnel_key}"
+check test "${az1_tunnel_key}"=="${az2_tunnel_key}"
+check test "${az1_mac}"=="${az2_mac}"
+OVN_CLEANUP_IC([az1], [az2])
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-ic -- Transit router delete port])
+
+ovn_init_ic_db
+net_add n1
+net_add n2
+ovn_start az1
+ovn_start az2
+
+check ovn-ic-nbctl --wait=sb sync
+AT_CHECK([ovn-ic-sbctl show], [0], [dnl
+availability-zone az1
+availability-zone az2
+])
+
+sim_add hv1
+as hv1
+ovs-vsctl add-br br-phys
+ovn_az_attach az1 n1 br-phys 192.168.0.1
+ovs-vsctl set open . external-ids:ovn-is-interconn=true
+check ovs-vsctl set open . external_ids:ovn-monitor-all=true
+wait_row_count Chassis 1 name=hv1
+
+sim_add hv2
+as hv2
+ovs-vsctl add-br br-phys
+ovn_az_attach az2 n2 br-phys 192.168.0.2
+ovs-vsctl set open . external-ids:ovn-is-interconn=true
+check ovs-vsctl set open . external_ids:ovn-monitor-all=true
+wait_row_count Chassis 1 name=hv2
+
+ovn_as az1
+check ovn-ic-nbctl --wait=sb tr-add tr0
+check ovn-ic-nbctl --wait=sb trp-add tr0 tr0-p0 00:00:00:11:22:00 192.168.10.10/24 192.168.10.20/24 chassis=hv2
+wait_row_count Port_Binding 1
+check_row_count sb:Port_Binding 1 logical_port=tr0-p0
+
+ovn_as az2
+wait_row_count Port_Binding 1
+check_row_count sb:Port_Binding 1 logical_port=tr0-p0
+
+ovn_as az1
+check ovn-ic-nbctl --wait=sb trp-del tr0-p0
+wait_row_count Port_Binding 0
+
+ovn_as az2
+wait_row_count Port_Binding 0
+
+OVN_CLEANUP_IC([az1], [az2])
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-ic -- Port binding deletion upon transit router deletion])
+
+ovn_init_ic_db
+net_add n1
+net_add n2
+ovn_start az1
+ovn_start az2
+
+check ovn-ic-nbctl --wait=sb sync
+AT_CHECK([ovn-ic-sbctl show], [0], [dnl
+availability-zone az1
+availability-zone az2
+])
+
+sim_add hv1
+as hv1
+ovs-vsctl add-br br-phys
+ovn_az_attach az1 n1 br-phys 192.168.0.1
+ovs-vsctl set open . external-ids:ovn-is-interconn=true
+check ovs-vsctl set open . external_ids:ovn-monitor-all=true
+wait_row_count Chassis 1 name=hv1
+
+sim_add hv2
+as hv2
+ovs-vsctl add-br br-phys
+ovn_az_attach az2 n2 br-phys 192.168.0.2
+ovs-vsctl set open . external-ids:ovn-is-interconn=true
+check ovs-vsctl set open . external_ids:ovn-monitor-all=true
+wait_row_count Chassis 1 name=hv2
+
+ovn_as az1
+check ovn-ic-nbctl --wait=sb tr-add tr0
+check ovn-ic-nbctl --wait=sb trp-add tr0 tr0-p0 00:00:00:11:22:00 192.168.10.10/24 192.168.10.20/24 chassis=hv2
+wait_row_count Port_Binding 1
+check_row_count sb:Port_Binding 1 logical_port=tr0-p0
+
+ovn_as az2
+wait_row_count Port_Binding 1
+check_row_count sb:Port_Binding 1 logical_port=tr0-p0
+
+ovn_as az1
+check ovn-ic-nbctl tr-del tr0
+wait_row_count Port_Binding 0
+
+ovn_as az2
+wait_row_count Port_Binding 0
+
+AT_CHECK([ovn-ic-nbctl list Transit_Router], [0], [dnl
+])
+AT_CHECK([ovn-ic-nbctl list Transit_Router_Port], [0], [dnl
+])
+
+OVN_CLEANUP_IC([az1], [az2])
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-ic -- Duplicate port addresses])
+
+ovn_init_ic_db
+net_add n1
+net_add n2
+ovn_start az1
+ovn_start az2
+
+OVS_WAIT_UNTIL([test 2 = `ovn-ic-sbctl show | wc -l`])
+
+check ovn-ic-nbctl --wait=sb sync
+AT_CHECK([ovn-ic-sbctl show], [0], [dnl
+availability-zone az1
+availability-zone az2
+])
+
+sim_add hv1
+as hv1
+ovs-vsctl add-br br-phys
+ovn_az_attach az1 n1 br-phys 192.168.0.1
+ovs-vsctl set open . external-ids:ovn-is-interconn=true
+check ovs-vsctl set open . external_ids:ovn-monitor-all=true
+wait_row_count Chassis 1 name=hv1
+
+sim_add hv2
+as hv2
+ovs-vsctl add-br br-phys
+ovn_az_attach az2 n2 br-phys 192.168.0.2
+ovs-vsctl set open . external-ids:ovn-is-interconn=true
+check ovs-vsctl set open . external_ids:ovn-monitor-all=true
+wait_row_count Chassis 1 name=hv2
+
+ovn_as az1
+check ovn-ic-nbctl --wait=sb tr-add tr0
+check ovn-ic-nbctl --wait=sb trp-add tr0 tr0-p0 00:00:00:11:22:00 \
+    192.168.10.10/24 192.168.10.20/24 192.168.10.10/24 192.168.10.20/24 \
+    chassis=hv2
+wait_row_count Port_Binding 1 logical_port=tr0-p0
+check_row_count nb:Logical_Router_Port 1 networks="192.168.10.10/24 192.168.10.20/24"
+
+ovn_as az2
+wait_row_count Port_Binding 1 logical_port=tr0-p0
+check_row_count nb:Logical_Router_Port 1 networks="192.168.10.10/24 192.168.10.20/24"
+
+ovn_as az1
+check ovn-ic-nbctl --wait=sb tr-del tr0
+check_row_count sb:Datapath_Binding 0
+
+ovn_as az2
+check_row_count sb:Datapath_Binding 0
+
+OVN_CLEANUP_IC([az1], [az2])
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-ic -- Advertise discard static routes])
+
+ovn_init_ic_db
+
+for i in 1 2; do
+    ovn_start az$i
+    ovn_as az$i
+
+    # Enable route learning at AZ level
+    check ovn-nbctl set nb_global . options:ic-route-learn=true
+    # Enable route advertising at AZ level
+    check ovn-nbctl set nb_global . options:ic-route-adv=true
+done
+
+# Create new transit switches and LRs. Test topology is next:
+#
+# logical router (lr11) - transit switch (ts11) - logical router (lr12)
+#
+
+# Create lr11, lr12 and ts11 and connect them
+for i in 1 2; do
+    ovn_as az$i
+
+    lr=lr1$i
+    check ovn-nbctl lr-add $lr
+
+    ts=ts11
+    check ovn-ic-nbctl --wait=sb --may-exist ts-add $ts
+
+    lrp=lrp-$lr-$ts
+    lsp=lsp-$ts-$lr
+    # Create LRP and connect to TS
+    check ovn-nbctl lrp-add $lr $lrp aa:aa:aa:aa:a1:0$i 169.254.101.$i/24
+    check ovn-nbctl lsp-add-router-port $ts $lsp $lrp
+done
+
+# Create directly-connected route in lr11
+check ovn_as az2 ovn-nbctl lr-route-add lr12 192.168.0.0/24 discard
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep 192.168 |
+             grep learned | awk '{print $1, $2}' | sort ], [0], [dnl
+192.168.0.0/24 169.254.101.2
+])
+
+OVN_CLEANUP_IC([az1], [az2])
+
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-ic -- check loop with announce duplicated prefixes - multiple ts])
+
+ovn_init_ic_db
+ovn-ic-nbctl ts-add ts11
+ovn-ic-nbctl ts-add ts12
+
+for i in 1 2; do
+    ovn_start az$i
+    ovn_as az$i
+
+    # Enable route learning at AZ level
+    check ovn-nbctl set nb_global . options:ic-route-learn=true
+    # Enable route advertising at AZ level
+    check ovn-nbctl set nb_global . options:ic-route-adv=true
+done
+
+for i in 1 2; do
+    ovn_as az$i
+
+    check ovn-nbctl lr-add lr$i
+
+    check ovn-nbctl lrp-add lr$i lr-lrp-$i aa:aa:aa:aa:a1:0$i 169.254.101.1/24
+    check ovn-nbctl lsp-add-router-port ts11 lsp-az$i lr-lrp-$i
+
+    # Create subnet for announce.
+    check ovn-nbctl lrp-add lr$i lr-lrp-subnet-$i aa:aa:aa:aa:a2:0$i 192.168.0.$i/24
+
+    # Create one more lrp-ts port through another transit switch.
+    check ovn-nbctl lrp-add lr$i lr-lrp-dup$i aa:aa:aa:aa:a3:01 169.254.101.1/24
+    check ovn-nbctl lsp-add-router-port ts12 lsp-dup-az$i lr-lrp-dup$i
+done
+
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr1 | grep 192.168 |
+                     grep learned | awk '{print $1, $2}' | sort ], [0], [dnl
+192.168.0.0/24 169.254.101.1
+192.168.0.0/24 169.254.101.1
+])
+
+OVN_CLEANUP_IC([az1], [az2])
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-ic -- check loop with announce duplicated prefixes - single ts])
+
+ovn_init_ic_db
+
+for i in 1 2 3; do
+    ovn_start az$i
+    ovn_as az$i
+
+    # Enable route learning at AZ level
+    check ovn-nbctl set nb_global . options:ic-route-learn=true
+    # Enable route advertising at AZ level
+    check ovn-nbctl set nb_global . options:ic-route-adv=true
+done
+
+# Create new transit switches and LRs. Test topology is next:
+#                            logical router (lr12)
+#                                   |
+# logical router (lr11) -  / transit switch (ts11) \ - logical router (lr13)
+#
+
+# Create lr11, lr13, ts11 and connect them
+for i in 1 3; do
+    ovn_as az$i
+
+    check ovn-nbctl lr-add lr1$i
+    check ovn-ic-nbctl --wait=sb --may-exist ts-add ts11
+
+    # Create LRP and connect to TS
+    check ovn-nbctl lrp-add lr1$i lrp-lr1$i-ts11 aa:aa:aa:aa:a1:0$i 169.254.101.1/24
+    check ovn-nbctl lsp-add-router-port ts11 lsp-ts11-lr1$i lrp-lr1$i-ts11
+done
+
+# Create lr12 and connect it to ts11
+ovn_as az2
+check ovn-nbctl lr-add lr12
+
+# Create LRP and connect to TS
+check ovn-nbctl lrp-add lr12 lrp-lr12-ts11 aa:aa:aa:aa:a1:03 169.254.101.2/24
+check ovn-nbctl lsp-add-router-port ts11 lsp-lr12-ts11 lrp-lr12-ts11
+
+# Create directly-connected route in lr11
+check ovn_as az1 ovn-nbctl lrp-add lr11 lrp-lr11 aa:aa:aa:aa:bb:01 "192.168.0.1/24"
+check ovn_as az3 ovn-nbctl lrp-add lr13 lrp-lr13 aa:aa:aa:aa:bb:03 "192.168.0.1/24"
+
+OVS_WAIT_FOR_OUTPUT([ovn_as az2 ovn-nbctl lr-route-list lr12 | grep 192.168 |
+                     grep learned | awk '{print $1, $2}' | sort ], [0], [dnl
+192.168.0.0/24 169.254.101.1
+192.168.0.0/24 169.254.101.1
+])
+
+OVN_CLEANUP_IC([az1], [az2], [az3])
+AT_CLEANUP
+])

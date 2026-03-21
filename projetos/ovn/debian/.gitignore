@@ -1,0 +1,14 @@
+*.debhelper
+*.debhelper.log
+*.substvars
+/autoreconf.after
+/autoreconf.before
+/control
+/copyright
+/files
+/ovn-common
+/ovn-controller-vtep
+/ovn-host
+/ovn-central
+/ovn-docker
+/tmp

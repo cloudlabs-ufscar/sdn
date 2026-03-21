@@ -1,0 +1,60 @@
+AT_BANNER([OVN - IPsec])
+
+AT_SETUP([ipsec -- basic configuration])
+ovn_start
+
+# Configure the Northbound database
+check ovn-nbctl ls-add lsw0
+
+check ovn-nbctl lsp-add lsw0 lp1
+check ovn-nbctl lsp-set-addresses lp1 "f0:00:00:00:00:01 10.1.1.1"
+
+check ovn-nbctl lsp-add lsw0 lp2
+check ovn-nbctl lsp-set-addresses lp2 "f0:00:00:00:00:02 10.1.1.2"
+
+net_add n1               # Network to connect hv1 and hv2
+
+# Create hypervisor hv1 connected to n1
+sim_add hv1
+as hv1
+ovs-vsctl add-br br-phys
+ovn_attach n1 br-phys 192.168.0.1
+ovs-vsctl add-port br-int vif1 -- set Interface vif1 external-ids:iface-id=lp1
+ovs-vsctl \
+    -- set Open_vSwitch . external-ids:system-id=hv1 \
+    -- set Open_vSwitch . external-ids:ovn-encap-type=geneve \
+    -- set Open_vSwitch . external-ids:ovn-encap-ip=192.168.0.1 \
+    -- set Open_vSwitch . other_config:certificate=dummy-cert.pem \
+    -- set Open_vSwitch . other_config:private_key=dummy-privkey.pem \
+    -- set Open_vSwitch . other_config:ca_cert=dummy-cacert.pem
+
+# Create hypervisor hv2 connected to n1
+sim_add hv2
+as hv2
+ovs-vsctl add-br br-phys
+ovn_attach n1 br-phys 192.168.0.2
+ovs-vsctl add-port br-int vif2 -- set Interface vif2 external-ids:iface-id=lp2
+ovs-vsctl \
+    -- set Open_vSwitch . external-ids:system-id=hv2 \
+    -- set Open_vSwitch . external-ids:ovn-encap-type=geneve \
+    -- set Open_vSwitch . external-ids:ovn-encap-ip=192.168.0.2 \
+    -- set Open_vSwitch . other_config:certificate=dummy-cert.pem \
+    -- set Open_vSwitch . other_config:private_key=dummy-privkey.pem \
+    -- set Open_vSwitch . other_config:ca_cert=dummy-cacert.pem
+
+# Enable IPsec
+check ovn-nbctl set nb_global . ipsec=true
+check ovn-nbctl set nb_global . options:ipsec_encapsulation=true
+
+check ovn-nbctl --wait=hv sync
+
+OVS_WAIT_UNTIL([test x`as hv2 ovs-vsctl get Interface ovn-hv1-0 options:remote_ip | tr -d '"\n'` = x192.168.0.1])
+AT_CHECK([as hv2 ovs-vsctl get Interface ovn-hv1-0 options:local_ip | tr -d '"\n'], [0], [192.168.0.2])
+AT_CHECK([as hv2 ovs-vsctl get Interface ovn-hv1-0 options:remote_name | tr -d '\n'], [0], [hv1])
+AT_CHECK([as hv2 ovs-vsctl get Interface ovn-hv1-0 options:ipsec_encapsulation | tr -d '\n'], [0], [yes])
+OVS_WAIT_UNTIL([test x`as hv1 ovs-vsctl get Interface ovn-hv2-0 options:remote_ip | tr -d '"\n'` = x192.168.0.2])
+AT_CHECK([as hv1 ovs-vsctl get Interface ovn-hv2-0 options:local_ip | tr -d '"\n'], [0], [192.168.0.1])
+AT_CHECK([as hv1 ovs-vsctl get Interface ovn-hv2-0 options:remote_name | tr -d '\n'], [0], [hv2])
+AT_CHECK([as hv1 ovs-vsctl get Interface ovn-hv2-0 options:ipsec_encapsulation | tr -d '\n'], [0], [yes])
+
+AT_CLEANUP

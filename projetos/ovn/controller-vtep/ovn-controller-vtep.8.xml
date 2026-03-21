@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manpage program="ovn-controller-vtep" section="8" title="ovn-controller-vtep">
+    <h1>Name</h1>
+    <p>ovn-controller-vtep -- Open Virtual Network local controller for
+       vtep enabled physical switches.
+    </p>
+
+    <h1>Synopsis</h1>
+    <p><code>ovn-controller-vtep</code> [<var>options</var>]
+    [<var>--vtep-db=vtep-database</var>] [<var>--ovnsb-db=ovnsb-database</var>]
+    </p>
+
+    <h1>Description</h1>
+    <p>
+      <code>ovn-controller-vtep</code> is the local controller daemon in
+      OVN, the Open Virtual Network, for VTEP enabled physical switches.
+      It connects up to the OVN Southbound database (see
+      <code>ovn-sb</code>(5)) over the OVSDB protocol, and down to the VTEP
+      database (see <code>vtep</code>(5)) over the OVSDB protocol.
+    </p>
+
+    <h2>PKI Options</h2>
+    <p>
+      PKI configuration is required in order to use SSL/TLS for the connections
+      to the VTEP and Southbound databases.
+    </p>
+    <xi:include href="lib/ssl.xml" xmlns:xi="http://www.w3.org/2003/XInclude"/>
+    <xi:include href="lib/ssl-bootstrap.xml" xmlns:xi="http://www.w3.org/2003/XInclude"/>
+    <xi:include href="lib/ssl-peer-ca-cert.xml" xmlns:xi="http://www.w3.org/2003/XInclude"/>
+
+    <h2>Other Options</h2>
+    <xi:include href="lib/unixctl.xml" xmlns:xi="http://www.w3.org/2003/XInclude"/>
+    <h3></h3>
+    <xi:include href="lib/common.xml" xmlns:xi="http://www.w3.org/2003/XInclude"/>
+
+    <h1>Configuration</h1>
+    <p>
+      <code>ovn-controller-vtep</code> retrieves its configuration
+      information from both the ovnsb and the vtep database.  If the
+      database locations are not given from command line, the default
+      is the <code>db.sock</code> in local OVSDB's 'run' directory.
+      The database location must take one of the following forms:
+    </p>
+    <ul>
+      <li>
+        <p>
+          <code>ssl:<var>host</var>:<var>port</var></code>
+        </p>
+        <p>
+          The specified SSL/TLS <var>port</var> on the give <var>host</var>,
+          which can either be a DNS name (if built with unbound library) or an
+          IP address (IPv4 or IPv6).  If <var>host</var> is an IPv6 address,
+          then wrap <var>host</var> with square brackets, e.g.:
+          <code>ssl:[::1]:6640</code>.
+          The <code>--private-key</code>, <code>--certificate</code> and either
+          of <code>--ca-cert</code> or <code>--bootstrap-ca-cert</code> options
+          are mandatory when this form is used.
+        </p>
+      </li>
+      <li>
+        <p>
+          <code>tcp:<var>host</var>:<var>port</var></code>
+        </p>
+        <p>
+          Connect to the given TCP <var>port</var> on <var>host</var>, where
+          <var>host</var> can be a DNS name (if built with unbound library) or
+          IP address (IPv4 or IPv6). If <var>host</var> is an IPv6 address,
+          then wrap <var>host</var> with square brackets,
+          e.g.: <code>tcp:[::1]:6640</code>.
+        </p>
+      </li>
+      <li>
+        <p>
+          <code>unix:<var>file</var></code>
+        </p>
+        <p>
+          On POSIX, connect to the Unix domain server socket named
+          <var>file</var>.
+        </p>
+        <p>
+          On Windows, connect to a localhost TCP port whose value is written
+          in <var>file</var>.
+        </p>
+      </li>
+    </ul>
+
+    <p>
+      <code>ovn-controller-vtep</code> assumes it gets configuration
+      information from the following keys in the <code>Global</code>
+      table of the connected <code>hardware_vtep</code> database:
+    </p>
+
+    <p>
+    <dl>
+      <dt><code>other_config:ovn-match-northd-version</code></dt>
+      <dd>
+        The boolean flag indicates if <code>ovn-controller-vtep</code> needs to
+        check <code>ovn-northd</code> version. If this flag is set to true and
+        the <code>ovn-northd's</code> version (reported in the Southbound
+        database) doesn't match with the <code>ovn-controller-vtep's</code>
+        internal version, then it will stop processing the southbound and
+        connected <code>hardware_vtep</code> database changes.
+        The default value is considered false if this option is not defined.
+      </dd>
+
+      <dt><code>other_config:ovn-remote-probe-interval</code></dt>
+      <dd>
+        <p>
+          The inactivity probe interval of the connection to the OVN Southbound
+          database, in milliseconds. If the value is zero, it disables the
+          connection keepalive feature.
+        </p>
+
+        <p>
+          If the value is nonzero, then it will be forced to a value of at
+          least 1000 ms.
+        </p>
+      </dd>
+    </dl>
+    </p>
+</manpage>

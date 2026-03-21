@@ -1,0 +1,419 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manpage program="ovn-ctl" section="8" title="ovn-ctl">
+    <h1>Name</h1>
+    <p>ovn-ctl -- Open Virtual Network northbound daemon lifecycle utility</p>
+
+    <h1>Synopsis</h1>
+    <p>
+      <code>ovn-ctl</code> [<var>options</var>] <var>command</var>
+      [--- <var>extra_args</var>]
+    </p>
+
+    <h1>Description</h1>
+    <p>This program is intended to be invoked internally by Open Virtual Network
+    startup scripts.  System administrators should not normally invoke it directly.</p>
+
+    <h1>Commands</h1>
+
+    <dl>
+      <dt><code>start_northd</code></dt>
+      <dt><code>start_controller</code></dt>
+      <dt><code>start_controller_vtep</code></dt>
+      <dt><code>start_ic</code></dt>
+      <dt><code>stop_northd</code></dt>
+      <dt><code>stop_controller</code></dt>
+      <dt><code>stop_controller_vtep</code></dt>
+      <dt><code>stop_ic</code></dt>
+      <dt><code>restart_northd</code></dt>
+      <dt><code>restart_controller</code></dt>
+      <dt><code>restart_controller_vtep</code></dt>
+      <dt><code>restart_ic</code></dt>
+      <dt><code>promote_ovnnb</code></dt>
+      <dt><code>promote_ovnsb</code></dt>
+      <dt><code>demote_ovnnb</code></dt>
+      <dt><code>demote_ovnsb</code></dt>
+      <dt><code>status_ovnnb</code></dt>
+      <dt><code>status_ovnsb</code></dt>
+      <dt><code>start_ovsdb</code></dt>
+      <dt><code>start_nb_ovsdb</code></dt>
+      <dt><code>start_sb_ovsdb</code></dt>
+      <dt><code>stop_ovsdb</code></dt>
+      <dt><code>stop_nb_ovsdb</code></dt>
+      <dt><code>stop_sb_ovsdb</code></dt>
+      <dt><code>restart_ovsdb</code></dt>
+      <dt><code>run_nb_ovsdb</code></dt>
+      <dt><code>run_sb_ovsdb</code></dt>
+      <dt><code>promote_ic_nb</code></dt>
+      <dt><code>promote_ic_sb</code></dt>
+      <dt><code>demote_ic_nb</code></dt>
+      <dt><code>demote_ic_sb</code></dt>
+      <dt><code>status_ic_nb</code></dt>
+      <dt><code>status_ic_sb</code></dt>
+      <dt><code>start_ic_ovsdb</code></dt>
+      <dt><code>start_ic_nb_ovsdb</code></dt>
+      <dt><code>start_ic_sb_ovsdb</code></dt>
+      <dt><code>stop_ic_ovsdb</code></dt>
+      <dt><code>stop_ic_nb_ovsdb</code></dt>
+      <dt><code>stop_ic_sb_ovsdb</code></dt>
+      <dt><code>restart_ic_ovsdb</code></dt>
+      <dt><code>run_ic_nb_ovsdb</code></dt>
+      <dt><code>run_ic_sb_ovsdb</code></dt>
+      <dt><code>start_ovnbr_ovsdb</code></dt>
+      <dt><code>start_br_controller</code></dt>
+      <dt><code>stop_ovnbr_ovsdb</code></dt>
+      <dt><code>stop_br_controller</code></dt>
+      <dt><code>restart_ovnbr_ovsdb</code></dt>
+      <dt><code>restart_br_controller</code></dt>
+      <dt><code>status_ovnbr_ovsdb</code></dt>
+      <dt><code>status_br_controller</code></dt>
+      <dt><code>run_ovnbr_ovsdb</code></dt>
+    </dl>
+
+    <h1>Options</h1>
+    <p><code>--ovn-northd-priority=<var>NICE</var></code></p>
+    <p><code>--ovn-northd-wrapper=<var>WRAPPER</var></code></p>
+    <p><code>--ovn-controller-priority=<var>NICE</var></code></p>
+    <p><code>--ovn-controller-wrapper=<var>WRAPPER</var></code></p>
+    <p><code>--ovn-ic-priority=<var>NICE</var></code></p>
+    <p><code>--ovn-ic-wrapper=<var>WRAPPER</var></code></p>
+    <p><code>--ovsdb-nb-wrapper=<var>WRAPPER</var></code></p>
+    <p><code>--ovsdb-sb-wrapper=<var>WRAPPER</var></code></p>
+    <p><code>--ovn-br-controller-priority=<var>NICE</var></code></p>
+    <p><code>--ovn-br-controller-wrapper=<var>WRAPPER</var></code></p>
+    <p><code>--ovn-user=<var>USER:GROUP</var></code></p>
+    <p><code>-h</code> | <code>--help</code></p>
+
+    <h1>File location options</h1>
+    <p><code>--db-sock=<var>SOCKET</var></code></p>
+    <p><code>--db-nb-file=<var>FILE</var></code></p>
+    <p><code>--db-sb-file=<var>FILE</var></code></p>
+    <p><code>--db-nb-schema=<var>FILE</var></code></p>
+    <p><code>--db-sb-schema=<var>FILE</var></code></p>
+    <p><code>--db-sb-create-insecure-remote=<var>yes|no</var></code></p>
+    <p><code>--db-nb-create-insecure-remote=<var>yes|no</var></code></p>
+    <p><code>--db-ic-nb-file=<var>FILE</var></code></p>
+    <p><code>--db-ic-sb-file=<var>FILE</var></code></p>
+    <p><code>--db-ic-nb-schema=<var>FILE</var></code></p>
+    <p><code>--db-ic-sb-schema=<var>FILE</var></code></p>
+    <p><code>--db-ic-sb-create-insecure-remote=<var>yes|no</var></code></p>
+    <p><code>--db-ic-nb-create-insecure-remote=<var>yes|no</var></code></p>
+    <p><code>--db-nb-config-file=<var>FILE</var></code></p>
+    <p><code>--db-sb-config-file=<var>FILE</var></code></p>
+    <p><code>--db-ic-nb-config-file=<var>FILE</var></code></p>
+    <p><code>--db-ic-sb-config-file=<var>FILE</var></code></p>
+    <p><code>--db-sb-relay-config-file=<var>FILE</var></code></p>
+    <p><code>--ovn-controller-ssl-key=<var>KEY</var></code></p>
+    <p><code>--ovn-controller-ssl-cert=<var>CERT</var></code></p>
+    <p><code>--ovn-controller-ssl-ca-cert=<var>CERT</var></code></p>
+    <p><code>--ovn-controller-ssl-bootstrap-ca-cert=<var>CERT</var></code></p>
+    <p><code>--db-ovnbr-sock=<var>SOCKET</var></code></p>
+    <p><code>--db-ovnbr-file=<var>FILE</var></code></p>
+    <p><code>--db-ovnbr-schema=<var>FILE</var></code></p>
+    <p><code>--db-ovnbr-create-insecure-remote=<var>yes|no</var></code></p>
+    <p><code>--db-ovnbr-config-file=<var>FILE</var></code></p>
+    <p><code>--ovn-br-controller-ssl-key=<var>KEY</var></code></p>
+    <p><code>--ovn-br-controller-ssl-cert=<var>CERT</var></code></p>
+    <p><code>--ovn-br-controller-ssl-ca-cert=<var>CERT</var></code></p>
+    <p><code>--ovn-br-controller-ssl-bootstrap-ca-cert=<var>CERT</var></code></p>
+
+    <h1>Protocol, Cipher and Ciphersuite options</h1>
+    <p><code>--ovn-controller-ssl-protocols=<var>PROTOCOLS</var></code></p>
+    <p><code>--ovn-ic-ssl-protocols=<var>PROTOCOLS</var></code></p>
+    <p><code>--ovn-northd-ssl-protocols=<var>PROTOCOLS</var></code></p>
+    <p><code>--ovn-nb-db-ssl-protocols=<var>PROTOCOLS</var></code></p>
+    <p><code>--ovn-sb-db-ssl-protocols=<var>PROTOCOLS</var></code></p>
+    <p><code>--ovn-ic-nb-db-ssl-protocols=<var>PROTOCOLS</var></code></p>
+    <p><code>--ovn-ic-sb-db-ssl-protocols=<var>PROTOCOLS</var></code></p>
+    <p><code>--ovn-controller-ssl-ciphers=<var>CIPHERS</var></code></p>
+    <p><code>--ovn-ic-ssl-ciphers=<var>CIPHERS</var></code></p>
+    <p><code>--ovn-northd-ssl-ciphers=<var>CIPHERS</var></code></p>
+    <p><code>--ovn-nb-db-ssl-ciphers=<var>CIPHERS</var></code></p>
+    <p><code>--ovn-sb-db-ssl-ciphers=<var>CIPHERS</var></code></p>
+    <p><code>--ovn-ic-nb-db-ssl-ciphers=<var>CIPHERS</var></code></p>
+    <p><code>--ovn-ic-sb-db-ssl-ciphers=<var>CIPHERS</var></code></p>
+    <p><code>--ovn-controller-ssl-ciphersuites=<var>CIPHERSUITES</var></code></p>
+    <p><code>--ovn-ic-ssl-ciphersuites=<var>CIPHERSUITES</var></code></p>
+    <p><code>--ovn-northd-ssl-ciphersuites=<var>CIPHERSUITES</var></code></p>
+    <p><code>--ovn-nb-db-ssl-ciphersuites=<var>CIPHERSUITES</var></code></p>
+    <p><code>--ovn-sb-db-ssl-ciphersuites=<var>CIPHERSUITES</var></code></p>
+    <p><code>--ovn-ic-nb-db-ssl-ciphersuites=<var>CIPHERSUITES</var></code></p>
+    <p><code>--ovn-ic-sb-db-ssl-ciphersuites=<var>CIPHERSUITES</var></code></p>
+    <p><code>--ovn-br-controller-ssl-protocols=<var>PROTOCOLS</var></code></p>
+    <p><code>--ovn-br-db-ssl-protocols=<var>PROTOCOLS</var></code></p>
+    <p><code>--ovn-br-controller-ssl-ciphers=<var>CIPHERS</var></code></p>
+    <p><code>--ovn-br-db-ssl-ciphers=<var>CIPHERS</var></code></p>
+    <p><code>--ovn-br-db-ssl-ciphersuites=<var>CIPHERSUITES</var></code></p>
+    <p><code>--ovn-controller-ssl-server-name=<var>NAME</var></code></p>
+    <p><code>--ovn-ic-ssl-server-name=<var>NAME</var></code></p>
+    <p><code>--ovn-northd-ssl-server-name=<var>NAME</var></code></p>
+    <p><code>--ovn-nb-db-ssl-server-name=<var>NAME</var></code></p>
+    <p><code>--ovn-sb-db-ssl-server-name=<var>NAME</var></code></p>
+    <p><code>--ovn-ic-nb-db-ssl-server-name=<var>NAME</var></code></p>
+    <p><code>--ovn-ic-sb-db-ssl-server-name=<var>NAME</var></code></p>
+    <p><code>--ovn-sb-relay-db-ssl-server-name=<var>NAME</var></code></p>
+
+    <h1>Address and port options</h1>
+    <p><code>--db-nb-sync-from-addr=<var>IP ADDRESS</var></code></p>
+    <p><code>--db-nb-sync-from-port=<var>PORT NUMBER</var></code></p>
+    <p><code>--db-nb-sync-from-proto=<var>PROTO</var></code></p>
+    <p><code>--db-sb-sync-from-addr=<var>IP ADDRESS</var></code></p>
+    <p><code>--db-sb-sync-from-port=<var>PORT NUMBER</var></code></p>
+    <p><code>--db-sb-sync-from-proto=<var>PROTO</var></code></p>
+    <p><code>--db-ic-nb-sync-from-addr=<var>IP ADDRESS</var></code></p>
+    <p><code>--db-ic-nb-sync-from-port=<var>PORT NUMBER</var></code></p>
+    <p><code>--db-ic-nb-sync-from-proto=<var>PROTO</var></code></p>
+    <p><code>--db-ic-sb-sync-from-addr=<var>IP ADDRESS</var></code></p>
+    <p><code>--db-ic-sb-sync-from-port=<var>PORT NUMBER</var></code></p>
+    <p><code>--db-ic-sb-sync-from-proto=<var>PROTO</var></code></p>
+    <p>
+      <code>
+        --ovn-northd-nb-db=<var>PROTO</var>:<var>IP ADDRESS</var>:
+        <var>PORT</var>..
+      </code>
+    </p>
+    <p>
+      <code>
+        --ovn-northd-sb-db=<var>PROTO</var>:<var>IP ADDRESS</var>:
+        <var>PORT</var>..
+      </code>
+    </p>
+    <p>
+      <code>
+        --ovn-ic-nb-db=<var>PROTO</var>:<var>IP ADDRESS</var>:
+        <var>PORT</var>..
+      </code>
+    </p>
+    <p>
+      <code>
+        --ovn-ic-sb-db=<var>PROTO</var>:<var>IP ADDRESS</var>:
+        <var>PORT</var>..
+      </code>
+    </p>
+    <h1> Clustering options </h1>
+    <p><code>--db-nb-cluster-local-addr=<var>IP ADDRESS</var></code></p>
+    <p><code>--db-nb-cluster-local-port=<var>PORT NUMBER</var></code></p>
+    <p><code>--db-nb-cluster-local-proto=<var>PROTO (tcp/ssl)</var></code></p>
+    <p><code>--db-nb-cluster-remote-addr=<var>IP ADDRESS</var></code></p>
+    <p><code>--db-nb-cluster-remote-port=<var>PORT NUMBER</var></code></p>
+    <p><code>--db-nb-cluster-remote-proto=<var>PROTO (tcp/ssl)</var></code></p>
+    <p><code>--db-nb-election-timer=<var>Timeout in milliseconds</var></code></p>
+    <p><code>--db-sb-cluster-local-addr=<var>IP ADDRESS</var></code></p>
+    <p><code>--db-sb-cluster-local-port=<var>PORT NUMBER</var></code></p>
+    <p><code>--db-sb-cluster-local-proto=<var>PROTO (tcp/ssl)</var></code></p>
+    <p><code>--db-sb-cluster-remote-addr=<var>IP ADDRESS</var></code></p>
+    <p><code>--db-sb-cluster-remote-port=<var>PORT NUMBER</var></code></p>
+    <p><code>--db-sb-cluster-remote-proto=<var>PROTO (tcp/ssl)</var></code></p>
+    <p><code>--db-sb-election-timer=<var>Timeout in milliseconds</var></code></p>
+    <p><code>--db-ic-nb-cluster-local-addr=<var>IP ADDRESS</var></code></p>
+    <p><code>--db-ic-nb-cluster-local-port=<var>PORT NUMBER</var></code></p>
+    <p><code>--db-ic-nb-cluster-local-proto=<var>PROTO (tcp/ssl)</var></code></p>
+    <p><code>--db-ic-nb-cluster-remote-addr=<var>IP ADDRESS</var></code></p>
+    <p><code>--db-ic-nb-cluster-remote-port=<var>PORT NUMBER</var></code></p>
+    <p><code>--db-ic-nb-cluster-remote-proto=<var>PROTO (tcp/ssl)</var></code></p>
+    <p><code>--db-ic-sb-cluster-local-addr=<var>IP ADDRESS</var></code></p>
+    <p><code>--db-ic-sb-cluster-local-port=<var>PORT NUMBER</var></code></p>
+    <p><code>--db-ic-sb-cluster-local-proto=<var>PROTO (tcp/ssl)</var></code></p>
+    <p><code>--db-ic-sb-cluster-remote-addr=<var>IP ADDRESS</var></code></p>
+    <p><code>--db-ic-sb-cluster-remote-port=<var>PORT NUMBER</var></code></p>
+    <p><code>--db-ic-sb-cluster-remote-proto=<var>PROTO (tcp/ssl)</var></code></p>
+    <p><code>--db-cluster-schema-upgrade=<var>yes|no</var></code></p>
+
+    <h1> Probe interval options </h1>
+    <p><code>--db-nb-probe-interval-to-active=<var>Time in milliseconds</var></code></p>
+    <p><code>--db-sb-probe-interval-to-active=<var>Time in milliseconds</var></code></p>
+
+    <h1> Extra Options </h1>
+    <p>
+      Any options after '--' will be passed on to the binary run by
+      <var>command</var> with the exception of start_northd, which can have
+      options specified in ovn-northd-db-params.conf. Any <var>extra_args</var>
+      passed to start_northd will be passed to the ovsdb-servers if
+      <code>--ovn-manage-ovsdb=yes</code>
+    </p>
+
+    <h1>Configuration files</h1>
+    <p>Following are the optional configuration files. If present, it should be located in the etc dir</p>
+
+    <h2>ovnnb-active.conf</h2>
+    <p>
+    If present, this file should hold the url to connect to the active
+    Northbound DB server
+    </p>
+    <p><code>tcp:x.x.x.x:6641</code></p>
+
+    <h2>ovnsb-active.conf</h2>
+    <p>
+    If present, this file should hold the url to connect to the active
+    Southbound DB server
+    </p>
+    <p><code>tcp:x.x.x.x:6642</code></p>
+
+    <h2>ovn-northd-db-params.conf</h2>
+    <p>
+    If present, start_northd will not start the DB server even if
+    <code>--ovn-manage-ovsdb=yes</code>. This file should hold the database url
+    parameters to be passed to ovn-northd.
+    </p>
+    <p><code>--ovnnb-db=tcp:x.x.x.x:6641 --ovnsb-db=tcp:x.x.x.x:6642</code></p>
+
+    <h2>ic-nb-active.conf</h2>
+    <p>
+    If present, this file should hold the url to connect to the active
+    Interconnection Northbound DB server
+    </p>
+    <p><code>tcp:x.x.x.x:6645</code></p>
+
+    <h2>ic-sb-active.conf</h2>
+    <p>
+    If present, this file should hold the url to connect to the active
+    Interconnection Southbound DB server
+    </p>
+    <p><code>tcp:x.x.x.x:6646</code></p>
+
+    <h2>ovn-ic-db-params.conf</h2>
+    <p>
+    If present, this file should hold the database url parameters to be passed
+    to ovn-ic.
+    </p>
+    <p><code>--ic-nb-db=tcp:x.x.x.x:6645 --ic-sb-db=tcp:x.x.x.x:6646</code></p>
+
+    <h1> Running OVN db servers without detaching </h1>
+    <p><code># ovn-ctl run_nb_ovsdb</code></p>
+    <p>
+      This command runs the OVN nb ovsdb-server without passing the
+      <code>detach</code> option, making it to block until ovsdb-server exits.
+      This command will be useful for starting the OVN nb ovsdb-server in a
+      container.
+    </p>
+    <p><code># ovn-ctl run_sb_ovsdb</code></p>
+    <p>
+      This command runs the OVN sb ovsdb-server without passing the
+      <code>detach</code> option, making it to block until ovsdb-server exits.
+      This command will be useful for starting the OVN sb ovsdb-server in a
+      container.
+    </p>
+    <p><code># ovn-ctl run_ic_nb_ovsdb</code></p>
+    <p>
+      This command runs the OVN IC-NB ovsdb-server without passing the
+      <code>detach</code> option, making it to block until ovsdb-server exits.
+      This command will be useful for starting the OVN IC-NB ovsdb-server in a
+      container.
+    </p>
+    <p><code># ovn-ctl run_ic_sb_ovsdb</code></p>
+    <p>
+      This command runs the OVN IC-SB ovsdb-server without passing the
+      <code>detach</code> option, making it to block until ovsdb-server exits.
+      This command will be useful for starting the OVN IC-SB ovsdb-server in a
+      container.
+    </p>
+    <p><code># ovn-ctl run_ovnbr_ovsdb</code></p>
+    <p>
+      This command runs the OVN bridge db ovsdb-server without passing the
+      <code>detach</code> option, making it to block until ovsdb-server exits.
+      This command will be useful for starting the OVN br db ovsdb-server in a
+      container.
+    </p>
+
+    <h1>Example Usage</h1>
+    <h2>Run ovn-controller on a host already running OVS</h2>
+    <p><code># ovn-ctl start_controller</code></p>
+
+    <h2>Run ovn-northd on a host already running OVS</h2>
+    <p><code># ovn-ctl start_northd</code></p>
+
+    <h2>All-in-one OVS+OVN for testing</h2>
+    <p><code># ovs-ctl start --system-id="random"</code></p>
+    <p><code># ovn-ctl start_northd</code></p>
+    <p><code># ovn-ctl start_controller</code></p>
+
+    <h2>Promote and demote ovsdb servers</h2>
+    <p><code># ovn-ctl promote_ovnnb</code></p>
+    <p><code># ovn-ctl promote_ovnsb</code></p>
+    <p><code># ovn-ctl --db-nb-sync-from-addr=x.x.x.x --db-nb-sync-from-port=6641 --db-nb-probe-interval-to-active=60000 demote_ovnnb</code></p>
+    <p><code># ovn-ctl --db-sb-sync-from-addr=x.x.x.x --db-sb-sync-from-port=6642 --db-sb-probe-interval-to-active=60000 demote_ovnsb</code></p>
+
+    <h2>Creating a clustered db on 3 nodes with IPs x.x.x.x, y.y.y.y and z.z.z.z</h2>
+    <h3>Starting OVN ovsdb servers and ovn-northd on the node with IP x.x.x.x</h3>
+    <p>
+      <code>
+        # ovn-ctl --db-nb-addr=x.x.x.x --db-nb-create-insecure-remote=yes
+        --db-sb-addr=x.x.x.x --db-sb-create-insecure-remote=yes
+        --db-nb-cluster-local-addr=x.x.x.x
+        --db-sb-cluster-local-addr=x.x.x.x
+        --ovn-northd-nb-db=tcp:x.x.x.x:6641,tcp:y.y.y.y:6641,tcp:z.z.z.z:6641
+        --ovn-northd-sb-db=tcp:x.x.x.x:6642,tcp:y.y.y.y:6642,tcp:z.z.z.z:6642
+        start_northd
+      </code>
+    </p>
+
+    <h3>Starting OVN ovsdb-servers and ovn-northd on the node with IP y.y.y.y and joining the cluster started at x.x.x.x</h3>
+    <p>
+      <code>
+        # ovn-ctl --db-nb-addr=y.y.y.y --db-nb-create-insecure-remote=yes
+        --db-sb-addr=y.y.y.y --db-sb-create-insecure-remote=yes
+        --db-nb-cluster-local-addr=y.y.y.y
+        --db-sb-cluster-local-addr=y.y.y.y
+        --db-nb-cluster-remote-addr=x.x.x.x
+        --db-sb-cluster-remote-addr=x.x.x.x
+        --ovn-northd-nb-db=tcp:x.x.x.x:6641,tcp:y.y.y.y:6641,tcp:z.z.z.z:6641
+        --ovn-northd-sb-db=tcp:x.x.x.x:6642,tcp:y.y.y.y:6642,tcp:z.z.z.z:6642
+        start_northd
+      </code>
+    </p>
+
+    <h3>Starting OVN ovsdb-servers and ovn-northd on the node with IP z.z.z.z and joining the cluster started at x.x.x.x</h3>
+    <p>
+      <code>
+        # ovn-ctl --db-nb-addr=z.z.z.z
+          --db-nb-create-insecure-remote=yes
+          --db-nb-cluster-local-addr=z.z.z.z
+          --db-sb-addr=z.z.z.z
+          --db-sb-create-insecure-remote=yes
+          --db-sb-cluster-local-addr=z.z.z.z
+          --db-nb-cluster-remote-addr=x.x.x.x
+          --db-sb-cluster-remote-addr=x.x.x.x
+          --ovn-northd-nb-db=tcp:x.x.x.x:6641,tcp:y.y.y.y:6641,tcp:z.z.z.z:6641
+          --ovn-northd-sb-db=tcp:x.x.x.x:6642,tcp:y.y.y.y:6642,tcp:z.z.z.z:6642
+          start_northd
+      </code>
+    </p>
+
+    <h2>Passing ssl keys when starting OVN dbs will supersede the default ssl
+        values in db</h2>
+    <h3>Starting standalone ovn db server passing SSL/TLS certificates</h3>
+    <p>
+      <code>
+        # ovn-ctl --ovn-nb-db-ssl-key=/etc/ovn/ovnnb-privkey.pem
+          --ovn-nb-db-ssl-cert=/etc/ovn/ovnnb-cert.pem
+          --ovn-nb-db-ssl-ca-cert=/etc/ovn/cacert.pem
+          --ovn-sb-db-ssl-key=/etc/ovn/ovnsb-privkey.pem
+          --ovn-sb-db-ssl-cert=/etc/ovn/ovnsb-cert.pem
+          --ovn-sb-db-ssl-ca-cert=/etc/ovn/cacert.pem
+           start_northd
+      </code>
+    </p>
+    <h2>Avoiding automatic clustered OVN database schema upgrade</h2>
+    <p>
+      If you desire more control over clustered DB schema upgrade, you can
+      opt-out of automatic on-start upgrade attempts with
+      <code>--no-db-cluster-schema-upgrade</code>.
+    </p>
+    <h3>Start OVN NB and SB clustered databases on host with IP x.x.x.x without schema upgrade</h3>
+    <p>
+      <code>
+        # ovn-ctl start_nb_ovsdb --db-nb-cluster-local-addr=x.x.x.x --no-db-cluster-schema-upgrade
+        # ovn-ctl start_sb_ovsdb --db-sb-cluster-local-addr=x.x.x.x --no-db-cluster-schema-upgrade
+      </code>
+    </p>
+    <h3>Trigger clustered DB schema upgrade manually</h3>
+    <p>
+      <code>
+        # ovsdb-client convert unix:/var/run/ovn/ovnnb_db.sock /usr/local/share/ovn/ovn-nb.ovsschema
+        # ovsdb-client convert unix:/var/run/ovn/ovnsb_db.sock /usr/local/share/ovn/ovn-sb.ovsschema
+      </code>
+    </p>
+
+    <h2>Run OVN bridge controller services on a host already running OVS</h2>
+    <p><code># ovn-ctl start_ovnbr_ovsdb</code></p>
+    <p><code># ovn-ctl start_br_controller</code></p>
+</manpage>

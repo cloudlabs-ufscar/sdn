@@ -1,0 +1,581 @@
+# Spec file for Open Virtual Network (OVN).
+
+# Copyright (C) 2018,2019 Red Hat, Inc.
+#
+# Copying and distribution of this file, with or without modification,
+# are permitted in any medium without royalty provided the copyright
+# notice and this notice are preserved.  This file is offered as-is,
+# without warranty of any kind.
+#
+# If tests have to be skipped while building, specify the '--without check'
+# option. For example:
+#     rpmbuild -bb --without check rhel/ovn-fedora.spec
+#
+
+# If libcap-ng isn't available and there is no need for running OVS
+# as regular user, specify the '--without libcapng'
+%bcond_without libcapng
+
+# Enable PIE, bz#955181
+%global _hardened_build 1
+
+# some distros (e.g: RHEL-7) don't define _rundir macro yet
+# Fedora 15 onwards uses /run as _rundir
+%if 0%{!?_rundir:1}
+%define _rundir /run
+%endif
+
+Name: ovn
+Summary: Open Virtual Network support
+Group: System Environment/Daemons
+URL: http://www.ovn.org/
+Version: @VERSION@
+Obsoletes: openvswitch-ovn-common < %{?epoch:%{epoch}:}%{version}-%{release}
+Provides: openvswitch-ovn-common = %{?epoch:%{epoch}:}%{version}-%{release}
+
+%define ovsver @OVSVERSION@
+%define ovsdir openvswitch-%{ovsver}
+
+# to skip running checks, pass --without check
+%bcond_without check
+
+# Nearly all of openvswitch is ASL 2.0.  The bugtool is LGPLv2+, and the
+# lib/sflow*.[ch] files are SISSL
+License: ASL 2.0 and LGPLv2+ and SISSL
+Release: 1%{?dist}
+Source: http://openvswitch.org/releases/ovn-%{version}.tar.gz
+Source10: http://openvswitch.org/releases/openvswitch-%{ovsver}.tar.gz
+
+BuildRequires: gcc gcc-c++
+BuildRequires: autoconf automake libtool
+BuildRequires: systemd-units openssl openssl-devel
+BuildRequires: python3-devel
+BuildRequires: desktop-file-utils
+BuildRequires: groff graphviz
+BuildRequires: checkpolicy, selinux-policy-devel
+BuildRequires: /usr/bin/sphinx-build
+# make check dependencies
+BuildRequires: procps-ng
+%if %{with libcapng}
+BuildRequires: libcap-ng libcap-ng-devel
+%endif
+%if %{with check}
+BuildRequires: tcpdump
+%endif
+BuildRequires: unbound unbound-devel
+
+Requires: openssl hostname iproute module-init-tools openvswitch
+Requires: python3-openvswitch
+
+Requires(post): systemd-units
+Requires(preun): systemd-units
+Requires(postun): systemd-units
+
+%description
+OVN, the Open Virtual Network, is a system to support virtual network
+abstraction.  OVN complements the existing capabilities of OVS to add
+native support for virtual network abstractions, such as virtual L2 and L3
+overlays and security groups.
+
+%package central
+Summary: Open Virtual Network support
+License: ASL 2.0
+Requires: ovn
+Requires: firewalld-filesystem
+Obsoletes: openvswitch-ovn-central
+Provides: openvswitch-ovn-central = %{?epoch:%{epoch}:}%{version}-%{release}
+
+%description central
+OVN DB servers and ovn-northd running on a central node.
+
+%package host
+Summary: Open Virtual Network support
+License: ASL 2.0
+Requires: ovn
+Requires: firewalld-filesystem
+Obsoletes: openvswitch-ovn-host
+Provides: openvswitch-ovn-host = %{?epoch:%{epoch}:}%{version}-%{release}
+
+%description host
+OVN controller running on each host.
+
+%package vtep
+Summary: Open Virtual Network support
+License: ASL 2.0
+Requires: ovn
+Obsoletes: openvswitch-ovn-vtep
+Provides: openvswitch-ovn-vtep = %{?epoch:%{epoch}:}%{version}-%{release}
+
+%description vtep
+OVN vtep controller
+
+%package docker
+Summary: Open Virtual Network support
+License: ASL 2.0
+Requires: ovn python3-openvswitch
+Obsoletes: openvswitch-ovn-docker
+Provides: openvswitch-ovn-docker = %{?epoch:%{epoch}:}%{version}-%{release}
+
+%description docker
+Docker network plugins for OVN.
+
+%package br-controller
+Summary: Open Virtual Network support
+License: ASL 2.0
+Requires: ovn
+
+%description br-controller
+OVN bridge controller
+
+%prep
+%autosetup -n ovn-%{version} -a 10 -p 1
+
+
+%build
+./boot.sh
+
+# Build openvswitch first
+cd openvswitch-%{ovsver}
+./boot.sh
+%configure \
+        --with-ovs-source=ovs \
+%if %{with libcapng}
+        --enable-libcapng \
+%else
+        --disable-libcapng \
+%endif
+        --enable-ssl \
+        --with-pkidir=%{_sharedstatedir}/openvswitch/pki \
+        PYTHON3=%{__python3}
+
+make %{?_smp_mflags}
+cd -
+
+# Build OVN.
+%configure \
+        --with-ovs-source=$PWD/openvswitch-%{ovsver} \
+%if %{with libcapng}
+        --enable-libcapng \
+%else
+        --disable-libcapng \
+%endif
+        --enable-ssl \
+        --with-pkidir=%{_sharedstatedir}/openvswitch/pki \
+        --with-version-suffix=-%{release} \
+        PYTHON3=%{__python3}
+
+make %{?_smp_mflags}
+
+%install
+rm -rf $RPM_BUILD_ROOT
+make install DESTDIR=$RPM_BUILD_ROOT
+
+install -p -D -m 0644 \
+        rhel/usr_share_ovn_scripts_systemd_sysconfig.template \
+        $RPM_BUILD_ROOT/%{_sysconfdir}/sysconfig/ovn
+
+for service in ovn-controller ovn-controller-vtep ovn-northd ovn-ic ovn-ic-db ovn-db@ ovn-br-controller ovn-br-db; do
+        install -p -D -m 0644 \
+                        rhel/usr_lib_systemd_system_${service}.service \
+                        $RPM_BUILD_ROOT%{_unitdir}/${service}.service
+done
+
+rm -rf $RPM_BUILD_ROOT/%{_datadir}/openvswitch/python/
+
+install -d -m 0755 $RPM_BUILD_ROOT/%{_sharedstatedir}/ovn
+
+install -d $RPM_BUILD_ROOT%{_prefix}/lib/firewalld/services/
+install -p -m 0644 rhel/usr_lib_firewalld_services_ovn-central-firewall-service.xml \
+        $RPM_BUILD_ROOT%{_prefix}/lib/firewalld/services/ovn-central-firewall-service.xml
+install -p -m 0644 rhel/usr_lib_firewalld_services_ovn-host-firewall-service.xml \
+        $RPM_BUILD_ROOT%{_prefix}/lib/firewalld/services/ovn-host-firewall-service.xml
+
+install -d -m 0755 $RPM_BUILD_ROOT%{_prefix}/lib/ocf/resource.d/ovn
+ln -s %{_datadir}/ovn/scripts/ovndb-servers.ocf \
+      $RPM_BUILD_ROOT%{_prefix}/lib/ocf/resource.d/ovn/ovndb-servers
+
+install -p -D -m 0644 rhel/etc_logrotate.d_ovn \
+        $RPM_BUILD_ROOT/%{_sysconfdir}/logrotate.d/ovn
+
+# remove OVS unpackages files
+rm -f $RPM_BUILD_ROOT%{_bindir}/ovs*
+rm -f $RPM_BUILD_ROOT%{_bindir}/vtep-ctl
+rm -f $RPM_BUILD_ROOT%{_sbindir}/ovs*
+rm -f $RPM_BUILD_ROOT%{_mandir}/man1/ovs*
+rm -f $RPM_BUILD_ROOT%{_mandir}/man5/ovs*
+rm -f $RPM_BUILD_ROOT%{_mandir}/man5/vtep*
+rm -f $RPM_BUILD_ROOT%{_mandir}/man7/ovs*
+rm -f $RPM_BUILD_ROOT%{_mandir}/man8/ovs*
+rm -f $RPM_BUILD_ROOT%{_mandir}/man8/vtep*
+rm -rf $RPM_BUILD_ROOT%{_datadir}/ovn/python
+rm -f $RPM_BUILD_ROOT%{_datadir}/ovn/scripts/ovs*
+rm -rf $RPM_BUILD_ROOT%{_datadir}/ovn/bugtool-plugins
+rm -f $RPM_BUILD_ROOT%{_libdir}/*.a
+rm -f $RPM_BUILD_ROOT%{_libdir}/*.la
+rm -f $RPM_BUILD_ROOT%{_libdir}/pkgconfig/*.pc
+rm -f $RPM_BUILD_ROOT%{_includedir}/ovn/*
+rm -f $RPM_BUILD_ROOT%{_sysconfdir}/bash_completion.d/ovs-appctl-bashcomp.bash
+rm -f $RPM_BUILD_ROOT%{_sysconfdir}/bash_completion.d/ovs-vsctl-bashcomp.bash
+rm -rf $RPM_BUILD_ROOT%{_sysconfdir}/logrotate.d/openvswitch
+
+%check
+%if %{with check}
+    touch resolv.conf
+    export OVS_RESOLV_CONF=$(pwd)/resolv.conf
+    if make check TESTSUITEFLAGS='%{_smp_mflags}' RECHECK=yes; then :;
+    else
+        cat tests/testsuite.log
+        exit 1
+    fi
+%endif
+
+%clean
+rm -rf $RPM_BUILD_ROOT
+
+%pre central
+if [ $1 -eq 1 ] ; then
+    # Package install.
+    /bin/systemctl status ovn-northd.service &>/dev/null
+    ovn_status=$?
+    rpm -ql openvswitch-ovn-central > /dev/null
+    if [[ "$?" = "0" && "$ovn_status" = "0" ]]; then
+        # ovn-northd service is running which means old openvswitch-ovn-central
+        # is already installed and it will be cleaned up. So start ovn-northd
+        # service when posttrans central is called.
+        touch %{_localstatedir}/lib/rpm-state/ovn-northd
+    fi
+fi
+
+%pre host
+if [ $1 -eq 1 ] ; then
+    # Package install.
+    /bin/systemctl status ovn-controller.service &>/dev/null
+    ovn_status=$?
+    rpm -ql openvswitch-ovn-host > /dev/null
+    if [[ "$?" = "0" && "$ovn_status" = "0" ]]; then
+        # ovn-controller service is running which means old
+        # openvswitch-ovn-host is installed and it will be cleaned up. So
+        # start ovn-controller service when posttrans host is called.
+        touch %{_localstatedir}/lib/rpm-state/ovn-controller
+    fi
+fi
+
+%pre vtep
+if [ $1 -eq 1 ] ; then
+    # Package install.
+    /bin/systemctl status ovn-controller-vtep.service >/dev/null
+    ovn_status=$?
+    rpm -ql openvswitch-ovn-vtep > /dev/null
+    if [[ "$?" = "0" && "$ovn_status" = "0" ]]; then
+        # ovn-controller-vtep service is running which means old
+        # openvswitch-ovn-vtep is installed and it will be cleaned up. So
+        # start ovn-controller-vtep service when posttrans vtep is called.
+        touch %{_localstatedir}/lib/rpm-state/ovn-controller-vtep
+    fi
+fi
+
+%preun
+%if 0%{?systemd_preun:1}
+    %systemd_preun ovn-db@*.service
+%else
+    if [ $1 -eq 0 ] ; then
+        # Package removal, not upgrade
+        /bin/systemctl --no-reload disable ovn-db@*.service >/dev/null 2>&1 || :
+        /bin/systemctl stop ovn-db@*.service >/dev/null 2>&1 || :
+    fi
+%endif
+
+%preun central
+%if 0%{?systemd_preun:1}
+    %systemd_preun ovn-northd.service
+%else
+    if [ $1 -eq 0 ] ; then
+        # Package removal, not upgrade
+        /bin/systemctl --no-reload disable ovn-northd.service >/dev/null 2>&1 || :
+        /bin/systemctl stop ovn-northd.service >/dev/null 2>&1 || :
+    fi
+%endif
+
+%if 0%{?systemd_preun:1}
+    %systemd_preun ovn-ic.service
+%else
+    if [ $1 -eq 0 ] ; then
+        # Package removal, not upgrade
+        /bin/systemctl --no-reload disable ovn-ic.service >/dev/null 2>&1 || :
+        /bin/systemctl stop ovn-ic.service >/dev/null 2>&1 || :
+    fi
+%endif
+
+%if 0%{?systemd_preun:1}
+    %systemd_preun ovn-ic-db.service
+%else
+    if [ $1 -eq 0 ] ; then
+        # Package removal, not upgrade
+        /bin/systemctl --no-reload disable ovn-ic-db.service >/dev/null 2>&1 || :
+        /bin/systemctl stop ovn-ic-db.service >/dev/null 2>&1 || :
+    fi
+%endif
+
+%preun host
+%if 0%{?systemd_preun:1}
+    %systemd_preun ovn-controller.service
+%else
+    if [ $1 -eq 0 ] ; then
+        # Package removal, not upgrade
+        /bin/systemctl --no-reload disable ovn-controller.service >/dev/null 2>&1 || :
+        /bin/systemctl stop ovn-controller.service >/dev/null 2>&1 || :
+    fi
+%endif
+
+%preun vtep
+%if 0%{?systemd_preun:1}
+    %systemd_preun ovn-controller-vtep.service
+%else
+    if [ $1 -eq 0 ] ; then
+        # Package removal, not upgrade
+        /bin/systemctl --no-reload disable ovn-controller-vtep.service >/dev/null 2>&1 || :
+        /bin/systemctl stop ovn-controller-vtep.service >/dev/null 2>&1 || :
+    fi
+%endif
+
+%post
+ln -sf ovn_detrace.py %{_bindir}/ovn-detrace
+
+%if %{with libcapng}
+if [ $1 -eq 1 ]; then
+    sed -i 's:^#OVN_USER_ID=:OVN_USER_ID=:' %{_sysconfdir}/sysconfig/ovn
+    sed -i 's:\(.*su\).*:\1 openvswitch openvswitch:' %{_sysconfdir}/logrotate.d/ovn
+fi
+%endif
+
+%if 0%{?systemd_post:1}
+    %systemd_post ovn-db@*.service
+%else
+    # Package install, not upgrade
+    if [ $1 -eq 1 ]; then
+        /bin/systemctl daemon-reload >dev/null || :
+    fi
+%endif
+
+%post central
+%if 0%{?systemd_post:1}
+    %systemd_post ovn-northd.service
+%else
+    # Package install, not upgrade
+    if [ $1 -eq 1 ]; then
+        /bin/systemctl daemon-reload >dev/null || :
+    fi
+%endif
+
+%if 0%{?systemd_post:1}
+    %systemd_post ovn-ic.service
+%else
+    # Package install, not upgrade
+    if [ $1 -eq 1 ]; then
+        /bin/systemctl daemon-reload >dev/null || :
+    fi
+%endif
+
+%if 0%{?systemd_post:1}
+    %systemd_post ovn-ic-db.service
+%else
+    # Package install, not upgrade
+    if [ $1 -eq 1 ]; then
+        /bin/systemctl daemon-reload >dev/null || :
+    fi
+%endif
+
+%post host
+%if 0%{?systemd_post:1}
+    %systemd_post ovn-controller.service
+%else
+    # Package install, not upgrade
+    if [ $1 -eq 1 ]; then
+        /bin/systemctl daemon-reload >dev/null || :
+    fi
+%endif
+
+%post vtep
+%if 0%{?systemd_post:1}
+    %systemd_post ovn-controller-vtep.service
+%else
+    # Package install, not upgrade
+    if [ $1 -eq 1 ]; then
+        /bin/systemctl daemon-reload >dev/null || :
+    fi
+%endif
+
+%postun
+%if 0%{?systemd_postun:1}
+    %systemd_postun ovn-db@*.service
+%else
+    /bin/systemctl daemon-reload >/dev/null 2>&1 || :
+%endif
+
+%postun central
+%if 0%{?systemd_postun_with_restart:1}
+    %systemd_postun_with_restart ovn-northd.service
+%else
+    /bin/systemctl daemon-reload >/dev/null 2>&1 || :
+    if [ "$1" -ge "1" ] ; then
+    # Package upgrade, not uninstall
+        /bin/systemctl try-restart ovn-northd.service >/dev/null 2>&1 || :
+    fi
+%endif
+
+%if 0%{?systemd_postun_with_restart:1}
+    %systemd_postun_with_restart ovn-ic.service
+%else
+    /bin/systemctl daemon-reload >/dev/null 2>&1 || :
+    if [ "$1" -ge "1" ] ; then
+    # Package upgrade, not uninstall
+        /bin/systemctl try-restart ovn-ic.service >/dev/null 2>&1 || :
+    fi
+%endif
+
+%if 0%{?systemd_postun:1}
+    %systemd_postun ovn-ic-db.service
+%else
+    /bin/systemctl daemon-reload >/dev/null 2>&1 || :
+%endif
+
+%postun host
+if [ "$1" -ge "1" ] ; then
+    /bin/systemctl daemon-reload >/dev/null 2>&1 || :
+    # Package upgrade, not uninstall
+    # We perform lightweight stop here not to affect active traffic during
+    # ovn-controller upgrade.
+    # Ideally this would be held by systemd, but it's impossible
+    # to pass custom restart command to systemd service.
+    systemctl -q is-active ovn-controller
+    if [ "$?" -eq 0 ] ; then
+        # ovn-controller was running prior to upgrade, so do a graceful restart
+        %{_datadir}/ovn/scripts/ovn-ctl stop_controller --restart >/dev/null 2>&1 || :
+        /bin/systemctl restart ovn-controller.service >/dev/null 2>&1 || :
+    fi
+fi
+
+%postun vtep
+%if 0%{?systemd_postun_with_restart:1}
+    %systemd_postun_with_restart ovn-controller-vtep.service
+%else
+    /bin/systemctl daemon-reload >/dev/null 2>&1 || :
+    if [ "$1" -ge "1" ] ; then
+        # Package upgrade, not uninstall
+        /bin/systemctl try-restart ovn-controller-vtep.service >/dev/null 2>&1 || :
+    fi
+%endif
+
+%posttrans central
+if [ $1 -eq 1 ]; then
+    # Package install, not upgrade
+    if [ -e %{_localstatedir}/lib/rpm-state/ovn-northd ]; then
+        rm %{_localstatedir}/lib/rpm-state/ovn-northd
+        /bin/systemctl start ovn-northd.service >/dev/null 2>&1 || :
+    fi
+fi
+
+
+%posttrans host
+if [ $1 -eq 1 ]; then
+    # Package install, not upgrade
+    if [ -e %{_localstatedir}/lib/rpm-state/ovn-controller ]; then
+        rm %{_localstatedir}/lib/rpm-state/ovn-controller
+        /bin/systemctl start ovn-controller.service >/dev/null 2>&1 || :
+    fi
+fi
+
+%posttrans vtep
+if [ $1 -eq 1 ]; then
+    # Package install, not upgrade
+    if [ -e %{_localstatedir}/lib/rpm-state/ovn-controller-vtep ]; then
+        rm %{_localstatedir}/lib/rpm-state/ovn-controller-vtep
+        /bin/systemctl start ovn-controller-vtep.service >/dev/null 2>&1 || :
+    fi
+fi
+
+%files
+%config(noreplace) %{_sysconfdir}/sysconfig/ovn
+%{_bindir}/ovn-nbctl
+%{_bindir}/ovn-sbctl
+%{_bindir}/ovn-trace
+%{_bindir}/ovn_detrace.py
+%{_bindir}/ovn-detrace
+%{_bindir}/ovn-appctl
+%{_bindir}/ovn-ic-nbctl
+%{_bindir}/ovn-ic-sbctl
+%{_bindir}/ovn-debug
+%{_datadir}/ovn/scripts/ovn-ctl
+%{_datadir}/ovn/scripts/ovn-lib
+%{_datadir}/ovn/scripts/ovndb-servers.ocf
+%{_datadir}/ovn/scripts/ovn-bugtool-nbctl-show
+%{_datadir}/ovn/scripts/ovn-bugtool-sbctl-lflow-list
+%{_datadir}/ovn/scripts/ovn-bugtool-sbctl-show
+%{_mandir}/man8/ovn-ctl.8*
+%{_mandir}/man8/ovn-nbctl.8*
+%{_mandir}/man8/ovn-trace.8*
+%{_mandir}/man1/ovn-detrace.1*
+%{_mandir}/man8/ovn-appctl.8*
+%{_mandir}/man7/ovn-architecture.7*
+%{_mandir}/man8/ovn-sbctl.8*
+%{_mandir}/man5/ovn-nb.5*
+%{_mandir}/man5/ovn-sb.5*
+%{_mandir}/man8/ovn-ic-nbctl.8*
+%{_mandir}/man8/ovn-ic-sbctl.8*
+%{_mandir}/man8/ovn-ic.8*
+%{_mandir}/man5/ovn-ic-nb.5*
+%{_mandir}/man5/ovn-ic-sb.5*
+%{_mandir}/man8/ovn-debug.8*
+%{_prefix}/lib/ocf/resource.d/ovn/ovndb-servers
+%config(noreplace) %{_sysconfdir}/logrotate.d/ovn
+%{_unitdir}/ovn-db@.service
+
+%files docker
+%{_bindir}/ovn-docker-overlay-driver
+%{_bindir}/ovn-docker-underlay-driver
+
+%files central
+%{_bindir}/ovn-northd
+%{_bindir}/ovn-ic
+%{_mandir}/man8/ovn-northd.8*
+%config %{_datadir}/ovn/ovn-nb.ovsschema
+%config %{_datadir}/ovn/ovn-sb.ovsschema
+%config %{_datadir}/ovn/ovn-ic-nb.ovsschema
+%config %{_datadir}/ovn/ovn-ic-sb.ovsschema
+%{_unitdir}/ovn-ic.service
+%{_unitdir}/ovn-ic-db.service
+%{_unitdir}/ovn-northd.service
+%{_prefix}/lib/firewalld/services/ovn-central-firewall-service.xml
+
+%files host
+%{_bindir}/ovn-controller
+%{_mandir}/man8/ovn-controller.8*
+%{_unitdir}/ovn-controller.service
+%{_prefix}/lib/firewalld/services/ovn-host-firewall-service.xml
+
+%files vtep
+%{_bindir}/ovn-controller-vtep
+%{_mandir}/man8/ovn-controller-vtep.8*
+%{_unitdir}/ovn-controller-vtep.service
+
+%files br-controller
+%{_bindir}/ovn-br-controller
+%{_bindir}/ovn-brctl
+%{_mandir}/man8/ovn-br-controller.8*
+%{_mandir}/man5/ovn-br.5*
+%config %{_datadir}/ovn/ovn-br.ovsschema
+%{_unitdir}/ovn-br-controller.service
+%{_unitdir}/ovn-br-db.service
+
+%changelog
+* Wed Sep 24 2025 Numan Siddique <numans@ovn.org>
+- Added ovn-br-controller systemd-units.
+
+* Wed Jan 11 2023 Vladislav Odintsov <odivlad@gmail.com>
+- Added ovn-db@.service systemd-unit.
+
+* Mon Feb 1 2021 Vladislav Odintsov <odivlad@gmail.com>
+- Added ovn-ic, ovn-ic-db systemd-units.
+
+* Thu Dec 20 2018 Numan Siddique <nusiddiq@redhat.com>
+- OVS/OVN split.

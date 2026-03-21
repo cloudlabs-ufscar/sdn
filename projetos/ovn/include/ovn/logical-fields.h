@@ -1,0 +1,320 @@
+/* Copyright (c) 2015, 2016 Nicira, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at:
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#ifndef OVN_LOGICAL_FIELDS_H
+#define OVN_LOGICAL_FIELDS_H 1
+
+#include "openvswitch/meta-flow.h"
+#include "openvswitch/util.h"
+
+struct shash;
+
+enum ovn_controller_event {
+    OVN_EVENT_EMPTY_LB_BACKENDS = 0,
+    OVN_EVENT_MAX,
+};
+
+/* OVS versions 2.6 to 3.6 support up to 16 32-bit registers.  These can be
+ * used unconditionally.  Registers above MFF_REG15, MFF_XREG7 and MFF_XXREG3
+ * are only supported in newer versions and must not be used without prior
+ * support detection. */
+#define OVN_FLOW_N_REGS_SUPPORTED 16
+BUILD_ASSERT_DECL(FLOW_N_REGS == 32);
+BUILD_ASSERT_DECL(FLOW_N_REGS >= OVN_FLOW_N_REGS_SUPPORTED);
+
+#define CHECK_REG(NAME) \
+    BUILD_ASSERT_DECL( \
+        MFF_LOG_##NAME < MFF_REG0 + OVN_FLOW_N_REGS_SUPPORTED)
+
+#define CHECK_XXREG(NAME) \
+    BUILD_ASSERT_DECL( \
+        MFF_LOG_##NAME < MFF_XXREG0 + OVN_FLOW_N_REGS_SUPPORTED / 4)
+
+
+/* Logical fields.
+ *
+ * These values are documented in ovn-architecture(7), please update the
+ * documentation if you change any of them. */
+#define MFF_LOG_DATAPATH MFF_METADATA /* Logical datapath (64 bits). */
+#define MFF_LOG_FLAGS      MFF_REG10  /* One of MLF_* (32 bits). */
+CHECK_REG(FLAGS);
+#define MFF_LOG_DNAT_ZONE  MFF_REG11  /* conntrack dnat zone for gateway router
+                                       * (32 bits). */
+CHECK_REG(DNAT_ZONE);
+#define MFF_LOG_SNAT_ZONE  MFF_REG12  /* conntrack snat zone for gateway router
+                                       * (32 bits). */
+CHECK_REG(SNAT_ZONE);
+#define MFF_LOG_CT_ZONE    MFF_REG13  /* Logical conntrack zone for lports
+                                       * (0..15 of the 32 bits). */
+CHECK_REG(CT_ZONE);
+#define MFF_LOG_ENCAP_ID   MFF_REG13  /* Encap ID for lports
+                                       * (16..31 of the 32 bits). */
+CHECK_REG(ENCAP_ID);
+#define MFF_LOG_INPORT     MFF_REG14  /* Logical input port (32 bits). */
+CHECK_REG(INPORT);
+#define MFF_LOG_OUTPORT    MFF_REG15  /* Logical output port (32 bits). */
+CHECK_REG(OUTPORT);
+#define MFF_LOG_TUN_OFPORT MFF_REG5   /* 16..31 of the 32 bits */
+CHECK_REG(TUN_OFPORT);
+
+/* Logical registers.
+ *
+ * Make sure these don't overlap with the logical fields! */
+#define MFF_LOG_REG0             MFF_REG0
+CHECK_REG(REG0);
+#define MFF_LOG_LB_ORIG_DIP_IPV4 MFF_REG4
+CHECK_REG(LB_ORIG_DIP_IPV4);
+#define MFF_LOG_LB_ORIG_TP_DPORT MFF_REG2
+CHECK_REG(LB_ORIG_TP_DPORT);
+
+#define MFF_LOG_XXREG0           MFF_XXREG0
+CHECK_XXREG(XXREG0);
+#define MFF_LOG_LB_ORIG_DIP_IPV6 MFF_XXREG1
+CHECK_XXREG(LB_ORIG_DIP_IPV6);
+
+#define MFF_N_LOG_REGS 10
+
+BUILD_ASSERT_DECL(MFF_LOG_REG0 + MFF_N_LOG_REGS
+                  <= MFF_REG0 + OVN_FLOW_N_REGS_SUPPORTED);
+
+#define MFF_LOG_LB_AFF_MATCH_IP4_ADDR MFF_REG4
+CHECK_REG(LB_AFF_MATCH_IP4_ADDR);
+#define MFF_LOG_LB_AFF_MATCH_IP6_ADDR MFF_XXREG1
+CHECK_XXREG(LB_AFF_MATCH_IP6_ADDR);
+#define MFF_LOG_LB_AFF_MATCH_PORT     MFF_REG2
+CHECK_REG(LB_AFF_MATCH_PORT);
+
+#define MFF_LOG_RESULT_REG            MFF_XXREG1
+CHECK_XXREG(RESULT_REG);
+
+#define MFF_LOG_CT_SAVED_STATE        MFF_REG4
+CHECK_REG(CT_SAVED_STATE);
+
+#define MFF_LOG_REMOTE_OUTPORT MFF_REG1  /* Logical remote output
+                                          * port (32 bits). */
+CHECK_REG(REMOTE_OUTPORT);
+
+/* Logical registers that are needed for backwards
+ * compatibility with older northd versions.
+ * XXX: All of them can be removed in 26.09. */
+#define MFF_LOG_LB_ORIG_DIP_IPV4_OLD         MFF_REG1
+CHECK_REG(LB_ORIG_DIP_IPV4_OLD);
+#define MFF_LOG_LB_AFF_MATCH_PORT_OLD        MFF_REG8
+CHECK_REG(LB_AFF_MATCH_PORT_OLD);
+#define MFF_LOG_LB_AFF_MATCH_LS_IP6_ADDR_OLD MFF_XXREG0
+CHECK_XXREG(LB_AFF_MATCH_LS_IP6_ADDR_OLD);
+
+/* Maximum number of networks supported by 4-bit flags.network_id. */
+#define OVN_MAX_NETWORK_ID \
+    ((1 << (MLF_NETWORK_ID_END_BIT - MLF_NETWORK_ID_START_BIT + 1)) - 1)
+
+void ovn_init_symtab(struct shash *symtab);
+
+/* MFF_LOG_FLAGS_REG bit assignments */
+enum mff_log_flags_bits {
+    MLF_ALLOW_LOOPBACK_BIT = 0,
+    MLF_RCV_FROM_RAMP_BIT = 1,
+    MLF_FORCE_SNAT_FOR_DNAT_BIT = 2,
+    MLF_FORCE_SNAT_FOR_LB_BIT = 3,
+    MLF_LOCAL_ONLY_BIT = 4,
+    MLF_NESTED_CONTAINER_BIT = 5,
+    MLF_LOOKUP_MAC_BIT = 6,
+    MLF_LOOKUP_LB_HAIRPIN_BIT = 7,
+    MLF_LOOKUP_FDB_BIT = 8,
+    MLF_SKIP_SNAT_FOR_LB_BIT = 9,
+    MLF_LOCALPORT_BIT = 10,
+    MLF_USE_SNAT_ZONE = 11,
+    MLF_CHECK_PORT_SEC_BIT = 12,
+    MLF_LOOKUP_COMMIT_ECMP_NH_BIT = 13,
+    MLF_USE_LB_AFF_SESSION_BIT = 14,
+    MLF_LOCALNET_BIT = 15,
+    MLF_RX_FROM_TUNNEL_BIT = 16,
+    MLF_ICMP_SNAT_BIT = 17,
+    MLF_OVERRIDE_LOCAL_ONLY_BIT = 18,
+    MLF_FROM_CTRL_BIT = 19,
+    MLF_UNSNAT_NEW_BIT = 20,
+    MLF_UNSNAT_NOT_TRACKED_BIT = 21,
+    MLF_IGMP_IGMP_SNOOP_INJECT_BIT = 22,
+    MLF_PKT_SAMPLED_BIT = 23,
+    MLF_RECIRC_BIT = 24,
+    MLF_NETWORK_ID_START_BIT = 28,
+    MLF_NETWORK_ID_END_BIT = 31,
+};
+
+/* MFF_LOG_FLAGS_REG flag assignments */
+enum mff_log_flags {
+    /* Allow outputting back to inport. */
+    MLF_ALLOW_LOOPBACK = (1 << MLF_ALLOW_LOOPBACK_BIT),
+
+    /* Indicate that a packet was received from a ramp switch to compensate for
+     * the lack of egress port information available in ramp switch
+     * encapsulation.  Egress port information is available for Geneve and
+     * regular VXLAN tunnel types. */
+    MLF_RCV_FROM_RAMP = (1 << MLF_RCV_FROM_RAMP_BIT),
+
+    /* Indicate that a packet needs a force SNAT in the gateway router when
+     * DNAT has taken place. */
+    MLF_FORCE_SNAT_FOR_DNAT = (1 << MLF_FORCE_SNAT_FOR_DNAT_BIT),
+
+    /* Indicate that a packet needs a force SNAT in the gateway router when
+     * load-balancing has taken place. */
+    MLF_FORCE_SNAT_FOR_LB = (1 << MLF_FORCE_SNAT_FOR_LB_BIT),
+
+    /* Indicate that a packet that should be distributed across multiple
+     * hypervisors should instead only be output to local targets
+     */
+    MLF_LOCAL_ONLY = (1 << MLF_LOCAL_ONLY_BIT),
+
+    /* Indicate that a packet was received from a nested container. */
+    MLF_NESTED_CONTAINER = (1 << MLF_NESTED_CONTAINER_BIT),
+
+    /* Indicate that the lookup in the mac binding table was successful. */
+    MLF_LOOKUP_MAC = (1 << MLF_LOOKUP_MAC_BIT),
+
+    MLF_LOOKUP_LB_HAIRPIN = (1 << MLF_LOOKUP_LB_HAIRPIN_BIT),
+
+    /* Indicate that the lookup in the fdb table was successful. */
+    MLF_LOOKUP_FDB = (1 << MLF_LOOKUP_FDB_BIT),
+
+    /* Indicate that a packet must not SNAT in the gateway router when
+     * load-balancing has taken place. */
+    MLF_SKIP_SNAT_FOR_LB = (1 << MLF_SKIP_SNAT_FOR_LB_BIT),
+
+    /* Indicate the packet has been received from a localport */
+    MLF_LOCALPORT = (1 << MLF_LOCALPORT_BIT),
+
+    MLF_LOOKUP_COMMIT_ECMP_NH = (1 << MLF_LOOKUP_COMMIT_ECMP_NH_BIT),
+
+    MLF_USE_LB_AFF_SESSION = (1 << MLF_USE_LB_AFF_SESSION_BIT),
+
+    /* Indicate that the port is localnet. */
+    MLF_LOCALNET = (1 << MLF_LOCALNET_BIT),
+
+    /* Indicate the packet has been received from the tunnel. */
+    MLF_RX_FROM_TUNNEL = (1 << MLF_RX_FROM_TUNNEL_BIT),
+
+    MLF_ICMP_SNAT = (1 << MLF_ICMP_SNAT_BIT),
+
+    MLF_OVERRIDE_LOCAL_ONLY = (1 << MLF_OVERRIDE_LOCAL_ONLY_BIT),
+
+    /* Indicate that the packet went through unSNAT and had ct.new state. */
+    MLF_UNSNAT_NEW = (1 << MLF_UNSNAT_NEW_BIT),
+
+    /* Indicate that the packet didn't go through unSNAT. */
+    MLF_UNSNAT_NOT_TRACKED = (1 << MLF_UNSNAT_NOT_TRACKED_BIT),
+
+    /* Indicate that this is an IGMP packet reinjected by ovn-controller. */
+    MLF_IGMP_IGMP_SNOOP = (1 << MLF_IGMP_IGMP_SNOOP_INJECT_BIT),
+
+    /* Indicate that this packet has already been sampled in the current
+     * conntrack zone. */
+    MLF_PKT_SAMPLED = (1 << MLF_PKT_SAMPLED_BIT),
+
+    /* Indicate the packet has been processed by LOCAL table once before. */
+    MLF_RECIRC = (1 << MLF_RECIRC_BIT),
+
+    /* Assign network ID to packet to choose correct network for snat when
+     * lb_force_snat_ip=router_ip. */
+    MLF_NETWORK_ID = (OVN_MAX_NETWORK_ID << MLF_NETWORK_ID_START_BIT),
+};
+
+/* OVN logical fields
+ * ===================
+ * These are the fields which OVN supports modifying which gets translated
+ * to OFFlow controller action.
+ *
+ * OpenvSwitch doesn't support modifying these fields yet. If a field is
+ * supported later by OpenvSwitch, it can be deleted from here.
+ */
+
+enum ovn_field_id {
+    /*
+     * Name: "icmp4.frag_mtu" -
+     * Type: be16
+     * Description: Sets the low-order 16 bits of the ICMP4 header field
+     * (that is labelled "unused" in the ICMP specification) of the ICMP4
+     * packet as per the RFC 1191.
+     */
+    OVN_ICMP4_FRAG_MTU,
+    /*
+     * Name: "icmp6.frag_mtu" -
+     * Type: be32
+     * Description: Sets the first 32 bits of the ICMPv6 body to the MTU of
+     * next-hop link (RFC 4443)
+     */
+    OVN_ICMP6_FRAG_MTU,
+
+    OVN_FIELD_N_IDS
+};
+
+struct ovn_field {
+    enum ovn_field_id id;
+    const char *name;
+    unsigned int n_bytes;       /* Width of the field in bytes. */
+    unsigned int n_bits;        /* Number of significant bits in field. */
+};
+
+static inline const struct ovn_field *
+ovn_field_from_id(enum ovn_field_id id)
+{
+    extern const struct ovn_field ovn_fields[OVN_FIELD_N_IDS];
+    ovs_assert((unsigned int) id < OVN_FIELD_N_IDS);
+    return &ovn_fields[id];
+}
+
+const char *event_to_string(enum ovn_controller_event event);
+int string_to_event(const char *s);
+const struct ovn_field *ovn_field_from_name(const char *name);
+
+void ovn_init_acl_ct_symtab(struct shash *symtab);
+
+/* OVN CT label values
+ * ===================
+ * These are specific ct.label bit values OVN uses to track different types
+ * of traffic.
+ */
+
+#define OVN_CT_BLOCKED_BIT 0
+#define OVN_CT_NATTED_BIT  1
+#define OVN_CT_LB_SKIP_SNAT_BIT 2
+#define OVN_CT_LB_FORCE_SNAT_BIT 3
+#define OVN_CT_OBS_STAGE_1ST_BIT 4
+#define OVN_CT_OBS_STAGE_END_BIT 5
+#define OVN_CT_ALLOW_ESTABLISHED_BIT 6
+#define OVN_CT_NF_BIT 7
+#define OVN_CT_TUN_IF_BIT 8
+
+#define OVN_CT_BLOCKED 1
+#define OVN_CT_NATTED  2
+#define OVN_CT_LB_SKIP_SNAT 4
+#define OVN_CT_LB_FORCE_SNAT 8
+#define OVN_CT_NF 128
+#define OVN_CT_TUN_IF 256
+
+#define OVN_CT_NF_ID_1ST_BIT 17
+#define OVN_CT_NF_ID_END_BIT 24
+#define OVN_CT_TUN_IF_1ST_BIT 80
+#define OVN_CT_TUN_IF_END_BIT 95
+
+#define OVN_CT_ECMP_ETH_1ST_BIT 32
+#define OVN_CT_ECMP_ETH_END_BIT 79
+
+#define OVN_CT_STR(LABEL_VALUE) OVS_STRINGIZE(LABEL_VALUE)
+#define OVN_CT_MASKED_STR(LABEL_VALUE) \
+    OVS_STRINGIZE(LABEL_VALUE) "/" OVS_STRINGIZE(LABEL_VALUE)
+
+#define OVN_CT_LABEL_STR(LABEL_VALUE) "ct_label[" OVN_CT_STR(LABEL_VALUE) "]"
+
+#endif /* ovn/lib/logical-fields.h */

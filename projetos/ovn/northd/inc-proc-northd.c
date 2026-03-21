@@ -1,0 +1,701 @@
+/*
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at:
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#include <config.h>
+
+#include <getopt.h>
+#include <stdlib.h>
+#include <stdio.h>
+
+#include "chassis-index.h"
+#include "ip-mcast-index.h"
+#include "lib/inc-proc-eng.h"
+#include "lib/mac-binding-index.h"
+#include "lib/ovn-nb-idl.h"
+#include "lib/ovn-sb-idl.h"
+#include "mcast-group-index.h"
+#include "northd/aging.h"
+#include "openvswitch/poll-loop.h"
+#include "openvswitch/vlog.h"
+#include "inc-proc-northd.h"
+#include "en-global-config.h"
+#include "en-lb-data.h"
+#include "en-lr-stateful.h"
+#include "en-lr-nat.h"
+#include "en-ls-stateful.h"
+#include "en-ls-arp.h"
+#include "en-multicast.h"
+#include "en-northd.h"
+#include "en-lflow.h"
+#include "en-northd-output.h"
+#include "en-meters.h"
+#include "en-sampling-app.h"
+#include "en-sync-sb.h"
+#include "en-sync-from-sb.h"
+#include "en-ecmp-nexthop.h"
+#include "en-acl-ids.h"
+#include "en-advertised-route-sync.h"
+#include "en-learned-route-sync.h"
+#include "en-group-ecmp-route.h"
+#include "en-datapath-logical-router.h"
+#include "en-datapath-logical-switch.h"
+#include "en-datapath-sync.h"
+#include "unixctl.h"
+#include "util.h"
+
+VLOG_DEFINE_THIS_MODULE(inc_proc_northd);
+
+static unixctl_cb_func chassis_features_list;
+
+#define NB_NODES \
+    NB_NODE(nb_global) \
+    NB_NODE(logical_switch) \
+    NB_NODE(address_set) \
+    NB_NODE(port_group) \
+    NB_NODE(load_balancer) \
+    NB_NODE(load_balancer_group) \
+    NB_NODE(acl) \
+    NB_NODE(logical_router) \
+    NB_NODE(mirror) \
+    NB_NODE(mirror_rule) \
+    NB_NODE(meter) \
+    NB_NODE(bfd) \
+    NB_NODE(static_mac_binding) \
+    NB_NODE(chassis_template_var) \
+    NB_NODE(sampling_app) \
+    NB_NODE(network_function) \
+    NB_NODE(network_function_group) \
+    NB_NODE(logical_switch_port_health_check)
+
+    enum nb_engine_node {
+#define NB_NODE(NAME) NB_##NAME,
+    NB_NODES
+#undef NB_NODE
+    };
+
+/* Define engine node functions for nodes that represent NB tables
+ *
+ * en_nb_<TABLE_NAME>_run()
+ * en_nb_<TABLE_NAME>_init()
+ * en_nb_<TABLE_NAME>_cleanup()
+ */
+#define NB_NODE(NAME) ENGINE_FUNC_NB(NAME);
+    NB_NODES
+#undef NB_NODE
+
+#define SB_NODES \
+    SB_NODE(sb_global) \
+    SB_NODE(chassis) \
+    SB_NODE(encap) \
+    SB_NODE(address_set) \
+    SB_NODE(port_group) \
+    SB_NODE(logical_flow) \
+    SB_NODE(multicast_group) \
+    SB_NODE(mirror) \
+    SB_NODE(meter) \
+    SB_NODE(datapath_binding) \
+    SB_NODE(port_binding) \
+    SB_NODE(mac_binding) \
+    SB_NODE(dns) \
+    SB_NODE(ha_chassis_group) \
+    SB_NODE(ip_multicast) \
+    SB_NODE(igmp_group) \
+    SB_NODE(service_monitor) \
+    SB_NODE(load_balancer) \
+    SB_NODE(bfd) \
+    SB_NODE(fdb) \
+    SB_NODE(static_mac_binding) \
+    SB_NODE(chassis_template_var) \
+    SB_NODE(logical_dp_group) \
+    SB_NODE(ecmp_nexthop) \
+    SB_NODE(acl_id) \
+    SB_NODE(advertised_route) \
+    SB_NODE(learned_route) \
+    SB_NODE(advertised_mac_binding)
+
+enum sb_engine_node {
+#define SB_NODE(NAME) SB_##NAME,
+    SB_NODES
+#undef SB_NODE
+};
+
+/* Define engine node functions for nodes that represent SB tables
+ *
+ * en_sb_<TABLE_NAME>_run()
+ * en_sb_<TABLE_NAME>_init()
+ * en_sb_<TABLE_NAME>_cleanup()
+ */
+#define SB_NODE(NAME) ENGINE_FUNC_SB(NAME);
+    SB_NODES
+#undef SB_NODE
+
+/* Define engine nodes for NB and SB tables
+ *
+ * struct engine_node en_nb_<TABLE_NAME>
+ * struct engine_node en_sb_<TABLE_NAME>
+ *
+ * Define nodes as static to avoid sparse errors.
+ */
+#define NB_NODE(NAME) static ENGINE_NODE_NB(NAME);
+    NB_NODES
+#undef NB_NODE
+
+#define SB_NODE(NAME) static ENGINE_NODE_SB(NAME);
+    SB_NODES
+#undef SB_NODE
+
+/* Define engine nodes for other nodes. They should be defined as static to
+ * avoid sparse errors. */
+static ENGINE_NODE(northd, CLEAR_TRACKED_DATA, SB_WRITE);
+static ENGINE_NODE(sync_from_sb, SB_WRITE);
+static ENGINE_NODE(sampling_app);
+static ENGINE_NODE(lflow, SB_WRITE);
+static ENGINE_NODE(mac_binding_aging, SB_WRITE);
+static ENGINE_NODE(mac_binding_aging_waker);
+static ENGINE_NODE(northd_output);
+static ENGINE_NODE(sync_meters, SB_WRITE);
+static ENGINE_NODE(sync_to_sb, SB_WRITE);
+static ENGINE_NODE(sync_to_sb_addr_set, SB_WRITE);
+static ENGINE_NODE(port_group, CLEAR_TRACKED_DATA, SB_WRITE);
+static ENGINE_NODE(fdb_aging, SB_WRITE);
+static ENGINE_NODE(fdb_aging_waker);
+static ENGINE_NODE(sync_to_sb_lb, SB_WRITE);
+static ENGINE_NODE(sync_to_sb_pb, SB_WRITE);
+static ENGINE_NODE(global_config, CLEAR_TRACKED_DATA, SB_WRITE);
+static ENGINE_NODE(lb_data, CLEAR_TRACKED_DATA);
+static ENGINE_NODE(lr_nat, CLEAR_TRACKED_DATA);
+static ENGINE_NODE(lr_stateful, CLEAR_TRACKED_DATA);
+static ENGINE_NODE(ls_stateful, CLEAR_TRACKED_DATA);
+static ENGINE_NODE(ls_arp, CLEAR_TRACKED_DATA);
+static ENGINE_NODE(route_policies);
+static ENGINE_NODE(routes);
+static ENGINE_NODE(bfd);
+static ENGINE_NODE(bfd_sync, SB_WRITE);
+static ENGINE_NODE(ecmp_nexthop, SB_WRITE);
+static ENGINE_NODE(multicast_igmp, SB_WRITE);
+static ENGINE_NODE(acl_id, SB_WRITE);
+static ENGINE_NODE(advertised_route_sync, SB_WRITE);
+static ENGINE_NODE(advertised_mac_binding_sync, SB_WRITE);
+static ENGINE_NODE(learned_route_sync, CLEAR_TRACKED_DATA, SB_WRITE);
+static ENGINE_NODE(dynamic_routes);
+static ENGINE_NODE(group_ecmp_route, CLEAR_TRACKED_DATA);
+static ENGINE_NODE(datapath_logical_router, CLEAR_TRACKED_DATA);
+static ENGINE_NODE(datapath_logical_switch, CLEAR_TRACKED_DATA);
+static ENGINE_NODE(datapath_sync, CLEAR_TRACKED_DATA, SB_WRITE);
+static ENGINE_NODE(datapath_synced_logical_router, CLEAR_TRACKED_DATA);
+static ENGINE_NODE(datapath_synced_logical_switch, CLEAR_TRACKED_DATA);
+static ENGINE_NODE(ic_learned_svc_monitors, SB_WRITE);
+
+void inc_proc_northd_init(struct ovsdb_idl_loop *nb,
+                          struct ovsdb_idl_loop *sb)
+{
+    /* Define relationships between nodes where first argument is dependent
+     * on the second argument */
+
+    engine_add_input(&en_sampling_app, &en_nb_sampling_app, NULL);
+
+    engine_add_input(&en_global_config, &en_nb_nb_global,
+                     global_config_nb_global_handler);
+    engine_add_input(&en_global_config, &en_nb_logical_switch,
+                     global_config_nb_logical_switch_handler);
+    engine_add_input(&en_global_config, &en_sb_sb_global,
+                     global_config_sb_global_handler);
+    engine_add_input(&en_global_config, &en_sb_chassis,
+                     global_config_sb_chassis_handler);
+    engine_add_input(&en_global_config, &en_sampling_app, NULL);
+
+    engine_add_input(&en_acl_id, &en_nb_acl, NULL);
+    engine_add_input(&en_acl_id, &en_sb_acl_id, NULL);
+
+    engine_add_input(&en_datapath_logical_switch, &en_nb_logical_switch,
+                     datapath_logical_switch_handler);
+    engine_add_input(&en_datapath_logical_switch, &en_global_config,
+                     datapath_logical_switch_handler);
+
+    engine_add_input(&en_datapath_logical_router, &en_nb_logical_router,
+                     en_datapath_logical_router_logical_router_handler);
+
+    engine_add_input(&en_datapath_sync, &en_global_config,
+                     datapath_sync_global_config_handler);
+    engine_add_input(&en_datapath_sync, &en_sb_datapath_binding,
+                     datapath_sync_sb_datapath_binding);
+    engine_add_input(&en_datapath_sync, &en_datapath_logical_switch,
+                     datapath_sync_logical_switch_handler);
+    engine_add_input(&en_datapath_sync, &en_datapath_logical_router,
+                     datapath_sync_logical_router_handler);
+
+    engine_add_input(&en_datapath_synced_logical_router, &en_datapath_sync,
+                     en_datapath_synced_logical_router_datapath_sync_handler);
+    engine_add_input(&en_datapath_synced_logical_switch, &en_datapath_sync,
+                     en_datapath_synced_logical_switch_datapath_sync_handler);
+
+    engine_add_input(&en_lb_data, &en_nb_load_balancer,
+                     lb_data_load_balancer_handler);
+    engine_add_input(&en_lb_data, &en_nb_load_balancer_group,
+                     lb_data_load_balancer_group_handler);
+    engine_add_input(&en_lb_data, &en_datapath_synced_logical_switch,
+                     lb_data_synced_logical_switch_handler);
+    engine_add_input(&en_lb_data, &en_datapath_synced_logical_router,
+                     lb_data_synced_logical_router_handler);
+
+    engine_add_input(&en_ic_learned_svc_monitors,
+                     &en_sb_service_monitor, NULL);
+
+    engine_add_input(&en_northd, &en_nb_mirror, NULL);
+    engine_add_input(&en_northd, &en_nb_mirror_rule, NULL);
+    engine_add_input(&en_northd, &en_nb_static_mac_binding, NULL);
+    engine_add_input(&en_northd, &en_nb_chassis_template_var, NULL);
+    engine_add_input(&en_northd, &en_nb_network_function, NULL);
+    engine_add_input(&en_northd, &en_nb_network_function_group, NULL);
+    engine_add_input(&en_northd, &en_nb_logical_switch_port_health_check,
+                     NULL);
+
+    engine_add_input(&en_northd, &en_sb_chassis, NULL);
+    /* northd uses SB Encap mainly to get the index for requested-encap-ip
+     * lookups. Chassis owns Encap membership, so encap create/delete are
+     * covered by the SB chassis input. Hence a noop handler is sufficient
+     * here. */
+    engine_add_input(&en_northd, &en_sb_encap, engine_noop_handler);
+    engine_add_input(&en_northd, &en_sb_mirror, NULL);
+    engine_add_input(&en_northd, &en_sb_meter, NULL);
+    engine_add_input(&en_northd, &en_sb_dns, NULL);
+    engine_add_input(&en_northd, &en_sb_ha_chassis_group, NULL);
+    engine_add_input(&en_northd, &en_sb_service_monitor, NULL);
+    engine_add_input(&en_northd, &en_sb_static_mac_binding, NULL);
+    engine_add_input(&en_northd, &en_sb_chassis_template_var, NULL);
+    engine_add_input(&en_northd, &en_ic_learned_svc_monitors, NULL);
+    engine_add_input(&en_northd, &en_sb_fdb, northd_sb_fdb_change_handler);
+    engine_add_input(&en_northd, &en_global_config,
+                     northd_global_config_handler);
+
+    /* northd engine node uses the sb mac binding table to
+     * cleanup mac binding entries for deleted logical ports
+     * and datapaths. Any update to SB mac binding doesn't
+     * change the northd engine node state or data.  Hence
+     * it is ok to add a noop_handler here.
+     * Note: mac_binding_aging engine node depends on SB mac binding
+     * and it results in full recompute for any changes to it.
+     * */
+    engine_add_input(&en_northd, &en_sb_mac_binding,
+                     engine_noop_handler);
+
+    engine_add_input(&en_northd, &en_sb_port_binding,
+                     northd_sb_port_binding_handler);
+    engine_add_input(&en_northd, &en_datapath_synced_logical_switch,
+                     northd_nb_logical_switch_handler);
+    engine_add_input(&en_northd, &en_datapath_synced_logical_router,
+                     northd_nb_logical_router_handler);
+    engine_add_input(&en_northd, &en_lb_data, northd_lb_data_handler);
+    engine_add_input(&en_northd, &en_nb_port_group,
+                     northd_nb_port_group_handler);
+
+    /* No need for an explicit handler for the SB datapath and
+     * SB IP Multicast changes.*/
+    engine_add_input(&en_northd, &en_sb_ip_multicast, engine_noop_handler);
+
+    engine_add_input(&en_lr_nat, &en_northd, lr_nat_northd_handler);
+
+    engine_add_input(&en_lr_stateful, &en_northd, lr_stateful_northd_handler);
+    engine_add_input(&en_lr_stateful, &en_lr_nat, lr_stateful_lr_nat_handler);
+    engine_add_input(&en_lr_stateful, &en_lb_data,
+                     lr_stateful_lb_data_handler);
+
+    engine_add_input(&en_ls_stateful, &en_northd, ls_stateful_northd_handler);
+    engine_add_input(&en_ls_stateful, &en_port_group,
+                     ls_stateful_port_group_handler);
+    engine_add_input(&en_ls_stateful, &en_nb_acl, ls_stateful_acl_handler);
+
+    engine_add_input(&en_ls_arp, &en_lr_nat, ls_arp_lr_nat_handler);
+    engine_add_input(&en_ls_arp, &en_northd, ls_arp_northd_handler);
+
+    engine_add_input(&en_mac_binding_aging, &en_sb_mac_binding, NULL);
+    engine_add_input(&en_mac_binding_aging, &en_northd, NULL);
+    engine_add_input(&en_mac_binding_aging, &en_mac_binding_aging_waker, NULL);
+    engine_add_input(&en_mac_binding_aging, &en_global_config,
+                     node_global_config_handler);
+
+    engine_add_input(&en_fdb_aging, &en_sb_fdb, NULL);
+    engine_add_input(&en_fdb_aging, &en_northd, NULL);
+    engine_add_input(&en_fdb_aging, &en_fdb_aging_waker, NULL);
+    engine_add_input(&en_fdb_aging, &en_global_config,
+                     node_global_config_handler);
+
+    engine_add_input(&en_bfd, &en_nb_bfd, NULL);
+    engine_add_input(&en_bfd, &en_sb_bfd, NULL);
+
+    engine_add_input(&en_route_policies, &en_bfd, NULL);
+    engine_add_input(&en_route_policies, &en_northd,
+                     route_policies_northd_change_handler);
+
+    engine_add_input(&en_routes, &en_bfd, NULL);
+    engine_add_input(&en_routes, &en_northd,
+                     routes_northd_change_handler);
+
+    engine_add_input(&en_bfd_sync, &en_bfd, NULL);
+    engine_add_input(&en_bfd_sync, &en_nb_bfd, NULL);
+    engine_add_input(&en_bfd_sync, &en_routes, NULL);
+    engine_add_input(&en_bfd_sync, &en_route_policies, NULL);
+    engine_add_input(&en_bfd_sync, &en_northd, bfd_sync_northd_change_handler);
+
+    engine_add_input(&en_ecmp_nexthop, &en_global_config, NULL);
+    engine_add_input(&en_ecmp_nexthop, &en_routes, NULL);
+    engine_add_input(&en_ecmp_nexthop, &en_sb_ecmp_nexthop, NULL);
+    engine_add_input(&en_ecmp_nexthop, &en_sb_port_binding, NULL);
+    engine_add_input(&en_ecmp_nexthop, &en_sb_mac_binding,
+                     ecmp_nexthop_mac_binding_handler);
+
+    engine_add_input(&en_dynamic_routes, &en_lr_stateful,
+                     dynamic_routes_lr_stateful_change_handler);
+    engine_add_input(&en_dynamic_routes, &en_northd,
+                     dynamic_routes_northd_change_handler);
+
+    engine_add_input(&en_advertised_route_sync, &en_routes, NULL);
+    engine_add_input(&en_advertised_route_sync, &en_dynamic_routes, NULL);
+    engine_add_input(&en_advertised_route_sync, &en_sb_advertised_route,
+                     NULL);
+
+    engine_add_input(&en_advertised_mac_binding_sync, &en_sb_port_binding,
+                     NULL);
+    engine_add_input(&en_advertised_mac_binding_sync,
+                     &en_sb_advertised_mac_binding, NULL);
+    /* No need for an explicit handler for northd changes.
+     * We do need to access en_northd (input) data, i.e., to
+     * lookup OVN ports. */
+    engine_add_input(&en_advertised_mac_binding_sync, &en_northd,
+                     engine_noop_handler);
+
+    engine_add_input(&en_learned_route_sync, &en_sb_learned_route,
+                     learned_route_sync_sb_learned_route_change_handler);
+    engine_add_input(&en_learned_route_sync, &en_northd,
+                     learned_route_sync_northd_change_handler);
+
+    engine_add_input(&en_group_ecmp_route, &en_routes, NULL);
+    engine_add_input(&en_group_ecmp_route, &en_learned_route_sync,
+                     group_ecmp_route_learned_route_change_handler);
+
+    engine_add_input(&en_sync_meters, &en_nb_acl, sync_meters_nb_acl_handler);
+    engine_add_input(&en_sync_meters, &en_nb_meter, NULL);
+    engine_add_input(&en_sync_meters, &en_sb_meter, NULL);
+
+    engine_add_input(&en_multicast_igmp, &en_northd,
+                     multicast_igmp_northd_handler);
+    engine_add_input(&en_multicast_igmp, &en_sb_multicast_group, NULL);
+    engine_add_input(&en_multicast_igmp, &en_sb_igmp_group, NULL);
+
+    engine_add_input(&en_lflow, &en_sync_meters, NULL);
+    engine_add_input(&en_lflow, &en_sb_logical_flow, NULL);
+    engine_add_input(&en_lflow, &en_sb_multicast_group, NULL);
+    engine_add_input(&en_lflow, &en_sb_logical_dp_group, NULL);
+    engine_add_input(&en_lflow, &en_bfd_sync, NULL);
+    engine_add_input(&en_lflow, &en_route_policies, NULL);
+    engine_add_input(&en_lflow, &en_routes, NULL);
+    /* XXX: The incremental processing only supports changes to learned routes.
+     * All other changes trigger a full recompute. */
+    engine_add_input(&en_lflow, &en_group_ecmp_route,
+                     lflow_group_ecmp_route_change_handler);
+    engine_add_input(&en_lflow, &en_global_config,
+                     node_global_config_handler);
+
+    engine_add_input(&en_lflow, &en_sampling_app, NULL);
+
+    /* en_lflow adjusts for datapath changes via its handler for en_northd.
+     * We can use engine_noop_handler for the en_datapath_sync input as a
+     * result.
+     */
+    engine_add_input(&en_lflow, &en_datapath_sync, engine_noop_handler);
+    engine_add_input(&en_lflow, &en_northd, lflow_northd_handler);
+    /* No need for an explicit handler for port_groups in the en_lflow node.
+     * Stateful configuration changes are passed through the en_ls_stateful
+     * input dependancy. Still needs access to en_port_port_group (input)
+     * data to look up port groups.  */
+    engine_add_input(&en_lflow, &en_port_group, engine_noop_handler);
+    engine_add_input(&en_lflow, &en_lr_stateful, lflow_lr_stateful_handler);
+    engine_add_input(&en_lflow, &en_ls_stateful, lflow_ls_stateful_handler);
+    engine_add_input(&en_lflow, &en_ls_arp, lflow_ls_arp_handler);
+    engine_add_input(&en_lflow, &en_multicast_igmp,
+                     lflow_multicast_igmp_handler);
+    engine_add_input(&en_lflow, &en_sb_acl_id, NULL);
+    engine_add_input(&en_lflow, &en_ic_learned_svc_monitors,
+                     lflow_ic_learned_svc_mons_handler);
+
+    engine_add_input(&en_sync_to_sb_addr_set, &en_northd, NULL);
+    engine_add_input(&en_sync_to_sb_addr_set, &en_lr_stateful, NULL);
+    engine_add_input(&en_sync_to_sb_addr_set, &en_sb_address_set, NULL);
+    engine_add_input(&en_sync_to_sb_addr_set, &en_nb_address_set,
+                     sync_to_sb_addr_set_nb_address_set_handler);
+    engine_add_input(&en_sync_to_sb_addr_set, &en_nb_port_group,
+                     sync_to_sb_addr_set_nb_port_group_handler);
+    engine_add_input(&en_sync_to_sb_addr_set, &en_global_config,
+                     node_global_config_handler);
+
+    engine_add_input(&en_port_group, &en_nb_port_group,
+                     port_group_nb_port_group_handler);
+    engine_add_input(&en_port_group, &en_sb_port_group, NULL);
+    /* No need for an explicit handler for northd changes.  Port changes
+     * that affect port_groups trigger updates to the NB.Port_Group
+     * table too (because of the explicit dependency in the schema). */
+    engine_add_input(&en_port_group, &en_northd, engine_noop_handler);
+
+    engine_add_input(&en_sync_to_sb_lb, &en_global_config,
+                     node_global_config_handler);
+    engine_add_input(&en_sync_to_sb_lb, &en_datapath_sync,
+                     engine_noop_handler);
+    engine_add_input(&en_sync_to_sb_lb, &en_northd,
+                     sync_to_sb_lb_northd_handler);
+    engine_add_input(&en_sync_to_sb_lb, &en_sb_load_balancer,
+                     sync_to_sb_lb_sb_load_balancer);
+    engine_add_input(&en_sync_to_sb_lb, &en_sb_logical_dp_group, NULL);
+
+    engine_add_input(&en_sync_to_sb_pb, &en_northd,
+                     sync_to_sb_pb_northd_handler);
+    engine_add_input(&en_sync_to_sb_pb, &en_lr_stateful,
+                     sync_to_sb_pb_lr_stateful_handler);
+
+    /* en_sync_to_sb engine node syncs the SB database tables from
+     * the NB database tables.
+     * Right now this engine syncs the SB Address_Set table, Port_Group table
+     * SB Meter/Meter_Band tables and SB Load_Balancer table and
+     * (partly) SB Port_Binding table.
+     */
+    engine_add_input(&en_sync_to_sb, &en_sync_to_sb_addr_set, NULL);
+    engine_add_input(&en_sync_to_sb, &en_port_group, NULL);
+    engine_add_input(&en_sync_to_sb, &en_sync_meters, NULL);
+    engine_add_input(&en_sync_to_sb, &en_sync_to_sb_lb, NULL);
+    engine_add_input(&en_sync_to_sb, &en_sync_to_sb_pb, NULL);
+
+    engine_add_input(&en_sync_from_sb, &en_northd,
+                     sync_from_sb_northd_handler);
+    engine_add_input(&en_sync_from_sb, &en_sb_port_binding, NULL);
+    engine_add_input(&en_sync_from_sb, &en_sb_service_monitor, NULL);
+    engine_add_input(&en_sync_from_sb, &en_sb_ha_chassis_group, NULL);
+
+    engine_add_input(&en_northd_output, &en_acl_id,
+                     northd_output_acl_id_handler);
+    engine_add_input(&en_northd_output, &en_sync_from_sb, NULL);
+    engine_add_input(&en_northd_output, &en_sync_to_sb,
+                     northd_output_sync_to_sb_handler);
+    engine_add_input(&en_northd_output, &en_lflow,
+                     northd_output_lflow_handler);
+    engine_add_input(&en_northd_output, &en_mac_binding_aging,
+                     northd_output_mac_binding_aging_handler);
+    engine_add_input(&en_northd_output, &en_fdb_aging,
+                     northd_output_fdb_aging_handler);
+    engine_add_input(&en_northd_output, &en_ecmp_nexthop,
+                     northd_output_ecmp_nexthop_handler);
+    engine_add_input(&en_northd_output, &en_advertised_route_sync,
+                     northd_output_advertised_route_sync_handler);
+    engine_add_input(&en_northd_output, &en_advertised_mac_binding_sync,
+                     northd_output_advertised_mac_binding_sync_handler);
+
+    struct engine_arg engine_arg = {
+        .nb_idl = nb->idl,
+        .sb_idl = sb->idl,
+    };
+
+    struct ovsdb_idl_index *sbrec_chassis_by_name =
+                         chassis_index_create(sb->idl);
+    struct ovsdb_idl_index *sbrec_ha_chassis_grp_by_name =
+                         ha_chassis_group_index_create(sb->idl);
+    struct ovsdb_idl_index *sbrec_mcast_group_by_name_dp =
+                         mcast_group_index_create(sb->idl);
+    struct ovsdb_idl_index *sbrec_ip_mcast_by_dp =
+                         ip_mcast_index_create(sb->idl);
+    struct ovsdb_idl_index *sbrec_chassis_by_hostname =
+        chassis_hostname_index_create(sb->idl);
+    struct ovsdb_idl_index *sbrec_encap_by_ip =
+        ovsdb_idl_index_create1(sb->idl, &sbrec_encap_col_ip);
+    struct ovsdb_idl_index *sbrec_mac_binding_by_datapath
+        = mac_binding_by_datapath_index_create(sb->idl);
+    struct ovsdb_idl_index *sbrec_mac_binding_by_lport_ip
+        = mac_binding_by_lport_ip_index_create(sb->idl);
+    struct ovsdb_idl_index *fdb_by_dp_key =
+        ovsdb_idl_index_create1(sb->idl, &sbrec_fdb_col_dp_key);
+
+    engine_init(&en_northd_output, &engine_arg);
+
+    engine_ovsdb_node_add_index(&en_sb_chassis,
+                                "sbrec_chassis_by_name",
+                                sbrec_chassis_by_name);
+    engine_ovsdb_node_add_index(&en_sb_chassis,
+                                "sbrec_chassis_by_hostname",
+                                sbrec_chassis_by_hostname);
+    engine_ovsdb_node_add_index(&en_sb_encap,
+                                "sbrec_encap_by_ip",
+                                sbrec_encap_by_ip);
+    engine_ovsdb_node_add_index(&en_sb_ha_chassis_group,
+                                "sbrec_ha_chassis_grp_by_name",
+                                sbrec_ha_chassis_grp_by_name);
+    engine_ovsdb_node_add_index(&en_sb_multicast_group,
+                                "sbrec_mcast_group_by_name",
+                                sbrec_mcast_group_by_name_dp);
+    engine_ovsdb_node_add_index(&en_sb_ip_multicast,
+                                "sbrec_ip_mcast_by_dp",
+                                sbrec_ip_mcast_by_dp);
+    engine_ovsdb_node_add_index(&en_sb_mac_binding,
+                                "sbrec_mac_binding_by_datapath",
+                                sbrec_mac_binding_by_datapath);
+    engine_ovsdb_node_add_index(&en_sb_mac_binding,
+                                "sbrec_mac_binding_by_lport_ip",
+                                sbrec_mac_binding_by_lport_ip);
+    engine_ovsdb_node_add_index(&en_sb_fdb,
+                                "fdb_by_dp_key",
+                                fdb_by_dp_key);
+
+    struct ovsdb_idl_index *sbrec_address_set_by_name
+        = ovsdb_idl_index_create1(sb->idl, &sbrec_address_set_col_name);
+    engine_ovsdb_node_add_index(&en_sb_address_set,
+                                "sbrec_address_set_by_name",
+                                sbrec_address_set_by_name);
+
+    struct ovsdb_idl_index *sbrec_port_group_by_name
+        = ovsdb_idl_index_create1(sb->idl, &sbrec_port_group_col_name);
+    engine_ovsdb_node_add_index(&en_sb_port_group,
+                                "sbrec_port_group_by_name",
+                                sbrec_port_group_by_name);
+
+    struct ovsdb_idl_index *sbrec_fdb_by_dp_and_port
+        = ovsdb_idl_index_create2(sb->idl, &sbrec_fdb_col_dp_key,
+                                  &sbrec_fdb_col_port_key);
+    engine_ovsdb_node_add_index(&en_sb_fdb,
+                                "sbrec_fdb_by_dp_and_port",
+                                sbrec_fdb_by_dp_and_port);
+
+    struct ovsdb_idl_index *sbrec_port_binding_by_name
+        = ovsdb_idl_index_create1(sb->idl,
+                                  &sbrec_port_binding_col_logical_port);
+    engine_ovsdb_node_add_index(&en_sb_port_binding,
+                                "sbrec_port_binding_by_name",
+                                sbrec_port_binding_by_name);
+
+    struct ovsdb_idl_index *nbrec_mirror_by_type_and_sink
+        = ovsdb_idl_index_create2(nb->idl, &nbrec_mirror_col_type,
+                                  &nbrec_mirror_col_sink);
+    engine_ovsdb_node_add_index(&en_nb_mirror,
+                                "nbrec_mirror_by_type_and_sink",
+                                nbrec_mirror_by_type_and_sink);
+
+    struct ovsdb_idl_index *sbrec_ecmp_nexthop_by_ip_and_port
+        = ecmp_nexthop_index_create(sb->idl);
+    engine_ovsdb_node_add_index(&en_sb_ecmp_nexthop,
+                                "sbrec_ecmp_nexthop_by_ip_and_port",
+                                sbrec_ecmp_nexthop_by_ip_and_port);
+
+    struct ovsdb_idl_index *sbrec_service_monitor_by_learned_type
+        = ovsdb_idl_index_create1(sb->idl,
+                                  &sbrec_service_monitor_col_ic_learned);
+    engine_ovsdb_node_add_index(&en_sb_service_monitor,
+                                "sbrec_service_monitor_by_learned_type",
+                                sbrec_service_monitor_by_learned_type);
+
+    struct ovsdb_idl_index *sbrec_service_monitor_by_service_type
+        = ovsdb_idl_index_create1(sb->idl,
+                                  &sbrec_service_monitor_col_type);
+    engine_ovsdb_node_add_index(&en_sb_service_monitor,
+                                "sbrec_service_monitor_by_service_type",
+                                sbrec_service_monitor_by_service_type);
+
+    struct ed_type_global_config *global_config =
+        engine_get_internal_data(&en_global_config);
+    unixctl_command_register("debug/chassis-features-list", "", 0, 0,
+                             chassis_features_list,
+                             &global_config->features);
+}
+
+/* Returns true if the incremental processing ended up updating nodes. */
+bool inc_proc_northd_run(struct ovsdb_idl_txn *ovnnb_txn,
+                         struct ovsdb_idl_txn *ovnsb_txn,
+                         struct northd_engine_context *ctx) {
+    ovs_assert(ovnnb_txn && ovnsb_txn);
+
+    int64_t start = time_msec();
+    engine_init_run();
+
+    struct engine_context eng_ctx = {
+        .ovnnb_idl_txn = ovnnb_txn,
+        .ovnsb_idl_txn = ovnsb_txn,
+    };
+
+    engine_set_context(&eng_ctx);
+    engine_run(true);
+
+    if (!engine_has_run()) {
+        if (engine_need_run()) {
+            VLOG_DBG("engine did not run, force recompute next time.");
+            engine_set_force_recompute_immediate();
+        } else {
+            VLOG_DBG("engine did not run, and it was not needed");
+        }
+    } else if (engine_canceled()) {
+        VLOG_DBG("engine was canceled, force recompute next time.");
+        engine_set_force_recompute_immediate();
+    } else {
+        engine_clear_force_recompute();
+    }
+
+    int64_t now = time_msec();
+    /* Postpone the next run by length of current run with maximum capped
+     * by "northd-backoff-interval-ms" interval. */
+    ctx->next_run_ms = now + MIN(now - start, ctx->backoff_ms);
+
+    return engine_has_updated();
+}
+
+void inc_proc_northd_cleanup(void)
+{
+    engine_cleanup();
+    engine_set_context(NULL);
+}
+
+bool
+inc_proc_northd_can_run(struct northd_engine_context *ctx)
+{
+    if (engine_get_force_recompute() || time_msec() >= ctx->next_run_ms ||
+        ctx->nb_idl_duration_ms >= IDL_LOOP_MAX_DURATION_MS ||
+        ctx->sb_idl_duration_ms >= IDL_LOOP_MAX_DURATION_MS) {
+        return true;
+    }
+
+    poll_timer_wait_until(ctx->next_run_ms);
+    return false;
+}
+
+static void
+chassis_features_list(struct unixctl_conn *conn, int argc OVS_UNUSED,
+                      const char *argv[] OVS_UNUSED, void *features_)
+{
+    struct chassis_features *features = features_;
+    struct ds ds = DS_EMPTY_INITIALIZER;
+
+    ds_put_format(&ds, "mac_binding_timestamp: %s\n",
+                  features->mac_binding_timestamp ? "true" : "false");
+    ds_put_format(&ds, "fdb_timestamp: %s\n",
+                  features->fdb_timestamp ? "true" : "false");
+    ds_put_format(&ds, "ls_dpg_column: %s\n",
+                  features->ls_dpg_column ? "true" : "false");
+    ds_put_format(&ds, "ct_commit_nat_v2: %s\n",
+                  features->ct_commit_nat_v2 ? "true" : "false");
+    ds_put_format(&ds, "ct_commit_to_zone: %s\n",
+                  features->ct_commit_to_zone ? "true" : "false");
+    ds_put_format(&ds, "sample_with_reg: %s\n",
+                  features->sample_with_reg ? "true" : "false");
+    ds_put_format(&ds, "ct_next_zone: %s\n",
+                  features->ct_next_zone ? "true" : "false");
+    ds_put_format(&ds, "ct_label_flush: %s\n",
+                  features->ct_label_flush ? "true" : "false");
+    ds_put_format(&ds, "ct_state_save: %s\n",
+                  features->ct_state_save ? "true" : "false");
+
+    unixctl_command_reply(conn, ds_cstr(&ds));
+    ds_destroy(&ds);
+}

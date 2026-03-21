@@ -1,0 +1,244 @@
+name: System tests using ovn-fake-multinode
+
+on:
+  schedule:
+    # Run everyday at midnight
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build ovn-fake-multinode image
+    if: github.repository_owner == 'ovn-org' || github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        cfg:
+        - { repo: "${{ github.repository }}", branch: "${{ github.ref_name }}" }
+        - { repo: ovn-org/ovn, branch: "branch-24.03" }
+    env:
+      RUNC_CMD: podman
+      OS_IMAGE: "fedora:42"
+      # https://github.com/actions/runner-images/issues/6282
+      XDG_RUNTIME_DIR: ''
+    steps:
+    - name: Check out ovn-fake-multi-node
+      uses: actions/checkout@v6
+      with:
+        repository: 'ovn-org/ovn-fake-multinode'
+        path: 'ovn-fake-multinode'
+        ref: 'v0.4'
+
+    # Check out ovn and ovs separately inside ovn-fake-multinode/ovn and ovn-fake-multinode/ovs
+    # ovn-fake-multinode builds and installs ovs from ovn-fake-multinode/ovs
+    # and it builds and installs ovn from ovn-fake-multinode/ovn. It uses the ovs submodule for ovn compilation.
+    - name: Check out ovs main
+      uses: actions/checkout@v6
+      with:
+        path: 'ovn-fake-multinode/ovs'
+        repository: 'openvswitch/ovs'
+        ref: 'main'
+
+    - name: Check out ovn ${{ matrix.cfg.branch }} of ${{ matrix.cfg.repo }}
+      uses: actions/checkout@v6
+      with:
+        path: 'ovn-fake-multinode/ovn'
+        submodules: recursive
+        repository: ${{ matrix.cfg.repo }}
+        ref: ${{ matrix.cfg.branch }}
+
+    - name: Install dependencies
+      run: |
+        sudo apt update || true
+        sudo apt-get install -y podman
+
+    - name: Fix /etc/hosts file
+      run: |
+        . .ci/linux-util.sh
+        fix_etc_hosts
+      working-directory: ovn-fake-multinode/ovn
+
+    - name: Disable apparmor
+      run: |
+        . .ci/linux-util.sh
+        disable_apparmor
+      working-directory: ovn-fake-multinode/ovn
+
+    - name: Build ovn-fake-multi-node ${{ matrix.cfg.branch }} image
+      run: |
+        set -x
+        sudo -E ./ovn_cluster.sh build
+        mkdir -p /tmp/_output
+        sudo podman tag ovn/ovn-multi-node:latest ovn/ovn-multi-node:${{ matrix.cfg.branch }}
+        sudo podman save --format oci-archive ovn/ovn-multi-node:${{ matrix.cfg.branch }} > /tmp/_output/ovn_${{ matrix.cfg.branch }}_image.tar
+      working-directory: ovn-fake-multinode
+
+    - uses: actions/upload-artifact@v7
+      with:
+        name: test-${{ matrix.cfg.branch }}-image
+        path: /tmp/_output/ovn_${{ matrix.cfg.branch }}_image.tar
+
+  multinode-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    needs: [build]
+    strategy:
+      fail-fast: false
+      matrix:
+        cfg:
+        - { branch: "${{ github.ref_name }}", testsuiteflags: ""}
+        - { branch: "branch-24.03", testsuiteflags: "-k 'basic test'" }
+    name: multinode tests ${{ join(matrix.cfg.*, ' ') }}
+    env:
+      RUNC_CMD: podman
+      OS_IMAGE: "fedora:42"
+      CENTRAL_IMAGE: "ovn/ovn-multi-node:${{ matrix.cfg.branch }}"
+      CHASSIS_IMAGE: "ovn/ovn-multi-node:${{ github.ref_name }}"
+      RELAY_IMAGE: "ovn/ovn-multi-node:${{ github.ref_name }}"
+      GW_IMAGE: "ovn/ovn-multi-node:${{ github.ref_name }}"
+      # Disable SSL/TLS for now. Revisit this if required.
+      ENABLE_SSL: no
+      CC: gcc
+      OPTS: "--disable-ssl"
+      dependencies: |
+        automake libtool gcc bc libjemalloc2 libjemalloc-dev    \
+        libssl-dev llvm-dev libelf-dev libnuma-dev libpcap-dev  \
+        selinux-policy-dev ncat python3-scapy isc-dhcp-server \
+        podman openvswitch-switch libunbound-dev libunwind-dev
+      # https://github.com/actions/runner-images/issues/6282
+      XDG_RUNTIME_DIR: ''
+
+    steps:
+    - name: Check out ovn
+      uses: actions/checkout@v6
+
+    - name: install required dependencies
+      run:  |
+        sudo apt update || true
+        sudo apt install -y ${{ env.dependencies }}
+        sudo apt install -y linux-modules-extra-$(uname -r)
+
+    - name: Fix /etc/hosts file
+      run: |
+        . .ci/linux-util.sh
+        fix_etc_hosts
+
+    - name: Disable apparmor
+      run: |
+        . .ci/linux-util.sh
+        disable_apparmor
+
+    - name: Free up disk space
+      run: |
+        . .ci/linux-util.sh
+        free_up_disk_space_ubuntu
+
+    - name: Set podman apparmor=unconfined
+      run: |
+        . .ci/linux-util.sh
+        set_containers_apparmor_profile unconfined
+
+    - uses: actions/download-artifact@v8
+      with:
+        name: test-${{ github.ref_name }}-image
+
+    - uses: actions/download-artifact@v8
+      with:
+        name: test-branch-24.03-image
+
+    - name: Load podman image
+      run: |
+        sudo podman load --input ovn_${{ github.ref_name }}_image.tar
+        sudo podman load --input ovn_branch-24.03_image.tar
+
+    - name: Check out ovn-fake-multi-node
+      uses: actions/checkout@v6
+      with:
+        repository: 'ovn-org/ovn-fake-multinode'
+        path: 'ovn-fake-multinode'
+        ref: 'v0.4'
+
+    - name: Start openvswitch
+      run: |
+        sudo systemctl start openvswitch-switch
+        sudo ovs-vsctl show
+
+    - name: Start basic cluster
+      run: |
+        sudo -E CHASSIS_COUNT=4 GW_COUNT=4 ./ovn_cluster.sh start
+        sudo podman exec -it ovn-central-az1 ovn-nbctl show
+        sudo podman exec -it ovn-central-az1 ovn-appctl -t ovn-northd version
+        sudo podman exec -it ovn-chassis-1 ovn-appctl -t ovn-controller version
+      working-directory: ovn-fake-multinode
+
+    - name: Run basic test script
+      run: |
+        sudo ./.ci/test_basic.sh
+      working-directory: ovn-fake-multinode
+
+    - name: update PATH
+      run:  |
+        echo "$HOME/bin"        >> $GITHUB_PATH
+        echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+    - name: set up python
+      uses: actions/setup-python@v6
+      with:
+        python-version: '3.12'
+
+    - name: Check out ovn
+      uses: actions/checkout@v6
+      with:
+        path: 'ovn'
+        submodules: recursive
+
+    - name: Build OVN (for running fake-multinode system tests)
+      run: |
+        pip3 install --disable-pip-version-check --user wheel
+        pip3 install --disable-pip-version-check --user \
+          -r utilities/containers/py-requirements.txt
+        USE_SPARSE=no ./.ci/linux-build.sh
+      working-directory: ovn
+
+    - name: Run fake-multinode system tests
+      run: |
+        if ! sudo -E make check-multinode TESTSUITEFLAGS="${{ matrix.cfg.testsuiteflags }}"; then
+          sudo podman exec -it ovn-central-az1 ovn-nbctl show || :
+          sudo podman exec -it ovn-central-az1 ovn-sbctl show || :
+          sudo podman exec -it ovn-chassis-1 ovs-vsctl show || :
+          sudo podman exec -it ovn-chassis-1 ip netns || :
+          sudo podman exec -it ovn-chassis-1 cat /var/log/ovn/ovn-controller.log || :
+          sudo cat tests/multinode-testsuite.log || :
+          exit 1
+        fi
+      working-directory: ovn
+
+    - name: copy logs on failure
+      if: failure() || cancelled()
+      run: |
+        # upload-artifact throws exceptions if it tries to upload socket
+        # files and we could have some socket files in testsuite.dir.
+        # Also, upload-artifact doesn't work well enough with wildcards.
+        # So, we're just archiving everything here to avoid any issues.
+        mkdir logs
+        cp ovn/config.log ./logs/
+        # multinode tests are run as root, need to adjust permissions.
+        sudo chmod -R +r ovn/tests/multinode-testsuite.* || true
+        cp -r ovn/tests/multinode-testsuite.* ./logs/ || true
+        tar -czvf logs.tgz logs/
+
+    - name: upload logs on failure
+      if: failure() || cancelled()
+      uses: actions/upload-artifact@v7
+      with:
+        name: logs-linux-${{ join(matrix.cfg.*, '-') }}
+        path: logs.tgz
+
+    - name: Stop cluster
+      run: |
+        sudo -E ./ovn_cluster.sh stop
+      working-directory: ovn-fake-multinode

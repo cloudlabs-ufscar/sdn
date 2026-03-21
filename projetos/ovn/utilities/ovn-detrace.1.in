@@ -1,0 +1,77 @@
+.so lib/ovs.tmac
+.TH ovn\-detrace 1 "@VERSION@" "OVN" "OVN Manual"
+.\" This program's name:
+.ds PN ovn\-detrace
+.
+.SH NAME
+\*(PN \- convert ``ovs\-appctl ofproto/trace'' output to combine
+OVN logical flow information.
+.
+.SH SYNOPSIS
+\fB\*(PN < \fIfile\fR
+.so lib/common-syn.man
+.
+.SH DESCRIPTION
+The \fB\*(PN\fR program reads \fBovs\-appctl ofproto/trace\fR output on
+stdin, looking for flow cookies, and displays for each cookie the
+OVN south-bound records that contributed to its creation. It further displays
+the related north-bound information when applicable, e.g.,
+the ACL that generated the logical flow that gets translated to an
+OpenFlow rule with a given cookie.
+.PP
+.
+.SH "OPTIONS"
+.so lib/common.man
+.
+.IP "\fB\-\-ovnsb=\fIserver\fR"
+The OVN Southbound DB remote to contact.  If the \fBOVN_SB_DB\fR
+environment variable is set, its value is used as the default.
+Otherwise, the default is \fBunix:@RUNDIR@/ovnsb_db.sock\fR, but this
+default is unlikely to be useful outside of single-machine OVN test
+environments.
+.
+.IP "\fB\-\-ovnnb=\fIserver\fR"
+The OVN Northbound DB remote to contact.  If the \fBOVN_NB_DB\fR
+environment variable is set, its value is used as the default.
+Otherwise, the default is \fBunix:@RUNDIR@/ovnnb_db.sock\fR, but this
+default is unlikely to be useful outside of single-machine OVN test
+environments.
+.
+.IP "\fB\-\-ovs=\fR"
+Also decode flow information (like OVS ofport) from the flows by connecting
+to the OVS DB.
+.
+.IP "\fB\-\-no-leader-only\fR"
+Connect to any cluster member, not just the leader. The option works for
+OVN Southbound DB and OVN Northbound DB.
+.
+.IP "\fB\-\-ovsdb=\fIserver\fR"
+The OVS DB remote to contact if \fB\-\-ovs\fR is present.  If the
+\fBOVS_RUNDIR\fR environment variable is set, its value is used as the
+default. Otherwise, the default is \fBunix:@RUNDIR@/db.sock\fR, but this
+default is unlikely to be useful outside of single-machine OVN test
+environments.
+.
+.IP "\fB\-p\fR \fIprivkey.pem\fR"
+.IQ "\fB\-\-private\-key=\fIprivkey.pem\fR"
+Specifies a PEM file containing the private key used as \fB\*(PN\fR's
+identity for outgoing SSL/TLS connections.
+.
+.IP "\fB\-c\fR \fIcert.pem\fR"
+.IQ "\fB\-\-certificate=\fIcert.pem\fR"
+Specifies a PEM file containing a certificate that certifies the
+private key specified on \fB\-p\fR or \fB\-\-private\-key\fR to be
+trustworthy.  The certificate must be signed by the certificate
+authority (CA) that the peer in SSL/TLS connections will use to verify it.
+.
+.IP "\fB\-C\fR \fIcacert.pem\fR"
+.IQ "\fB\-\-ca\-cert=\fIcacert.pem\fR"
+Specifies a PEM file containing the CA certificate that \fB\*(PN\fR
+should use to verify certificates presented to it by SSL/TLS peers.  (This
+may be the same certificate that SSL/TLS peers use to verify the
+certificate specified on \fB\-c\fR or \fB\-\-certificate\fR, or it may
+be a different one, depending on the PKI design in use.)
+.
+.SH "SEE ALSO"
+.
+.BR ovs\-appctl (8), ovn\-sbctl (8), ovn\-nbctl (8), ovn\-trace (8)
