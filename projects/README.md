@@ -26,3 +26,6 @@ A deep-dive into the low-level architecture of the OVN project to contribute bac
 **Core Research Areas:**
 * **Source Code Analysis:** Studying the C and Python implementations of OVN daemons.
 * **Upstream Development:** Identifying bugs or feature gaps and submitting patches to the official OVN/OVS project.
+
+
+> Note: These projects are currently under development and may be subject to change at any time.
