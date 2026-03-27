@@ -9,8 +9,7 @@ The methodology focuses on the **"Ground-to-Cloud"** approach: understanding how
 Each module in this repository corresponds to a core technical domain in the SDN stack. To maximize retention, every topic includes:
 
 - **Theoretical Deep-Dive:** Covering internal architectures physical and virtual and protocols.
-- **Packet Analysis:** Hands-on observation of traffic using tools like `ovs-appctl` and `tcpdump`.
-- **Automation:** A dedicated script to deploy the specific topology required for that module's experiments.
+- **Hands on:** Initial setup of virtual labs and configuration of various network infrastructure topologies.
 
 ## Roadmap
 
