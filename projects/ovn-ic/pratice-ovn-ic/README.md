@@ -1,0 +1,1 @@
+The description of this pratice is here: [CLO-77: Practical laboratory for testing and understanding the OVN Interconnect](https://linear.app/cloudlabs/issue/CLO-77/practical-laboratory-for-testing-and-understanding-the-ovn)
