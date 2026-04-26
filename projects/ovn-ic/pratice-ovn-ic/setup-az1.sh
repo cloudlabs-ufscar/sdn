@@ -9,6 +9,7 @@ IC_DIR="$LAB_DIR/ic"
 OVN_SRC="/tmp/ovn-24.03.6"
 
 echo "=== CLEANUP ==="
+sleep 3
 
 # Kill ovn-ic (default rundir from source build)
 if [ -f /usr/local/var/run/ovn/ovn-ic.pid ]; then
@@ -57,6 +58,9 @@ done
 sudo rm -rf "$AZ1_DIR" "$IC_DIR"
 
 echo "=== INSTALL DEPENDENCIES ==="
+
+sleep 3
+
 sudo apt-get update -qq
 sudo apt-get install -y \
     openvswitch-switch \
@@ -73,6 +77,9 @@ sudo systemctl enable openvswitch-switch
 sudo systemctl start openvswitch-switch
 
 echo "=== COMPILE OVN + OVN-IC FROM SOURCE ==="
+
+sleep 3
+
 sudo rm -rf "$OVN_SRC"
 sudo mkdir -p "$OVN_SRC"
 sudo chown "$USER":"$USER" "$OVN_SRC"
@@ -115,10 +122,16 @@ sudo cp "$OVN_IC_NBCTL"  /usr/local/bin/ovn-ic-nbctl
 sudo cp "$OVN_IC_SBCTL"  /usr/local/bin/ovn-ic-sbctl
 
 echo "=== CREATE LAB DIRECTORIES ==="
+
+sleep 3
+
 sudo mkdir -p "$AZ1_DIR" "$IC_DIR"
 sudo chown -R "$USER":"$USER" "$LAB_DIR"
 
 echo "=== START IC-NB DATABASE (port 6645) ==="
+
+sleep 3
+
 ovsdb-tool create "$IC_DIR/ic-nb.db" "$IC_NB_SCHEMA"
 ovsdb-server "$IC_DIR/ic-nb.db" \
     --remote="ptcp:6645:127.0.0.1" \
@@ -128,6 +141,9 @@ ovsdb-server "$IC_DIR/ic-nb.db" \
     --detach
 
 echo "=== START IC-SB DATABASE (port 6646) ==="
+
+sleep 3
+
 ovsdb-tool create "$IC_DIR/ic-sb.db" "$IC_SB_SCHEMA"
 ovsdb-server "$IC_DIR/ic-sb.db" \
     --remote="ptcp:6646:127.0.0.1" \
@@ -137,6 +153,9 @@ ovsdb-server "$IC_DIR/ic-sb.db" \
     --detach
 
 echo "=== START AZ1 NB DATABASE (port 6641) ==="
+
+sleep 3
+
 ovsdb-tool create "$AZ1_DIR/ovnnb.db" /usr/share/ovn/ovn-nb.ovsschema
 ovsdb-server "$AZ1_DIR/ovnnb.db" \
     --remote="ptcp:6641:127.0.0.1" \
@@ -145,6 +164,9 @@ ovsdb-server "$AZ1_DIR/ovnnb.db" \
     --detach
 
 echo "=== START AZ1 SB DATABASE (port 6642) ==="
+
+sleep 3
+
 ovsdb-tool create "$AZ1_DIR/ovnsb.db" /usr/share/ovn/ovn-sb.ovsschema
 ovsdb-server "$AZ1_DIR/ovnsb.db" \
     --remote="ptcp:6642:127.0.0.1" \
@@ -155,6 +177,9 @@ ovsdb-server "$AZ1_DIR/ovnsb.db" \
 sleep 2
 
 echo "=== START OVN-NORTHD ==="
+
+sleep 3
+
 ovn-northd \
     --ovnnb-db="tcp:127.0.0.1:6641" \
     --ovnsb-db="tcp:127.0.0.1:6642" \
@@ -165,6 +190,9 @@ ovn-northd \
 sleep 1
 
 echo "=== CONFIGURE CHASSIS (AZ1) ==="
+
+sleep 3
+
 sudo ovs-vsctl set open_vswitch . \
     external_ids:system-id="az1-chassis" \
     external_ids:ovn-remote="tcp:127.0.0.1:6642" \
@@ -173,6 +201,9 @@ sudo ovs-vsctl set open_vswitch . \
     external_ids:ovn-is-interconn="true"
 
 echo "=== START OVN-CONTROLLER ==="
+
+sleep 3
+
 sudo ovn-controller \
     --pidfile="$AZ1_DIR/ovn-controller.pid" \
     --log-file="$AZ1_DIR/ovn-controller.log" \
@@ -185,6 +216,9 @@ echo "=== SET AZ NAME IN NB_GLOBAL ==="
 ovn-nbctl --db=tcp:127.0.0.1:6641 set NB_Global . name=az1
 
 echo "=== START OVN-IC ==="
+
+sleep 3
+
 sudo mkdir -p /usr/local/var/run/ovn
 sudo ovn-ic \
     --ic-nb-db="tcp:127.0.0.1:6645" \
@@ -198,6 +232,9 @@ sudo ovn-ic \
 sleep 5
 
 echo "=== BUILD OVN TOPOLOGY (AZ1) ==="
+
+sleep 3
+
 NB="ovn-nbctl --db=tcp:127.0.0.1:6641"
 
 # Create transit switch in IC-NB — ovn-ic will automatically create it in OVN NB
@@ -240,6 +277,8 @@ $NB set logical_router lr-az1 \
 
 echo "=== CREATE VM NAMESPACES (AZ1) ==="
 
+sleep 3
+
 # vm1-az1: 10.0.1.10
 sudo ip netns add vm1-az1
 sudo ip link add veth-vm1-az1 type veth peer name veth-vm1-az1-ns
@@ -265,6 +304,9 @@ sudo ovs-vsctl add-port br-int veth-vm2-az1 \
     -- set interface veth-vm2-az1 external_ids:iface-id=lsp-vm2-az1
 
 echo "=== CONFIGURE UFW (allow AZ2) ==="
+
+sleep 3
+
 sudo ufw allow from "${AZ2_IP}" to any port 6645 proto tcp comment "IC-NB from AZ2" 2>/dev/null || true
 sudo ufw allow from "${AZ2_IP}" to any port 6646 proto tcp comment "IC-SB from AZ2" 2>/dev/null || true
 sudo ufw allow from "${AZ2_IP}" to any port 6081 proto udp comment "GENEVE from AZ2" 2>/dev/null || true
