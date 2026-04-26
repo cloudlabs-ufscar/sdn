@@ -9,6 +9,8 @@ OVN_SRC="/tmp/ovn-24.03.6"
 
 echo "=== CLEANUP ==="
 
+sleep 3
+
 # Kill ovn-ic via pidfile (default rundir)
 if [ -f /usr/local/var/run/ovn/ovn-ic.pid ]; then
     sudo kill "$(cat /usr/local/var/run/ovn/ovn-ic.pid)" 2>/dev/null || true
@@ -54,6 +56,9 @@ done
 sudo rm -rf "$AZ2_DIR"
 
 echo "=== INSTALL DEPENDENCIES ==="
+
+sleep 3
+
 sudo apt-get update -qq
 sudo apt-get install -y \
     openvswitch-switch \
@@ -70,6 +75,9 @@ sudo systemctl enable openvswitch-switch
 sudo systemctl start openvswitch-switch
 
 echo "=== COMPILE OVN + OVN-IC FROM SOURCE ==="
+
+sleep 3
+
 sudo rm -rf "$OVN_SRC"
 sudo mkdir -p "$OVN_SRC"
 sudo chown "$USER":"$USER" "$OVN_SRC"
@@ -108,10 +116,16 @@ sudo cp "$OVN_IC_NBCTL" /usr/local/bin/ovn-ic-nbctl
 sudo cp "$OVN_IC_SBCTL" /usr/local/bin/ovn-ic-sbctl
 
 echo "=== CREATE LAB DIRECTORY ==="
+
+sleep 3
+
 sudo mkdir -p "$AZ2_DIR"
 sudo chown -R "$USER":"$USER" "$LAB_DIR"
 
 echo "=== START AZ2 NB DATABASE (port 6641) ==="
+
+sleep 3
+
 ovsdb-tool create "$AZ2_DIR/ovnnb.db" /usr/share/ovn/ovn-nb.ovsschema
 ovsdb-server "$AZ2_DIR/ovnnb.db" \
     --remote="ptcp:6641:127.0.0.1" \
@@ -120,6 +134,9 @@ ovsdb-server "$AZ2_DIR/ovnnb.db" \
     --detach
 
 echo "=== START AZ2 SB DATABASE (port 6642) ==="
+
+sleep 3
+
 ovsdb-tool create "$AZ2_DIR/ovnsb.db" /usr/share/ovn/ovn-sb.ovsschema
 ovsdb-server "$AZ2_DIR/ovnsb.db" \
     --remote="ptcp:6642:127.0.0.1" \
@@ -130,6 +147,9 @@ ovsdb-server "$AZ2_DIR/ovnsb.db" \
 sleep 2
 
 echo "=== START OVN-NORTHD ==="
+
+sleep 3
+
 ovn-northd \
     --ovnnb-db="tcp:127.0.0.1:6641" \
     --ovnsb-db="tcp:127.0.0.1:6642" \
@@ -140,6 +160,9 @@ ovn-northd \
 sleep 1
 
 echo "=== CONFIGURE CHASSIS (AZ2) ==="
+
+sleep 3
+
 sudo ovs-vsctl set open_vswitch . \
     external_ids:system-id="az2-chassis" \
     external_ids:ovn-remote="tcp:127.0.0.1:6642" \
@@ -148,6 +171,9 @@ sudo ovs-vsctl set open_vswitch . \
     external_ids:ovn-is-interconn="true"
 
 echo "=== START OVN-CONTROLLER ==="
+
+sleep 3
+
 sudo ovn-controller \
     --pidfile="$AZ2_DIR/ovn-controller.pid" \
     --log-file="$AZ2_DIR/ovn-controller.log" \
@@ -156,10 +182,16 @@ sudo ovn-controller \
 sleep 2
 
 echo "=== SET AZ NAME IN NB_GLOBAL ==="
+
+sleep 3
+
 # ovn-ic derives the availability zone name from NB_Global.name
 ovn-nbctl --db=tcp:127.0.0.1:6641 set NB_Global . name=az2
 
 echo "=== START OVN-IC (connecting to AZ1 IC databases) ==="
+
+sleep 3
+
 sudo mkdir -p /usr/local/var/run/ovn
 sudo ovn-ic \
     --ic-nb-db="tcp:${AZ1_IP}:6645" \
@@ -173,6 +205,9 @@ sudo ovn-ic \
 sleep 5
 
 echo "=== BUILD OVN TOPOLOGY (AZ2) ==="
+
+sleep 3
+
 NB="ovn-nbctl --db=tcp:127.0.0.1:6641"
 
 # ts in OVN NB is created automatically by ovn-ic when it reads IC-NB
@@ -210,6 +245,8 @@ $NB set logical_router lr-az2 \
 
 echo "=== CREATE VM NAMESPACES (AZ2) ==="
 
+sleep 3
+
 # vm1-az2: 10.0.2.10
 sudo ip netns add vm1-az2
 sudo ip link add veth-vm1-az2 type veth peer name veth-vm1-az2-ns
@@ -235,6 +272,9 @@ sudo ovs-vsctl add-port br-int veth-vm2-az2 \
     -- set interface veth-vm2-az2 external_ids:iface-id=lsp-vm2-az2
 
 echo "=== CONFIGURE UFW (allow AZ1 GENEVE) ==="
+
+sleep 3
+
 sudo ufw allow from "${AZ1_IP}" to any port 6081 proto udp comment "GENEVE from AZ1" 2>/dev/null || true
 
 echo ""
