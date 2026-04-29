@@ -85,15 +85,6 @@ Route propagation between AZs depends on:
 
 The scripts produced are **idempotent** — they perform complete cleanup before each execution — and serve as a reproducible reference for bringing up the environment again, documenting the gotchas that are not evident in the official documentation.
 
-## Project Structure
-
-```
-.
-├── scripts/          # Idempotent setup scripts
-├── docs/            # Technical documentation
-└── README.md        # This file
-```
-
 ## Next Steps
 
 1. Finalize Route record propagation in IC-SB
