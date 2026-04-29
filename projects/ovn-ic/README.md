@@ -1,99 +1,84 @@
-# OVN Interconnect Practical Laboratory
+# OVN Interconnect (OVN-IC) 
 
-A functional OVN Interconnect laboratory to understand, in practice, how OVN federates multiple Availability Zones into a unified logical mesh.
+## What is OVN-IC?
 
-## Overview
+**OVN Interconnect (OVN-IC)** is the OVN component that enables the federation of multiple **Availability Zones (AZs)** — that is, multiple independent OVN installations — into a single, unified logical network. With OVN-IC, VMs and *workloads* hosted in physically and administratively separate OVN deployments can communicate as if they were in the same logical fabric, while each deployment retains autonomy over its own *control plane*.
 
-OVN-IC synchronizes, via two global databases (IC-NB and IC-SB), the transit switches, gateways, and routes between AZs, each of which has its own control plane (ovn-northd, NB DB, SB DB) and local chassis.
+In a single-AZ OVN deployment, the *control plane* is composed of `ovn-northd`, the **Northbound (NB-DB)** and **Southbound (SB-DB)** databases, and `ovn-controller` instances on each *chassis*. OVN-IC introduces two **global** databases on top of this model:
 
-## Project Evolution
+- **IC-NB (Interconnect Northbound):** declares the federation intent — which transit switches exist and which AZs participate.
+- **IC-SB (Interconnect Southbound):** distributes runtime information across AZs — registered *gateways*, advertised routes, etc.
 
-### First Attempt: Single VM with Namespaces
+Each AZ runs an `ovn-ic` *daemon* that synchronizes the local NB/SB with the global IC-NB/IC-SB. Inter-AZ traffic flows through a **transit switch**, a special logical switch that acts as a shared backbone, and is encapsulated over **GENEVE** tunnels established between the *gateway chassis* of each AZ.
 
-The first attempt was made on a single VM, with both AZs simulated entirely using Linux network namespaces — one namespace per AZ running its own ovs-vswitchd and ovn-controller, and other namespaces representing the workloads.
+---
 
-**Advantages:**
-- Quick validation of OVN-IC logical topology
-- Low infrastructure cost
+## Why study OVN-IC?
 
-**Limitations:**
-- Masks critical datapath aspects
-- GENEVE tunnel resolves within the same kernel
-- No real firewall between chassis
-- MTU and encapsulation overhead are not exercised
-- Synchronization bugs between separate instances remain hidden
+### 1. It solves a real problem in multi-site SDN
+Modern cloud infrastructures rarely live inside a single data center or a single failure domain. Operators frequently need to:
+- isolate workloads by region, tenant or compliance domain;
+- keep independent *control planes* for blast-radius reasons;
+- still allow controlled communication between those domains.
 
-### Second Phase: Two Separate VMs
+OVN-IC is a **first-class, native answer** to this need within the OVN ecosystem — there is no need to bolt on external VPNs, BGP overlays or proprietary federation layers.
 
-The second phase migrated to two separate Ubuntu 24.04 VMs:
-- **AZ1:** 172.18.3.181
-- **AZ2:** 172.18.17.9
+### 2. It pushes you deep into OVN internals
+Setting up OVN-IC forces a hands-on understanding of:
+- the relationship between **NB → SB → datapath** in a single AZ;
+- how `ovn-northd`, `ovn-controller` and the **OVSDB** protocol cooperate;
+- how **GENEVE tunnels** are negotiated and which fields the encapsulation actually carries;
+- how *logical routers*, *gateways* and *transit switches* interact;
+- route advertisement / learning semantics (`ic-route-adv`, `ic-route-learn`).
 
-IC-NB/SB hosted on VM1 and accessed remotely via TCP by VM2 — an architecture-wise production-equivalent scenario.
+This makes OVN-IC an **excellent learning vehicle** for SDN as a whole — every layer of OVN is exercised in a single lab.
 
-## Challenges and Solutions
+### 3. The documentation is sparse
+The official documentation covers the conceptual model but glosses over many practical details: AZ naming rules, automatic transit-switch creation, packaging gaps in popular distributions (e.g., the `ovn-central` package on Ubuntu 24.04 does not ship the `ovn-ic` binary or the IC-NB/IC-SB *schemas*). Studying OVN-IC means producing the kind of documentation that the community itself benefits from.
 
-### OVN Packaging
+---
 
-The setup quickly revealed a relevant packaging limitation: the `ovn-central` package on Ubuntu 24.04 does not distribute the `ovn-ic` binary or the IC-NB/IC-SB schemas.
+## Why develop with OVN-IC?
 
-**Solution:** Compile OVN from source code (v24.03.6), pinning OVS to release v3.3.0 to avoid incompatibility with the upstream main branch.
+### Architecturally clean federation
+Unlike approaches that simply stretch a single *control plane* across regions (introducing scale and reliability issues), OVN-IC keeps each AZ **fully independent**: each one has its own NB, SB, `ovn-northd` and *chassis*. The federation layer is additive, not invasive — if IC-NB/IC-SB are unavailable, intra-AZ traffic keeps working.
 
-### Setup on Each VM
+### Predictable and observable
+Because all federation state lives in well-defined OVSDB tables (gateways, routes, transit switches), the system is **introspectable** with the same tooling already used for OVN: `ovn-ic-nbctl`, `ovn-ic-sbctl`, plus the regular `ovn-nbctl` / `ovn-sbctl`. This plays well with observability stacks (e.g., Prometheus *exporters* for OVN-SB events).
 
-On each VM:
-1. Bring up databases: ovsdb-server, ovn-northd, ovn-controller, and ovn-ic
-2. Configure the chassis in Open vSwitch with `ovn-is-interconn=true`
-3. Create the logical topology:
-   - A logical switch for the workloads
-   - A logical router as gateway
-   - Connection of the router to the shared transit switch
-4. Simulate workloads with network namespaces connected to br-int via veth pairs
+### Reproducible labs
+With ` ovn-fake-multinode` for fast iteration and a pair of VMs for production-like validation, it is feasible to build **idempotent setup scripts** that spin up a full multi-AZ OVN-IC environment from scratch. This is a strong base for CI-style regression testing of network changes.
 
-## Critical Technical Learnings
+### Direct path to production
+The lab topology (two AZs, transit switch, *gateway chassis*, GENEVE tunnels) is **architecturally equivalent** to what a production multi-cloud or multi-region deployment looks like. The same scripts and configuration patterns developed in the lab translate directly to environments such as **Stratus/Cirrus** or any Incus-based multi-cloud infrastructure.
 
-### 1. NB_Global.name is Critical
+---
 
-The AZ name that ovn-ic registers in IC-SB comes from the `NB_Global.name` field of the local NB. **Without it, no gateway is registered even with the entire topology configured correctly.**
+## When does OVN-IC make sense?
 
-### 2. Transit Switch Created Automatically
+| Scenario | Fit |
+|----------|-----|
+| Multiple independent clouds/regions that need L2/L3 connectivity between workloads | **Strong** |
+| Compliance/blast-radius isolation with controlled cross-domain traffic | **Strong** |
+| Single-site, single-AZ deployment | Overkill — plain OVN is enough |
+| Federation between OVN and **non-OVN** networks | Use BGP/EVPN instead |
+| Need for *control plane* HA only (not federation) | Use **clustered NB/SB**, not OVN-IC |
 
-The transit switch in the local NB **must not be created manually**. The ovn-ic:
-- Detects the ts declared in IC-NB
-- Creates it automatically in each AZ
-- Applies the `interconn-ts` annotation automatically
-- Attempting to create it manually causes collision
+---
 
-### 3. Route Advertisement at Two Levels
+## Key concepts at a glance
 
-Route propagation between AZs depends on:
-- `ic-route-adv` and `ic-route-learn` on the local logical router
-- `ic-route-adv` and `ic-route-learn` on the IC-NB transit switch
+- **AZ (Availability Zone):** an independent OVN installation, with its own `ovn-northd`, NB-DB, SB-DB and *chassis*.
+- **IC-NB / IC-SB:** global databases that hold the federation state shared between AZs.
+- **Transit switch:** logical switch declared in IC-NB and automatically materialized in each AZ; acts as the inter-AZ backbone.
+- **Gateway chassis:** *chassis* in an AZ designated to terminate GENEVE tunnels coming from other AZs.
+- **`ovn-is-interconn=true`:** OVS flag that marks a *chassis* as eligible to participate in OVN-IC.
+- **`ic-route-adv` / `ic-route-learn`:** options that control which routes are advertised to and learned from other AZs.
 
-## Current Status
+---
 
-✅ **Working:**
-- Gateway registration
-- GENEVE tunnels established between VMs
-- Intra-AZ traffic operational
+## Further reading
 
-🔄 **In Progress:**
-- Route record propagation in IC-SB
-- Unblocking inter-AZ traffic
-
-## Reproducibility
-
-The scripts produced are **idempotent** — they perform complete cleanup before each execution — and serve as a reproducible reference for bringing up the environment again, documenting the gotchas that are not evident in the official documentation.
-
-## Next Steps
-
-1. Finalize Route record propagation in IC-SB
-2. Validate end-to-end inter-AZ traffic
-3. Document final topology with diagrams
-4. Create troubleshooting guide based on errors encountered
-
-## References
-
-- [OVN Interconnect Documentation](https://ovn.org/)
-- OVN v24.03.6 (compiled from source)
-- Open vSwitch v3.3.0
+- [OVN repository](https://github.com/ovn-org/ovn) — source code, *schemas* and reference documentation.
+- [OVN Interconnect documentation](https://docs.ovn.org/en/latest/tutorials/ovn-interconnection.html) — official tutorial (high-level).
+- [ovn-fake-multinode](https://github.com/ovn-org/ovn-fake-multinode) — ideal for iterating quickly on OVN-IC topologies.
