@@ -1,0 +1,223 @@
+#!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+# SPDX-License-Identifier: Apache-2.0
+
+
+set -ex
+
+SHARD=$1
+
+groomTestList() {
+	echo $(echo "${1}" | sed -e '/^\($\|#\)/d' -e 's/ /\\s/g' | tr '\n' '|' | sed -e 's/|$//')
+}
+
+SKIPPED_TESTS="
+# PERFORMANCE, DISRUPTIVE, OR UNRELATED TESTS: NOT WANTED FOR CI
+\[Feature:Networking-Performance\]
+\[Feature:PerformanceDNS\]
+Disruptive
+DisruptionController
+\[sig-apps\] CronJob
+\[sig-storage\]
+
+# FEATURES NOT AVAILABLE IN OUR CI ENVIRONMENT
+\[Feature:Federation\]
+should have ipv4 and ipv6 internal node ip
+# https://github.com/kubernetes/kubernetes/pull/124660#issue-2274259280
+\[Feature:LoadBalancer\]
+
+# TESTS THAT ASSUME KUBE-PROXY
+kube-proxy
+KubeProxy
+
+# NOT IMPLEMENTED; SEE DISCUSSION IN https://github.com/ovn-kubernetes/ovn-kubernetes/pull/1225
+named port.+\[Feature:NetworkPolicy\]
+
+# NOT IMPLEMENTED: Service CIDR is a GA feature in K8s v1.33 which is not yet
+# supported in OVN-K.
+\[sig-network\].+Service CIDRs
+\[sig-network\].+ServiceCIDR
+
+# Clean up SCTP tests https://github.com/kubernetes/kubernetes/issues/96717
+should create a Pod with SCTP HostPort
+
+# https://github.com/ovn-kubernetes/ovn-kubernetes/issues/1907
+service.kubernetes.io/headless
+
+# TO BE FIXED BY https://github.com/kubernetes/kubernetes/pull/95351
+should resolve connection reset issue #74839
+
+# api flakes
+sig-api-machinery
+
+# TODO: Figure out why NoSNAT is failing (https://github.com/ovn-kubernetes/ovn-kubernetes/issues/1316)
+\[Feature:NoSNAT\]
+
+# KIND doesn't support svcType=LB, the externalIP stays in pending state
+LoadBalancers should
+
+# TODO: Figure out why DNS configMap nameserver is failing (https://github.com/ovn-kubernetes/ovn-kubernetes/issues/1316)
+configMap nameserver
+ClusterDns \[Feature:Example\]
+
+# TODO: Figure out why default value on new IngressClass is failing (https://github.com/ovn-kubernetes/ovn-kubernetes/pull/1349#issuecomment-631218507)
+should set default value on new IngressClass
+
+# RACE CONDITION IN TEST, SEE https://github.com/kubernetes/kubernetes/pull/90254
+should prevent Ingress creation if more than 1 IngressClass marked as default
+
+# TODO: Figure out why the below test is failing and if we need to add support in OVN-K for them
+validates that there is no conflict between pods with same hostPort but different hostIP and protocol
+
+# https://issues.redhat.com/browse/OCPBUGS-61380
+should support named targetPorts that resolve to different ports on different endpoints
+
+# https://github.com/ovn-kubernetes/ovn-kubernetes/issues/5119
+\[sig-network\] Services should implement NodePort and HealthCheckNodePort correctly when ExternalTrafficPolicy changes
+
+# Skip Alpha features in general
+\[Feature:Alpha\]
+\[Alpha\]
+
+# Skip Beta features by feature name for visibility
+\[FeatureGate:MultiCIDRServiceAllocator\] \[Beta\]
+
+
+# Skip unsupported GA features by feature name for visibility
+# TODO
+"
+
+IPV4_ONLY_TESTS="
+# Limit the IPv4 related test to IPv4 only deployments
+#  See: https://github.com/leblancd/kube-v6-test
+\[Feature:Networking-IPv4\]
+
+# The following tests currently fail for IPv6 only, but should be passing.
+# They will be removed as they are resolved.
+
+# See: https://github.com/ovn-kubernetes/ovn-kubernetes/issues/1683
+IPBlock.CIDR and IPBlock.Except
+
+# shard-n Tests
+#  See: https://github.com/kubernetes/kubernetes/pull/94136
+Network.+should resolve connection reset issue
+
+# shard-np Tests
+#  See: https://github.com/ovn-kubernetes/ovn-kubernetes/issues/1517
+NetworkPolicy.+should allow egress access to server in CIDR block
+"
+
+SINGLESTACK_IPV4_ONLY_TESTS="
+# See: https://github.com/ovn-kubernetes/ovn-kubernetes/issues/2798
+should provider Internet connection for containers using DNS
+"
+
+IPV6_ONLY_TESTS="
+# Limit the IPv6 related tests to IPv6 only deployments
+#  See: https://github.com/leblancd/kube-v6-test
+\[Feature:Networking-IPv6\]
+"
+
+DUALSTACK_ONLY_TESTS="
+\[Feature:.*DualStack.*\]
+"
+
+DUALSTACK_CONVERSION_TESTS="
+should function for service endpoints using hostNetwork
+"
+
+# Skips when default pod network is advertised through BGP
+RA_SKIPPED_TESTS="
+"
+
+# Github CI doesn´t offer IPv6 connectivity, so always skip IPv6 only tests.
+#  See: https://github.com/ovn-kubernetes/ovn-kubernetes/issues/1522
+SKIPPED_TESTS=$SKIPPED_TESTS$IPV6_ONLY_TESTS
+
+# Either single stack IPV6 or dualstack
+if [ "$PLATFORM_IPV6_SUPPORT" == true ]; then
+  SKIPPED_TESTS=$SKIPPED_TESTS$SINGLESTACK_IPV4_ONLY_TESTS
+fi
+
+# IPv6 Only, skip any IPv4 Only Tests
+if [ "$PLATFORM_IPV4_SUPPORT" == false ] && [ "$PLATFORM_IPV6_SUPPORT" == true ]; then
+	echo "IPv6 Only"
+	SKIPPED_TESTS=$SKIPPED_TESTS$IPV4_ONLY_TESTS
+fi
+
+# If not DualStack, skip DualStack tests
+if [ "$PLATFORM_IPV4_SUPPORT" == false ] || [ "$PLATFORM_IPV6_SUPPORT" == false ]; then
+	SKIPPED_TESTS=$SKIPPED_TESTS$DUALSTACK_ONLY_TESTS
+fi
+
+# If dulastack conversion, skip certain tests due to unknown flakes upstream (FIXME)
+if [ "$DUALSTACK_CONVERSION" == true ]; then
+  SKIPPED_TESTS=$SKIPPED_TESTS$DUALSTACK_CONVERSION_TESTS
+fi
+
+# Skip tests that are unsupported or broken when the default pod network is advertised
+if [ "$ADVERTISE_DEFAULT_NETWORK" == true ]; then
+  SKIPPED_TESTS=$SKIPPED_TESTS$RA_SKIPPED_TESTS
+fi
+
+SKIPPED_TESTS="$(groomTestList "${SKIPPED_TESTS}")"
+
+# if we set PARALLEL=true, skip serial test
+if [ "${PARALLEL:-false}" = "true" ]; then
+  export GINKGO_PARALLEL=y
+  export GINKGO_PARALLEL_NODES=10
+  SKIPPED_TESTS="${SKIPPED_TESTS}|\\[Serial\\]"
+fi
+
+case "$SHARD" in
+	shard-network)
+		FOCUS="\\[sig-network\\]"
+		;;
+	shard-conformance)
+		FOCUS="\\[Conformance\\]|\\[sig-network\\]"
+		;;
+	shard-test)
+		FOCUS=$(echo ${@:2} | sed 's/ /\\s/g')
+		;;
+	*)
+		echo "unknown shard"
+		exit 1
+	;;
+esac
+
+# setting this env prevents ginkgo e2e from trying to run provider setup
+export KUBERNETES_CONFORMANCE_TEST='y'
+# setting these is required to make RuntimeClass tests work ... :/
+export KUBE_CONTAINER_RUNTIME=remote
+export KUBE_CONTAINER_RUNTIME_ENDPOINT=unix:///run/containerd/containerd.sock
+export KUBE_CONTAINER_RUNTIME_NAME=containerd
+# FIXME we should not tolerate flakes
+# but until then, we retry the test in the same job
+# to stop PR retriggers for totally broken code
+export FLAKE_ATTEMPTS=5
+export NUM_NODES=10  # number of parallel (ginkgo) test nodes to run
+# Kind clusters are three node clusters
+export NUM_WORKER_NODES=3
+if [ "$SINGLE_NODE_CLUSTER" == true ]; then
+	export NUM_WORKER_NODES=1
+fi
+
+# Until we know how to make github actions gracefully terminate our tests, this
+# timeout needs to be lower than github's timeout. Otherwise github terminates
+# the job and doesn't give ginkgo a chance to print status so that we know why
+# the timeout happened.
+TEST_TIMEOUT=${TEST_TIMEOUT:-120m}
+
+ginkgo --nodes=${NUM_NODES} \
+	--focus=${FOCUS} \
+	--skip=${SKIPPED_TESTS} \
+	--timeout=${TEST_TIMEOUT} \
+	--flake-attempts=${FLAKE_ATTEMPTS} \
+	/usr/local/bin/e2e.test \
+	-- \
+	--kubeconfig=${HOME}/ovn.conf \
+	--provider=local \
+	--dump-logs-on-failure=false \
+	--report-dir=${E2E_REPORT_DIR}	\
+	--disable-log-dump=true \
+	--num-nodes=${NUM_WORKER_NODES}

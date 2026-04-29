@@ -1,0 +1,93 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
+package util
+
+import (
+	"errors"
+	"fmt"
+	"net"
+	"sync"
+
+	"k8s.io/klog/v2"
+	utilnet "k8s.io/utils/net"
+
+	libovsdbclient "github.com/ovn-kubernetes/libovsdb/client"
+
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	libovsdbops "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/nbdb"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
+)
+
+var updateNodeSwitchLock sync.Mutex
+
+// UpdateNodeSwitchExcludeIPs should be called after adding the management port
+// and after adding the hybrid overlay port, and ensures that each port's IP
+// is added to the logical switch's exclude_ips. This prevents ovn-northd log
+// spam about duplicate IP addresses.
+// See https://github.com/ovn-kubernetes/ovn-kubernetes/pull/779
+func UpdateNodeSwitchExcludeIPs(nbClient libovsdbclient.Client, mgmtIfName, switchName, nodeName string, subnet, mgmtIfAddr *net.IPNet) error {
+	if utilnet.IsIPv6CIDR(subnet) {
+		// We don't exclude any IPs in IPv6
+		return nil
+	}
+
+	updateNodeSwitchLock.Lock()
+	defer updateNodeSwitchLock.Unlock()
+
+	// Only query the cache for mp0 and HO LSPs
+	haveManagementPort := true
+	managmentPort := &nbdb.LogicalSwitchPort{Name: mgmtIfName}
+	_, err := libovsdbops.GetLogicalSwitchPort(nbClient, managmentPort)
+	if errors.Is(err, libovsdbclient.ErrNotFound) {
+		klog.V(5).Infof("Management port does not exist for node %s", nodeName)
+		haveManagementPort = false
+	} else if err != nil {
+		return fmt.Errorf("failed to get management port for node %s error: %v", nodeName, err)
+	}
+
+	haveHybridOverlayPort := true
+	HOPort := &nbdb.LogicalSwitchPort{Name: types.HybridOverlayPrefix + nodeName}
+	_, err = libovsdbops.GetLogicalSwitchPort(nbClient, HOPort)
+	if errors.Is(err, libovsdbclient.ErrNotFound) {
+		klog.V(5).Infof("Hybridoverlay port does not exist for node %s", nodeName)
+		haveHybridOverlayPort = false
+	} else if err != nil {
+		return fmt.Errorf("failed to get hybrid overlay port for node %s error: %v", nodeName, err)
+	}
+
+	hybridOverlayIfAddr := util.GetNodeHybridOverlayIfAddr(subnet)
+
+	klog.V(5).Infof("haveMP %v haveHO %v ManagementPortAddress %v HybridOverlayAddressOA %v", haveManagementPort, haveHybridOverlayPort, mgmtIfAddr, hybridOverlayIfAddr)
+	var excludeIPs string
+	if config.HybridOverlay.Enabled {
+		if haveHybridOverlayPort && haveManagementPort {
+			// no excluded IPs required
+		} else if !haveHybridOverlayPort && !haveManagementPort {
+			// exclude both
+			excludeIPs = mgmtIfAddr.IP.String() + ".." + hybridOverlayIfAddr.IP.String()
+		} else if haveHybridOverlayPort {
+			// exclude management port IP
+			excludeIPs = mgmtIfAddr.IP.String()
+		} else if haveManagementPort {
+			// exclude hybrid overlay port IP
+			excludeIPs = hybridOverlayIfAddr.IP.String()
+		}
+	} else if !haveManagementPort {
+		// exclude management port IP
+		excludeIPs = mgmtIfAddr.IP.String()
+	}
+
+	sw := nbdb.LogicalSwitch{
+		Name:        switchName,
+		OtherConfig: map[string]string{"exclude_ips": excludeIPs},
+	}
+	err = libovsdbops.UpdateLogicalSwitchSetOtherConfig(nbClient, &sw)
+	if err != nil {
+		return fmt.Errorf("failed to update exclude_ips %+v: %v", sw, err)
+	}
+
+	return nil
+}

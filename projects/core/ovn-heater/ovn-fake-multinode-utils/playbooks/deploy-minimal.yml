@@ -1,0 +1,97 @@
+- name: Prepare the setup
+  hosts: all
+  environment:
+    RUNC_CMD: podman
+  tasks:
+  - name: Start openvswitch
+    ansible.builtin.systemd:
+      name: openvswitch
+      state: started
+    when: ansible_os_family == "RedHat"
+
+  - name: Start openvswitch
+    ansible.builtin.systemd:
+      name: openvswitch-switch
+      state: started
+    when: ansible_os_family == "Debian"
+
+  - name: Delete old container volumes
+    shell: |
+      podman volume prune -f
+
+  - name: Stop tester container if running
+    when: ovn_tester is defined
+    ignore_errors: yes
+    shell: |
+      podman rm -f --volumes ovn-tester
+
+  - name: Delete old containers if any
+    shell: |
+      set -e
+      cd {{ ovn_fake_multinode_target_path }}/ovn-fake-multinode
+      export CHASSIS_PREFIX={{ node_name }}
+      export CHASSIS_COUNT=100
+      ./ovn_cluster.sh stop
+      podman system prune -f
+
+  - name: Ensure number of inotify instances for containers
+    shell: |
+      sysctl -w fs.inotify.max_user_instances=2048
+
+  - name: Ensure the number of allowed SSH sessions
+    shell: |
+      sed -i '/^MaxSessions /d' /etc/ssh/sshd_config
+      echo "MaxSessions 1024" >> /etc/ssh/sshd_config
+
+  - name: Reload SSH service
+    ansible.builtin.systemd:
+      name: sshd
+      state: reloaded
+    when: ansible_os_family == "RedHat"
+
+  - name: Reload SSH service
+    ansible.builtin.systemd:
+      name: ssh
+      state: reloaded
+    when: ansible_os_family == "Debian"
+
+  - name: Ensure the neighbor cache size on central nodes
+    when: ovn_central is defined
+    shell: |
+      sysctl -w net.ipv4.neigh.default.gc_thresh1=8192
+      sysctl -w net.ipv4.neigh.default.gc_thresh2=32768
+      sysctl -w net.ipv4.neigh.default.gc_thresh3=65536
+
+  - name: Create ovs bridges for ovn fake multinode
+    shell: |
+      set -e
+      ovs-vsctl --if-exists del-br br-ovn -- --if-exists del-br br-ovn-ext
+      ovs-vsctl add-br br-ovn -- add-br br-ovn-ext
+
+  - name: Add nics to br-ovn if configured
+    when: internal_iface is defined
+    shell: |
+      ovs-vsctl add-port br-ovn {{ internal_iface }}
+
+  - name: Add nics to br-ovn-ext if configured
+    when: external_iface is defined
+    shell: |
+      ovs-vsctl add-port br-ovn-ext {{ external_iface }}
+
+  - name: Deploy stats collection script
+    copy:
+      src: "{{ rundir }}/log-collector.sh"
+      dest: /tmp/log-collector.sh
+      mode: '0744'
+
+  - name: Deploy perf script
+    copy:
+      src: "{{ rundir }}/perf.sh"
+      dest: /tmp/perf.sh
+      mode: '0744'
+
+  - name: Deploy process monitor script
+    copy:
+      src: "{{ rundir }}/process-monitor.py"
+      dest: /tmp/process-monitor.py
+      mode: '0744'

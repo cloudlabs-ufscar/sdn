@@ -1,0 +1,526 @@
+AT_BANNER([ovs-router])
+
+AT_SETUP([appctl - route/add with gateway and pkt_mark])
+AT_KEYWORDS([ovs_router])
+OVS_VSWITCHD_START([add-port br0 p1 -- set Interface p1 type=dummy])
+AT_CHECK([ovs-appctl netdev-dummy/ip4addr br0 2.2.2.2/24], [0], [OK
+])
+AT_CHECK([ovs-appctl ovs/route/add 2.2.2.3/32 br0 pkt_mark=1], [0], [OK
+])
+AT_CHECK([ovs-appctl ovs/route/add 1.1.1.0/24 br0 2.2.2.10], [0], [OK
+])
+AT_CHECK([ovs-appctl ovs/route/add 1.1.2.0/24 br0 2.2.2.10 pkt_mark=2], [0], [OK
+])
+AT_CHECK([ovs-appctl ovs/route/add 1.1.3.0/24 br0 pkt_mark=3], [2], [], [dnl
+Error while inserting route.
+ovs-appctl: ovs-vswitchd: server returned an error
+])
+AT_CHECK([ovs-appctl ovs/route/add 1.1.foo.bar/24 br0 2.2.2.10], [2], [], [dnl
+Invalid 'ip/plen' parameter
+ovs-appctl: ovs-vswitchd: server returned an error
+])
+AT_CHECK([ovs-appctl ovs/route/add 2.2.2.4/24 br0 pkt_mark=baz], [2], [], [dnl
+Invalid pkt_mark, IP gateway or src_ip
+ovs-appctl: ovs-vswitchd: server returned an error
+])
+AT_CHECK([ovs-appctl ovs/route/show | grep User | sort], [0], [dnl
+User: 1.1.1.0/24 dev br0 GW 2.2.2.10 SRC 2.2.2.2
+User: 1.1.2.0/24 MARK 2 dev br0 GW 2.2.2.10 SRC 2.2.2.2
+User: 2.2.2.3/32 MARK 1 dev br0 SRC 2.2.2.2
+])
+AT_CHECK([ovs-appctl --format=json --pretty ovs/route/show], [0], [dnl
+[[
+  {
+    "dst": "2.2.2.2",
+    "local": true,
+    "nexthops": [
+      {
+        "dev": "br0"}],
+    "prefix": 32,
+    "prefsrc": "2.2.2.2",
+    "table": 255,
+    "user": false},
+  {
+    "dst": "2.2.2.3",
+    "local": false,
+    "mark": 1,
+    "nexthops": [
+      {
+        "dev": "br0"}],
+    "prefix": 32,
+    "prefsrc": "2.2.2.2",
+    "table": 254,
+    "user": true},
+  {
+    "dst": "2.2.2.0",
+    "local": false,
+    "nexthops": [
+      {
+        "dev": "br0"}],
+    "prefix": 24,
+    "prefsrc": "2.2.2.2",
+    "table": 254,
+    "user": false},
+  {
+    "dst": "1.1.1.0",
+    "local": false,
+    "nexthops": [
+      {
+        "dev": "br0",
+        "gateway": "2.2.2.10"}],
+    "prefix": 24,
+    "prefsrc": "2.2.2.2",
+    "table": 254,
+    "user": true},
+  {
+    "dst": "1.1.2.0",
+    "local": false,
+    "mark": 2,
+    "nexthops": [
+      {
+        "dev": "br0",
+        "gateway": "2.2.2.10"}],
+    "prefix": 24,
+    "prefsrc": "2.2.2.2",
+    "table": 254,
+    "user": true}]]
+])
+OVS_VSWITCHD_STOP
+AT_CLEANUP
+
+AT_SETUP([appctl - route/add with src - ipv4])
+AT_KEYWORDS([ovs_router])
+OVS_VSWITCHD_START([add-port br0 p1 -- set Interface p1 type=dummy])
+AT_CHECK([ovs-appctl netdev-dummy/ip4addr br0 192.168.9.2/24], [0], [OK
+])
+AT_CHECK([ovs-appctl netdev-dummy/ip4addr br0 192.168.9.3/24], [0], [OK
+])
+AT_CHECK([ovs-appctl ovs/route/add 192.168.9.11/32 br0 src=192.168.9.3], [0], [OK
+])
+AT_CHECK([ovs-appctl ovs/route/add 192.168.10.12/32 br0 192.168.9.1 src=192.168.9.3], [0], [OK
+])
+AT_CHECK([ovs-appctl ovs/route/add 192.168.10.13/32 br0 192.168.9.1 pkt_mark=13 src=192.168.9.3], [0], [OK
+])
+AT_CHECK([ovs-appctl ovs/route/add 192.168.10.14/32 br0 192.168.9.1 pkt_mark=14 src=192.168.9.2], [0], [OK
+])
+AT_CHECK([ovs-appctl ovs/route/add 192.168.10.15/32 br0 192.168.9.1 src=foo.bar.9.200], [2], [], [dnl
+Invalid pkt_mark, IP gateway or src_ip
+ovs-appctl: ovs-vswitchd: server returned an error
+])
+AT_CHECK([ovs-appctl ovs/route/add 192.168.10.16/32 br0 192.168.9.1 src=192.168.9.200], [2], [], [dnl
+Error while inserting route.
+ovs-appctl: ovs-vswitchd: server returned an error
+])
+AT_CHECK([ovs-appctl ovs/route/add 192.168.10.17/32 br0 192.168.11.1 src=192.168.9.3], [2], [], [dnl
+Error while inserting route.
+ovs-appctl: ovs-vswitchd: server returned an error
+])
+AT_CHECK([ovs-appctl ovs/route/add 192.168.10.18/32 br0 src=192.168.9.3], [2], [], [dnl
+Error while inserting route.
+ovs-appctl: ovs-vswitchd: server returned an error
+])
+AT_CHECK([ovs-appctl ovs/route/show | grep User | grep 192.168.10 | sort], [0], [dnl
+User: 192.168.10.12/32 dev br0 GW 192.168.9.1 SRC 192.168.9.3
+User: 192.168.10.13/32 MARK 13 dev br0 GW 192.168.9.1 SRC 192.168.9.3
+User: 192.168.10.14/32 MARK 14 dev br0 GW 192.168.9.1 SRC 192.168.9.2
+])
+OVS_VSWITCHD_STOP
+AT_CLEANUP
+
+AT_SETUP([appctl - route/add with src - ipv6])
+AT_KEYWORDS([ovs_router])
+OVS_VSWITCHD_START([add-port br0 p1 -- set Interface p1 type=dummy])
+AT_CHECK([ovs-appctl netdev-dummy/ip6addr br0 2001:db8:cafe::2/64], [0], [OK
+])
+AT_CHECK([ovs-appctl netdev-dummy/ip6addr br0 2001:db8:cafe::3/64], [0], [OK
+])
+AT_CHECK([ovs-appctl ovs/route/add 2001:db8:cafe::11/128 br0 src=2001:db8:cafe::3], [0], [OK
+])
+AT_CHECK([ovs-appctl ovs/route/add 2001:db8:beef::12/128 br0 2001:db8:cafe::1 src=2001:db8:cafe::3], [0], [OK
+])
+AT_CHECK([ovs-appctl ovs/route/add 2001:db8:beef::13/128 br0 2001:db8:cafe::1 pkt_mark=13 src=2001:db8:cafe::3], [0], [OK
+])
+AT_CHECK([ovs-appctl ovs/route/add 2001:db8:beef::14/128 br0 2001:db8:cafe::1 pkt_mark=14 src=2001:db8:cafe::2], [0], [OK
+])
+AT_CHECK([ovs-appctl ovs/route/add 2001:db8:beef::15/128 br0 2001:db8:cafe::1 src=foo:bar:2001:db8:cafe], [2], [], [dnl
+Invalid pkt_mark, IP gateway or src_ip
+ovs-appctl: ovs-vswitchd: server returned an error
+])
+AT_CHECK([ovs-appctl ovs/route/add 2001:db8:beef::16/128 br0 2001:db8:cafe::1 src=2001:db8:cafe::200], [2], [], [dnl
+Error while inserting route.
+ovs-appctl: ovs-vswitchd: server returned an error
+])
+AT_CHECK([ovs-appctl ovs/route/add 2001:db8:beef::17/128 br0 2001:db8:face::1 src=2001:db8:cafe::3], [2], [], [dnl
+Error while inserting route.
+ovs-appctl: ovs-vswitchd: server returned an error
+])
+AT_CHECK([ovs-appctl ovs/route/add 2001:db8:beef::18/128 br0 src=2001:db8:cafe::3], [2], [], [dnl
+Error while inserting route.
+ovs-appctl: ovs-vswitchd: server returned an error
+])
+AT_CHECK([ovs-appctl ovs/route/show | grep User | grep 2001:db8:beef | sort], [0], [dnl
+User: 2001:db8:beef::12/128 dev br0 GW 2001:db8:cafe::1 SRC 2001:db8:cafe::3
+User: 2001:db8:beef::13/128 MARK 13 dev br0 GW 2001:db8:cafe::1 SRC 2001:db8:cafe::3
+User: 2001:db8:beef::14/128 MARK 14 dev br0 GW 2001:db8:cafe::1 SRC 2001:db8:cafe::2
+])
+OVS_VSWITCHD_STOP
+AT_CLEANUP
+
+AT_SETUP([appctl - route/lookup])
+AT_KEYWORDS([ovs_router])
+OVS_VSWITCHD_START([add-port br0 p1 -- set Interface p1 type=dummy])
+AT_CHECK([ovs-appctl netdev-dummy/ip4addr br0 192.0.2.1/24], [0], [OK
+])
+AT_CHECK([ovs-appctl ovs/route/add 198.51.100.0/24 br0 192.0.2.254], [0], [OK
+])
+AT_CHECK([ovs-appctl ovs/route/add 192.0.2.1/24 br0 pkt_mark=123], [0], [OK
+])
+
+AT_CHECK([ovs-appctl ovs/route/add 198.51.100.200/24 br0 192.0.2.250 pkt_mark=1234], [0], [OK
+])
+
+AT_CHECK([ovs-appctl ovs/route/show | grep User | sort], [0], [User: 192.0.2.0/24 MARK 123 dev br0 SRC 192.0.2.1
+User: 198.51.100.0/24 MARK 1234 dev br0 GW 192.0.2.250 SRC 192.0.2.1
+User: 198.51.100.0/24 dev br0 GW 192.0.2.254 SRC 192.0.2.1
+])
+
+AT_CHECK([ovs-appctl ovs/route/lookup 198.51.100.1], [0], [src 192.0.2.1
+gateway 192.0.2.254
+dev br0
+])
+
+AT_CHECK([ovs-appctl ovs/route/lookup 198.51.100.1 pkt_mark=1234], [0], [src 192.0.2.1
+gateway 192.0.2.250
+dev br0
+])
+AT_CHECK([ovs-appctl ovs/route/del 198.51.100.0/24 pkt_mark=1234], [0], [OK
+])
+AT_CHECK([ovs-appctl ovs/route/show | grep User | sort], [0], [User: 192.0.2.0/24 MARK 123 dev br0 SRC 192.0.2.1
+User: 198.51.100.0/24 dev br0 GW 192.0.2.254 SRC 192.0.2.1
+])
+
+OVS_VSWITCHD_STOP
+AT_CLEANUP
+
+AT_SETUP([appctl - route/lookup6])
+AT_KEYWORDS([ovs_router])
+OVS_VSWITCHD_START([add-port br0 p1 -- set Interface p1 type=dummy])
+AT_CHECK([ovs-appctl netdev-dummy/ip6addr br0 2001:db8:cafe::1/64], [0], [OK
+])
+AT_CHECK([ovs-appctl ovs/route/add 2001:db8:babe::/64 br0 2001:db8:cafe::2], [0], [OK
+])
+AT_CHECK([ovs-appctl ovs/route/add 2001:db8:babe::/64 br0 2001:db8:cafe::3 pkt_mark=321], [0], [OK
+])
+
+AT_CHECK([ovs-appctl ovs/route/show | grep User | sort], [0], [dnl
+User: 2001:db8:babe::/64 MARK 321 dev br0 GW 2001:db8:cafe::3 SRC 2001:db8:cafe::1
+User: 2001:db8:babe::/64 dev br0 GW 2001:db8:cafe::2 SRC 2001:db8:cafe::1
+])
+
+AT_CHECK([ovs-appctl ovs/route/lookup 2001:db8:babe::1eaf], [0], [src 2001:db8:cafe::1
+gateway 2001:db8:cafe::2
+dev br0
+])
+
+AT_CHECK([ovs-appctl ovs/route/lookup 2001:db8:babe::1eaf pkt_mark=321], [0], [src 2001:db8:cafe::1
+gateway 2001:db8:cafe::3
+dev br0
+])
+
+AT_CHECK([ovs-appctl ovs/route/del 2001:db8:babe::/64 pkt_mark=321], [0], [OK
+])
+AT_CHECK([ovs-appctl ovs/route/show | grep User | sort], [0], [dnl
+User: 2001:db8:babe::/64 dev br0 GW 2001:db8:cafe::2 SRC 2001:db8:cafe::1
+])
+
+OVS_VSWITCHD_STOP
+AT_CLEANUP
+
+AT_SETUP([appctl - route/rule/show])
+AT_KEYWORDS([ovs_router])
+OVS_VSWITCHD_START([add-port br0 p1 -- set Interface p1 type=dummy])
+AT_CHECK([ovs-appctl netdev-dummy/ip4addr br0 192.0.2.1/24], [0], [OK
+])
+
+dnl Check standard rules exist.
+AT_CHECK([ovs-appctl ovs/route/rule/show], [0], [dnl
+Cached: 0: from all lookup local
+Cached: 32766: from all lookup main
+Cached: 32767: from all lookup default
+])
+AT_CHECK([ovs-appctl ovs/route/rule/show -6], [0], [dnl
+Cached: 0: from all lookup local
+Cached: 32766: from all lookup main
+])
+
+dnl Check JSON output for standard rules.
+AT_CHECK([ovs-appctl --format=json --pretty ovs/route/rule/show], [0], [dnl
+[[
+  {
+    "from": "all",
+    "invert": false,
+    "ipv4": true,
+    "lookup": 255,
+    "priority": 0,
+    "src-prefix": 0,
+    "user": false},
+  {
+    "from": "all",
+    "invert": false,
+    "ipv4": true,
+    "lookup": 254,
+    "priority": 32766,
+    "src-prefix": 0,
+    "user": false},
+  {
+    "from": "all",
+    "invert": false,
+    "ipv4": true,
+    "lookup": 253,
+    "priority": 32767,
+    "src-prefix": 0,
+    "user": false}]]
+])
+AT_CHECK([ovs-appctl --format=json --pretty ovs/route/rule/show -6], [0], [dnl
+[[
+  {
+    "from": "all",
+    "invert": false,
+    "ipv4": false,
+    "lookup": 255,
+    "priority": 0,
+    "src-prefix": 0,
+    "user": false},
+  {
+    "from": "all",
+    "invert": false,
+    "ipv4": false,
+    "lookup": 254,
+    "priority": 32766,
+    "src-prefix": 0,
+    "user": false}]]
+])
+
+OVS_VSWITCHD_STOP
+AT_CLEANUP
+
+AT_SETUP([appctl - route/rule/{add,del}])
+AT_KEYWORDS([ovs_router])
+OVS_VSWITCHD_START([add-port br0 p1 -- set Interface p1 type=dummy])
+AT_CHECK([ovs-appctl netdev-dummy/ip4addr br0 192.0.2.1/24], [0], [OK
+])
+
+AT_CHECK([ovs-appctl ovs/route/add 10.1.1.0/24 br0 192.0.2.2 table=11], [0], [OK
+])
+AT_CHECK([ovs-appctl ovs/route/add 10.2.2.0/24 br0 192.0.2.2 table=12], [0], [OK
+])
+AT_CHECK([ovs-appctl ovs/route/show table=all | sort], [0], [dnl
+Cached: 192.0.2.0/24 dev br0 SRC 192.0.2.1
+Cached: 192.0.2.1/32 dev br0 SRC 192.0.2.1 local
+User: 10.1.1.0/24 dev br0 GW 192.0.2.2 SRC 192.0.2.1 table 11
+User: 10.2.2.0/24 dev br0 GW 192.0.2.2 SRC 192.0.2.1 table 12
+])
+
+AT_CHECK([ovs-appctl ovs/route/rule/add from=192.0.2.10/32 table=11], [0], [OK
+])
+AT_CHECK([ovs-appctl ovs/route/rule/add from=192.0.2.20/32 table=12], [0], [OK
+])
+AT_CHECK([ovs-appctl ovs/route/rule/show], [0], [dnl
+Cached: 0: from all lookup local
+User: 32764: from 192.0.2.20 lookup 12
+User: 32765: from 192.0.2.10 lookup 11
+Cached: 32766: from all lookup main
+Cached: 32767: from all lookup default
+])
+
+AT_CHECK([ovs-appctl ovs/route/rule/add from=192.0.2.10/32 table=11], [0], [OK
+])
+AT_CHECK([ovs-appctl ovs/route/rule/add from=192.0.2.10/32 table=11], [0], [OK
+])
+AT_CHECK([ovs-appctl ovs/route/rule/show], [0], [dnl
+Cached: 0: from all lookup local
+User: 32762: from 192.0.2.10 lookup 11
+User: 32763: from 192.0.2.10 lookup 11
+User: 32764: from 192.0.2.20 lookup 12
+User: 32765: from 192.0.2.10 lookup 11
+Cached: 32766: from all lookup main
+Cached: 32767: from all lookup default
+])
+
+AT_CHECK([ovs-appctl ovs/route/rule/del from=192.0.2.10/32 table=11], [0], [OK
+])
+AT_CHECK([ovs-appctl ovs/route/rule/show], [0], [dnl
+Cached: 0: from all lookup local
+User: 32763: from 192.0.2.10 lookup 11
+User: 32764: from 192.0.2.20 lookup 12
+User: 32765: from 192.0.2.10 lookup 11
+Cached: 32766: from all lookup main
+Cached: 32767: from all lookup default
+])
+
+AT_CHECK([ovs-appctl ovs/route/rule/del from=192.0.2.10/32 prio=32765 table=11], [0], [OK
+])
+AT_CHECK([ovs-appctl ovs/route/rule/show], [0], [dnl
+Cached: 0: from all lookup local
+User: 32763: from 192.0.2.10 lookup 11
+User: 32764: from 192.0.2.20 lookup 12
+Cached: 32766: from all lookup main
+Cached: 32767: from all lookup default
+])
+
+OVS_VSWITCHD_STOP
+AT_CLEANUP
+
+AT_SETUP([appctl - route/rule cleanup])
+AT_KEYWORDS([ovs_router])
+OVS_VSWITCHD_START([add-port br0 p1 -- set Interface p1 type=dummy])
+AT_CHECK([ovs-appctl netdev-dummy/ip4addr br0 192.0.2.1/24], [0], [OK
+])
+
+AT_CHECK([for i in `seq 1 100`; do ovs-appctl ovs/route/add 10.1.$i.0/24 br0 192.0.2.2 table=11 ; done >/dev/null])
+AT_CHECK([test `ovs-appctl ovs/route/show table=11 | grep '^User:' | wc -l` -eq 100])
+AT_CHECK([for i in `seq 1 50`; do ovs-appctl ovs/route/del 10.1.$i.0/24 table=11 ; done >/dev/null])
+AT_CHECK([test `ovs-appctl ovs/route/show table=11 | grep '^User:' | wc -l` -eq 50])
+
+OVS_VSWITCHD_STOP
+AT_CLEANUP
+
+AT_SETUP([appctl - route/rule lookup])
+AT_KEYWORDS([ovs_router])
+OVS_VSWITCHD_START([add-port br0 p1 -- set Interface p1 type=dummy])
+AT_CHECK([ovs-vsctl add-port br0 p2 -- set Interface p2 type=dummy])
+AT_CHECK([ovs-appctl netdev-dummy/ip4addr p1 10.0.0.11/24], [0], [OK
+])
+AT_CHECK([ovs-appctl netdev-dummy/ip6addr p1 2001:db8:cafe::11/64], [0], [OK
+])
+AT_CHECK([ovs-appctl netdev-dummy/ip4addr p2 10.0.0.22/24], [0], [OK
+])
+AT_CHECK([ovs-appctl netdev-dummy/ip6addr p2 2001:db8:cafe::22/64], [0], [OK
+])
+
+AT_CHECK([ovs-appctl ovs/route/add 10.0.0.0/24 p1 10.0.0.1 table=11], [0], [OK
+])
+AT_CHECK([ovs-appctl ovs/route/add ::/0 p1 2001:db8:cafe::1 table=11], [0], [OK
+])
+
+AT_CHECK([ovs-appctl ovs/route/show table=all | sort], [0], [dnl
+Cached: 10.0.0.0/24 dev p2 SRC 10.0.0.22
+Cached: 10.0.0.11/32 dev p1 SRC 10.0.0.11 local
+Cached: 10.0.0.22/32 dev p2 SRC 10.0.0.22 local
+Cached: 2001:db8:cafe::/64 dev p2 SRC 2001:db8:cafe::22
+Cached: 2001:db8:cafe::11/128 dev p1 SRC 2001:db8:cafe::11 local
+Cached: 2001:db8:cafe::22/128 dev p2 SRC 2001:db8:cafe::22 local
+User: 10.0.0.0/24 dev p1 GW 10.0.0.1 SRC 10.0.0.11 table 11
+User: ::/0 dev p1 GW 2001:db8:cafe::1 SRC 2001:db8:cafe::11 table 11
+])
+
+dnl Check that table 11 is ignored when no routing rule references it.
+AT_CHECK([ovs-appctl ovs/route/lookup 10.0.0.100], [0], [dnl
+src 10.0.0.22
+gateway ::
+dev p2
+])
+AT_CHECK([ovs-appctl ovs/route/lookup 10.0.0.100 src=10.0.0.11], [0], [dnl
+src 10.0.0.11
+gateway ::
+dev p2
+])
+
+dnl Check that IPv4 route in table 11 is matched and the default IPv6 route
+dnl in table 11 doesn't swallow other IPv4 traffic.
+AT_CHECK([ovs-appctl ovs/route/rule/add from=10.0.0.11/32 table=11], [0], [OK
+])
+AT_CHECK([ovs-appctl ovs/route/rule/show], [0], [dnl
+Cached: 0: from all lookup local
+User: 32765: from 10.0.0.11 lookup 11
+Cached: 32766: from all lookup main
+Cached: 32767: from all lookup default
+])
+AT_CHECK([ovs-appctl ovs/route/lookup 10.0.0.100 src=10.0.0.11], [0], [dnl
+src 10.0.0.11
+gateway 10.0.0.1
+dev p1
+])
+AT_CHECK([ovs-appctl ovs/route/lookup 20.0.0.100 src=10.0.0.11], [2], [], [dnl
+Not found
+ovs-appctl: ovs-vswitchd: server returned an error
+])
+
+dnl Check that IPv6 'from all' routing rule matches only IPv6 traffic and that
+dnl IPv4 route in table 11 still correctly matches IPv4 traffic.
+AT_CHECK([ovs-appctl ovs/route/add 0.0.0.0/0 p1 10.0.0.10 table=10], [0], [OK
+])
+AT_CHECK([ovs-appctl ovs/route/add ::/0 p1 2001:db8:cafe::10 table=10], [0], [OK
+])
+AT_CHECK([ovs-appctl ovs/route/show table=all | sort], [0], [dnl
+Cached: 10.0.0.0/24 dev p2 SRC 10.0.0.22
+Cached: 10.0.0.11/32 dev p1 SRC 10.0.0.11 local
+Cached: 10.0.0.22/32 dev p2 SRC 10.0.0.22 local
+Cached: 2001:db8:cafe::/64 dev p2 SRC 2001:db8:cafe::22
+Cached: 2001:db8:cafe::11/128 dev p1 SRC 2001:db8:cafe::11 local
+Cached: 2001:db8:cafe::22/128 dev p2 SRC 2001:db8:cafe::22 local
+User: 0.0.0.0/0 dev p1 GW 10.0.0.10 SRC 10.0.0.11 table 10
+User: 10.0.0.0/24 dev p1 GW 10.0.0.1 SRC 10.0.0.11 table 11
+User: ::/0 dev p1 GW 2001:db8:cafe::1 SRC 2001:db8:cafe::11 table 11
+User: ::/0 dev p1 GW 2001:db8:cafe::10 SRC 2001:db8:cafe::11 table 10
+])
+AT_CHECK([ovs-appctl ovs/route/rule/add -6 from=all table=10], [0], [OK
+])
+AT_CHECK([ovs-appctl ovs/route/rule/show], [0], [dnl
+Cached: 0: from all lookup local
+User: 32765: from 10.0.0.11 lookup 11
+Cached: 32766: from all lookup main
+Cached: 32767: from all lookup default
+])
+AT_CHECK([ovs-appctl ovs/route/rule/show -6], [0], [dnl
+Cached: 0: from all lookup local
+User: 32764: from all lookup 10
+Cached: 32766: from all lookup main
+])
+AT_CHECK([ovs-appctl ovs/route/lookup 2004::44 src=2001:db8:cafe::22], [0], [dnl
+src 2001:db8:cafe::22
+gateway 2001:db8:cafe::10
+dev p1
+])
+AT_CHECK([ovs-appctl ovs/route/lookup 10.0.0.100 src=10.0.0.11], [0], [dnl
+src 10.0.0.11
+gateway 10.0.0.1
+dev p1
+])
+
+dnl Check that a negated IPv6 routing rule matches only IPv6 traffic and
+dnl correspondingly a negated IPv4 rule only matches IPv4 traffic.
+AT_CHECK([ovs-appctl ovs/route/add ::/0 p1 2001:db8:cafe::44 table=4], [0], [OK
+])
+AT_CHECK([ovs-appctl ovs/route/add 0.0.0.0/0 p1 10.0.0.66 table=6], [0], [OK
+])
+AT_CHECK([ovs-appctl ovs/route/rule/add -6 not from=2001:db8:cafe::100 table=6], [0], [OK
+])
+AT_CHECK([ovs-appctl ovs/route/rule/add not from=10.0.0.100 table=4], [0], [OK
+])
+AT_CHECK([ovs-appctl ovs/route/rule/show], [0], [dnl
+Cached: 0: from all lookup local
+User: 32762: not from 10.0.0.100 lookup 4
+User: 32765: from 10.0.0.11 lookup 11
+Cached: 32766: from all lookup main
+Cached: 32767: from all lookup default
+])
+AT_CHECK([ovs-appctl ovs/route/rule/show -6], [0], [dnl
+Cached: 0: from all lookup local
+User: 32763: not from 2001:db8:cafe::100 lookup 6
+User: 32764: from all lookup 10
+Cached: 32766: from all lookup main
+])
+AT_CHECK([ovs-appctl ovs/route/lookup 2004::44 src=2001:db8:cafe::22], [0], [dnl
+src 2001:db8:cafe::22
+gateway 2001:db8:cafe::10
+dev p1
+])
+AT_CHECK([ovs-appctl ovs/route/lookup 10.0.0.100 src=10.0.0.11], [0], [dnl
+src 10.0.0.11
+gateway 10.0.0.1
+dev p1
+])
+
+OVS_VSWITCHD_STOP
+AT_CLEANUP

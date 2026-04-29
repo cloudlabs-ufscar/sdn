@@ -1,0 +1,676 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
+package node
+
+import (
+	"context"
+	"fmt"
+	"net"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/containernetworking/plugins/pkg/ns"
+	"github.com/containernetworking/plugins/pkg/testutils"
+	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/fake"
+
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/factory"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/kube"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/node/bridgeconfig"
+	nodenft "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/node/nftables"
+	ovntest "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing"
+	mgmtportmock "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing/mocks/github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/node/managementport"
+	netlink_mocks "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing/mocks/github.com/vishvananda/netlink"
+	ovntypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
+	utilMocks "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util/mocks"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+)
+
+func ipEvent(ipStr string, isAdd bool, addrChan chan netlink.AddrUpdate) *net.IPNet {
+	ipNet := ovntest.MustParseIPNet(ipStr)
+	addrChan <- netlink.AddrUpdate{
+		LinkAddress: *ipNet,
+		NewAddr:     isAdd,
+	}
+	return ipNet
+}
+
+func nodeHasAddress(fakeClient kubernetes.Interface, nodeName string, ipNet *net.IPNet) bool {
+	node, err := fakeClient.CoreV1().Nodes().Get(context.TODO(), nodeName, metav1.GetOptions{})
+	Expect(err).NotTo(HaveOccurred())
+	addrs, err := util.ParseNodeHostCIDRsDropNetMask(node)
+	Expect(err).NotTo(HaveOccurred())
+	return addrs.Has(ipNet.IP.String())
+}
+
+type testCtx struct {
+	ns           ns.NetNS
+	ipManager    *addressManager
+	watchFactory factory.NodeWatchFactory
+	fakeClient   kubernetes.Interface
+	doneWg       *sync.WaitGroup
+	stopCh       chan struct{}
+	addrChan     chan netlink.AddrUpdate
+	mgmtPortIP4  *net.IPNet
+	mgmtPortIP6  *net.IPNet
+	subscribed   uint32
+}
+
+var _ = Describe("Node IP Handler event tests", func() {
+	// To ensure that variables don't leak between parallel Ginkgo specs,
+	// put all test context into a single struct and reference it via
+	// a pointer. The pointer will be different for each spec.
+	var tc *testCtx
+
+	const (
+		nodeName  string = "node1"
+		nodeAddr4 string = "10.1.1.10/24"
+		nodeAddr6 string = "2001:db8::10/64"
+	)
+
+	BeforeEach(func() {
+		// Restore global default values before each testcase
+		Expect(config.PrepareTestConfig()).To(Succeed())
+		fexec := ovntest.NewFakeExec()
+		fexec.AddFakeCmd(&ovntest.ExpectedCmd{
+			Cmd:    "ovs-vsctl --timeout=15 get Open_vSwitch . external_ids:ovn-encap-ip",
+			Output: "10.1.1.10",
+		})
+		Expect(util.SetExec(fexec)).ShouldNot(HaveOccurred())
+		useNetlink := false
+		tc = configureKubeOVNContext(nodeName, useNetlink)
+		// We need to wait until the ipManager's goroutine runs the subscribe
+		// function at least once. We can't use a WaitGroup because we have
+		// no way to Add(1) to it, and WaitGroups must have matched Add/Done
+		// calls.
+		subscribe := func() (bool, chan netlink.AddrUpdate, error) {
+			defer atomic.StoreUint32(&tc.subscribed, 1)
+			tc.addrChan = make(chan netlink.AddrUpdate)
+			tc.ipManager.sync()
+			return true, tc.addrChan, nil
+		}
+		tc.doneWg.Add(1)
+		go func() {
+			tc.ipManager.runInternal(tc.stopCh, subscribe)
+			tc.doneWg.Done()
+		}()
+		Eventually(func() bool {
+			return atomic.LoadUint32(&tc.subscribed) == 1
+		}, 5).Should(BeTrue())
+	})
+
+	AfterEach(func() {
+		close(tc.stopCh)
+		tc.doneWg.Wait()
+		tc.watchFactory.Shutdown()
+		close(tc.addrChan)
+		util.ResetRunner()
+	})
+
+	Describe("Changing node addresses", func() {
+		Context("by adding and deleting a valid IP", func() {
+			It("should update node annotations", func() {
+				for _, addr := range []string{nodeAddr4, nodeAddr6} {
+					ipNet := ipEvent(addr, true, tc.addrChan)
+					Eventually(func() bool {
+						return nodeHasAddress(tc.fakeClient, nodeName, ipNet)
+					}, 5).Should(BeTrue())
+
+					ipNet = ipEvent(addr, false, tc.addrChan)
+					Eventually(func() bool {
+						return nodeHasAddress(tc.fakeClient, nodeName, ipNet)
+					}, 5).Should(BeFalse())
+				}
+			})
+		})
+
+		Context("by adding and deleting an invalid IP", func() {
+			It("should not update node annotations", func() {
+				for _, addr := range []string{tc.mgmtPortIP4.String(), tc.mgmtPortIP6.String(), config.Gateway.MasqueradeIPs.V4HostMasqueradeIP.String() + "/29", config.Gateway.MasqueradeIPs.V6HostMasqueradeIP.String() + "/125"} {
+					ipNet := ipEvent(addr, true, tc.addrChan)
+					Consistently(func() bool {
+						return nodeHasAddress(tc.fakeClient, nodeName, ipNet)
+					}, 3).Should(BeFalse())
+
+					ipNet = ipEvent(addr, false, tc.addrChan)
+					Consistently(func() bool {
+						return nodeHasAddress(tc.fakeClient, nodeName, ipNet)
+					}, 3).Should(BeFalse())
+				}
+			})
+		})
+
+		Context("by adding and removing a masquerade IP", func() {
+			It("should trigger OnMasqueradeIPChanged callback", func() {
+				var masqueradeCallCount atomic.Int32
+				tc.ipManager.OnMasqueradeIPChanged = func() {
+					masqueradeCallCount.Add(1)
+				}
+
+				masqAddr := config.Gateway.MasqueradeIPs.V4HostMasqueradeIP.String() + "/29"
+				ipEvent(masqAddr, true, tc.addrChan)
+				Eventually(func() int32 {
+					return masqueradeCallCount.Load()
+				}, 5).Should(Equal(int32(1)))
+
+				ipEvent(masqAddr, false, tc.addrChan)
+				Eventually(func() int32 {
+					return masqueradeCallCount.Load()
+				}, 5).Should(Equal(int32(2)))
+			})
+
+			It("should not update node annotations for masquerade IPs", func() {
+				masqAddr := config.Gateway.MasqueradeIPs.V4HostMasqueradeIP.String() + "/29"
+				ipNet := ipEvent(masqAddr, true, tc.addrChan)
+				Consistently(func() bool {
+					return nodeHasAddress(tc.fakeClient, nodeName, ipNet)
+				}, 3).Should(BeFalse())
+			})
+		})
+
+		Context("when receiving an event with nil IP", func() {
+			It("should not panic and should not trigger masquerade or address change callbacks", func() {
+				var changedCount atomic.Int32
+				var masqueradeCount atomic.Int32
+				tc.ipManager.AddOnAddressesChangedHandler(func() {
+					changedCount.Add(1)
+				})
+				tc.ipManager.OnMasqueradeIPChanged = func() {
+					masqueradeCount.Add(1)
+				}
+
+				tc.addrChan <- netlink.AddrUpdate{
+					LinkAddress: net.IPNet{},
+					NewAddr:     true,
+				}
+
+				Consistently(func() int32 {
+					return changedCount.Load() + masqueradeCount.Load()
+				}, 3).Should(Equal(int32(0)))
+
+				// Confirm normal events still work after nil IP event
+				ipNet := ipEvent(nodeAddr4, true, tc.addrChan)
+				Eventually(func() bool {
+					return nodeHasAddress(tc.fakeClient, nodeName, ipNet)
+				}, 5).Should(BeTrue())
+			})
+		})
+	})
+
+	Describe("Subscription errors", func() {
+		It("should resubscribe and continue processing address events", func() {
+			// Reset our subscription tracker, close the channel to force
+			// the ipManager to resubscribe, and wait until it does
+			atomic.StoreUint32(&tc.subscribed, 0)
+			close(tc.addrChan)
+			Eventually(func() bool {
+				return atomic.LoadUint32(&tc.subscribed) == 1
+			}, 5).Should(BeTrue())
+
+			ipNet := ipEvent(nodeAddr4, true, tc.addrChan)
+			Eventually(func() bool {
+				return nodeHasAddress(tc.fakeClient, nodeName, ipNet)
+			}, 5).Should(BeTrue())
+
+			ipNet = ipEvent(nodeAddr6, false, tc.addrChan)
+			Eventually(func() bool {
+				return nodeHasAddress(tc.fakeClient, nodeName, ipNet)
+			}, 5).Should(BeFalse())
+		})
+	})
+})
+
+var _ = Describe("Node IP Handler DPUHost event filtering", func() {
+	var tc *testCtx
+
+	const (
+		nodeName     = "node1"
+		gwIfIndex    = 42
+		otherIfIndex = 99
+		someAddr     = "192.168.1.50/24"
+	)
+
+	BeforeEach(func() {
+		Expect(config.PrepareTestConfig()).To(Succeed())
+		config.OvnKubeNode.Mode = ovntypes.NodeModeDPUHost
+		fexec := ovntest.NewFakeExec()
+		fexec.AddFakeCmd(&ovntest.ExpectedCmd{
+			Cmd:    "ovs-vsctl --timeout=15 get Open_vSwitch . external_ids:ovn-encap-ip",
+			Output: "10.1.1.10",
+		})
+		Expect(util.SetExec(fexec)).ShouldNot(HaveOccurred())
+		tc = configureKubeOVNContext(nodeName, false)
+		tc.ipManager.gatewayIfIndex = gwIfIndex
+
+		subscribe := func() (bool, chan netlink.AddrUpdate, error) {
+			defer atomic.StoreUint32(&tc.subscribed, 1)
+			tc.addrChan = make(chan netlink.AddrUpdate)
+			return true, tc.addrChan, nil
+		}
+		tc.doneWg.Add(1)
+		go func() {
+			tc.ipManager.runInternal(tc.stopCh, subscribe)
+			tc.doneWg.Done()
+		}()
+		Eventually(func() bool {
+			return atomic.LoadUint32(&tc.subscribed) == 1
+		}, 5).Should(BeTrue())
+	})
+
+	AfterEach(func() {
+		close(tc.stopCh)
+		tc.doneWg.Wait()
+		tc.watchFactory.Shutdown()
+		close(tc.addrChan)
+		util.ResetRunner()
+	})
+
+	It("triggers masquerade reconciliation for events on the gateway interface", func() {
+		var masqueradeCount atomic.Int32
+		tc.ipManager.OnMasqueradeIPChanged = func() {
+			masqueradeCount.Add(1)
+		}
+
+		tc.addrChan <- netlink.AddrUpdate{
+			LinkAddress: *ovntest.MustParseIPNet(someAddr),
+			LinkIndex:   gwIfIndex,
+			NewAddr:     true,
+		}
+		Eventually(func() int32 {
+			return masqueradeCount.Load()
+		}, 5).Should(Equal(int32(1)))
+	})
+
+	It("does not trigger masquerade reconciliation for events on other interfaces", func() {
+		var masqueradeCount atomic.Int32
+		tc.ipManager.OnMasqueradeIPChanged = func() {
+			masqueradeCount.Add(1)
+		}
+
+		tc.addrChan <- netlink.AddrUpdate{
+			LinkAddress: *ovntest.MustParseIPNet(someAddr),
+			LinkIndex:   otherIfIndex,
+			NewAddr:     true,
+		}
+		Consistently(func() int32 {
+			return masqueradeCount.Load()
+		}, 3).Should(Equal(int32(0)))
+	})
+
+	It("does not trigger masquerade reconciliation when gateway index is unresolved", func() {
+		var masqueradeCount atomic.Int32
+		tc.ipManager.OnMasqueradeIPChanged = func() {
+			masqueradeCount.Add(1)
+		}
+		tc.ipManager.gatewayIfIndex = 0
+
+		tc.addrChan <- netlink.AddrUpdate{
+			LinkAddress: *ovntest.MustParseIPNet(someAddr),
+			LinkIndex:   gwIfIndex,
+			NewAddr:     true,
+		}
+		Consistently(func() int32 {
+			return masqueradeCount.Load()
+		}, 3).Should(Equal(int32(0)))
+	})
+
+	It("skips regular address processing for all events", func() {
+		tc.addrChan <- netlink.AddrUpdate{
+			LinkAddress: *ovntest.MustParseIPNet(someAddr),
+			LinkIndex:   otherIfIndex,
+			NewAddr:     true,
+		}
+		Consistently(func() bool {
+			return nodeHasAddress(tc.fakeClient, nodeName, ovntest.MustParseIPNet(someAddr))
+		}, 3).Should(BeFalse())
+	})
+})
+
+var _ = Describe("refreshGatewayIfIndex", func() {
+	const nodeName = "node1"
+
+	It("does nothing when Gateway.Interface is empty", func() {
+		Expect(config.PrepareTestConfig()).To(Succeed())
+		config.Gateway.Interface = ""
+		tc := configureKubeOVNContext(nodeName, false)
+		defer tc.watchFactory.Shutdown()
+
+		tc.ipManager.gatewayIfIndex = 42
+		tc.ipManager.refreshGatewayIfIndex()
+		Expect(tc.ipManager.gatewayIfIndex).To(Equal(42))
+	})
+
+	It("resets index to 0 when interface is not found", func() {
+		Expect(config.PrepareTestConfig()).To(Succeed())
+		config.Gateway.Interface = "nonexistent0"
+		tc := configureKubeOVNContext(nodeName, false)
+		defer tc.watchFactory.Shutdown()
+
+		nlMock := new(utilMocks.NetLinkOps)
+		util.SetNetLinkOpMockInst(nlMock)
+		defer util.ResetNetLinkOpMockInst()
+
+		nlMock.On("LinkByName", "nonexistent0").Return(nil, fmt.Errorf("not found"))
+
+		tc.ipManager.gatewayIfIndex = 42
+		tc.ipManager.refreshGatewayIfIndex()
+		Expect(tc.ipManager.gatewayIfIndex).To(Equal(0))
+	})
+
+	It("sets index from link when interface exists", func() {
+		Expect(config.PrepareTestConfig()).To(Succeed())
+		config.Gateway.Interface = "breth0"
+		tc := configureKubeOVNContext(nodeName, false)
+		defer tc.watchFactory.Shutdown()
+
+		nlMock := new(utilMocks.NetLinkOps)
+		linkMock := new(netlink_mocks.Link)
+		util.SetNetLinkOpMockInst(nlMock)
+		defer util.ResetNetLinkOpMockInst()
+
+		nlMock.On("LinkByName", "breth0").Return(linkMock, nil)
+		linkMock.On("Attrs").Return(&netlink.LinkAttrs{Index: 77, Name: "breth0"})
+
+		tc.ipManager.gatewayIfIndex = 0
+		tc.ipManager.refreshGatewayIfIndex()
+		Expect(tc.ipManager.gatewayIfIndex).To(Equal(77))
+	})
+})
+
+var _ = Describe("Node IP Handler helper tests", func() {
+	const nodeName = "node1"
+
+	It("removes cached IPs even when they are no longer valid node IPs", func() {
+		Expect(config.PrepareTestConfig()).To(Succeed())
+		tc := configureKubeOVNContext(nodeName, false)
+		defer tc.watchFactory.Shutdown()
+
+		tc.ipManager.Lock()
+		tc.ipManager.cidrs.Insert(tc.mgmtPortIP4.String())
+		tc.ipManager.Unlock()
+
+		Expect(tc.ipManager.delAddr(*tc.mgmtPortIP4)).To(BeTrue())
+		_, networks := tc.ipManager.ListAddresses()
+		Expect(networks).To(BeEmpty())
+	})
+
+	It("syncs stale host-cidrs when egress IP annotations change", func() {
+		Expect(config.PrepareTestConfig()).To(Succeed())
+		tc := configureKubeOVNContext(nodeName, false)
+		defer tc.watchFactory.Shutdown()
+
+		tc.ipManager.addHandlerForAddrChange()
+
+		staleEIP := "2001:db8:abcd:1234:c001::"
+		node, err := tc.fakeClient.CoreV1().Nodes().Get(context.TODO(), nodeName, metav1.GetOptions{})
+		Expect(err).NotTo(HaveOccurred())
+
+		nodeToUpdate := node.DeepCopy()
+		nodeToUpdate.Annotations[util.OVNNodeHostCIDRs] = fmt.Sprintf("[\"%s\", \"%s\", \"%s/128\"]", "10.1.1.10/24", "2001:db8::10/64", staleEIP)
+		nodeToUpdate.Annotations[util.OVNNodeSecondaryHostEgressIPs] = fmt.Sprintf("[\"%s\"]", staleEIP)
+		_, err = tc.fakeClient.CoreV1().Nodes().Update(context.TODO(), nodeToUpdate, metav1.UpdateOptions{})
+		Expect(err).NotTo(HaveOccurred())
+
+		Eventually(func() bool {
+			updatedNode, err := tc.fakeClient.CoreV1().Nodes().Get(context.TODO(), nodeName, metav1.GetOptions{})
+			if err != nil {
+				return false
+			}
+			hostIPs, err := util.ParseNodeHostCIDRsDropNetMask(updatedNode)
+			if err != nil {
+				return false
+			}
+			return !hostIPs.Has(staleEIP)
+		}, 5).Should(BeTrue())
+	})
+})
+
+var _ = Describe("Node IP Handler tests", func() {
+	// To ensure that variables don't leak between parallel Ginkgo specs,
+	// put all test context into a single struct and reference it via
+	// a pointer. The pointer will be different for each spec.
+	var tc *testCtx
+
+	const (
+		nodeName                 = "node1"
+		dummyBrName              = "breth0"
+		dummyBrInternalIPv4      = "10.1.1.10"
+		dummyAdditionalIPv4CIDR  = "192.168.2.2/24"
+		dummyAdditionalIPv4CIDR2 = "192.168.3.2/24"
+		dummyBrUniqLocalIPv6CIDR = "fd53:6043:6000:e0e0:1::6001/80"
+		dummyMasqIPv4            = "169.254.169.2"
+		dummyMasqIPv4CIDR        = dummyMasqIPv4 + "/29"
+		dummyMasqIPv6            = "fd69::2"
+		dummyMasqIPv6CIDR        = dummyMasqIPv6 + "/125"
+	)
+
+	BeforeEach(func() {
+		fexec := ovntest.NewFakeExec()
+		fexec.AddFakeCmd(&ovntest.ExpectedCmd{
+			Cmd:    "ovs-vsctl --timeout=15 get Open_vSwitch . external_ids:ovn-encap-ip",
+			Output: dummyBrInternalIPv4,
+		})
+		Expect(util.SetExec(fexec)).ShouldNot(HaveOccurred())
+		// Restore global default values before each testcase
+		Expect(config.PrepareTestConfig()).To(Succeed())
+		config.IPv4Mode = true
+		config.IPv6Mode = true
+		tc = configureKubeOVNContextWithNs(nodeName)
+		tc.ipManager.syncPeriod = 10 * time.Millisecond
+	})
+
+	AfterEach(func() {
+		close(tc.stopCh)
+		tc.doneWg.Wait()
+		tc.watchFactory.Shutdown()
+		Expect(tc.ns.Close()).ShouldNot(HaveOccurred())
+		util.ResetRunner()
+	})
+
+	Context("valid addresses", func() {
+		ovntest.OnSupportedPlatformsIt("allows keepalived VIP", func() {
+			runIpManagerRoutine(tc)
+			Expect(tc.ns.Do(func(ns.NetNS) error {
+				link, err := netlink.LinkByName(dummyBrName)
+				if err != nil {
+					return err
+				}
+				return netlink.AddrAdd(link, &netlink.Addr{
+					LinkIndex: link.Attrs().Index, Scope: unix.RT_SCOPE_UNIVERSE, Label: dummyBrName + ":vip", IPNet: ovntest.MustParseIPNet(dummyAdditionalIPv4CIDR),
+				})
+			})).ShouldNot(HaveOccurred())
+			Eventually(func() bool {
+				return nodeHasAddress(tc.fakeClient, nodeName, ovntest.MustParseIPNet(dummyAdditionalIPv4CIDR))
+			}, 5).Should(BeTrue())
+			// ensure a sync doesnt remove it
+			Consistently(func() bool {
+				return nodeHasAddress(tc.fakeClient, nodeName, ovntest.MustParseIPNet(dummyAdditionalIPv4CIDR))
+			}, 3).Should(BeTrue())
+		})
+
+		ovntest.OnSupportedPlatformsIt("allows unique local address", func() {
+			runIpManagerRoutine(tc)
+			Expect(tc.ns.Do(func(ns.NetNS) error {
+				link, err := netlink.LinkByName(dummyBrName)
+				if err != nil {
+					return err
+				}
+				return netlink.AddrAdd(link, &netlink.Addr{
+					LinkIndex: link.Attrs().Index, Scope: unix.RT_SCOPE_UNIVERSE, IPNet: ovntest.MustParseIPNet(dummyBrUniqLocalIPv6CIDR),
+				})
+			})).ShouldNot(HaveOccurred())
+			Eventually(func() bool {
+				return nodeHasAddress(tc.fakeClient, nodeName, ovntest.MustParseIPNet(dummyBrUniqLocalIPv6CIDR))
+			}, 5).Should(BeTrue())
+			// ensure a sync doesnt remove it
+			Consistently(func() bool {
+				return nodeHasAddress(tc.fakeClient, nodeName, ovntest.MustParseIPNet(dummyBrUniqLocalIPv6CIDR))
+			}, 3).Should(BeTrue())
+		})
+
+		ovntest.OnSupportedPlatformsIt("allow secondary IP", func() {
+			runIpManagerRoutine(tc)
+			primaryIPNet := ovntest.MustParseIPNet(dummyAdditionalIPv4CIDR)
+			// create an additional IP which resides within the primary subnet aka secondary IP
+			secondaryIP := make(net.IP, len(primaryIPNet.IP))
+			copy(secondaryIP, primaryIPNet.IP)
+			secondaryIP[len(secondaryIP)-1]++
+			secondaryIPNet := &net.IPNet{IP: secondaryIP, Mask: primaryIPNet.Mask}
+
+			Expect(tc.ns.Do(func(ns.NetNS) error {
+				link, err := netlink.LinkByName(dummyBrName)
+				if err != nil {
+					return err
+				}
+				err = netlink.AddrAdd(link, &netlink.Addr{
+					LinkIndex: link.Attrs().Index, Scope: unix.RT_SCOPE_UNIVERSE, IPNet: primaryIPNet})
+				if err != nil {
+					return err
+				}
+				return netlink.AddrAdd(link, &netlink.Addr{
+					LinkIndex: link.Attrs().Index, Scope: unix.RT_SCOPE_UNIVERSE, IPNet: secondaryIPNet})
+			})).ShouldNot(HaveOccurred())
+			Eventually(func() bool {
+				return nodeHasAddress(tc.fakeClient, nodeName, primaryIPNet) && nodeHasAddress(tc.fakeClient, nodeName, secondaryIPNet)
+			}, 5).Should(BeTrue())
+			// ensure a sync doesnt remove it
+			Consistently(func() bool {
+				return nodeHasAddress(tc.fakeClient, nodeName, primaryIPNet) && nodeHasAddress(tc.fakeClient, nodeName, secondaryIPNet)
+			}, 3).Should(BeTrue())
+		})
+
+		ovntest.OnSupportedPlatformsIt("doesn't allow OVN reserved IPs", func() {
+			config.Gateway.MasqueradeIPs.V4OVNMasqueradeIP = ovntest.MustParseIP(dummyMasqIPv4)
+			config.Gateway.MasqueradeIPs.V6OVNMasqueradeIP = ovntest.MustParseIP(dummyMasqIPv6)
+
+			runIpManagerRoutine(tc)
+			Expect(tc.ns.Do(func(ns.NetNS) error {
+				link, err := netlink.LinkByName(dummyBrName)
+				if err != nil {
+					return err
+				}
+				err = netlink.AddrAdd(link, &netlink.Addr{LinkIndex: link.Attrs().Index, Scope: unix.RT_SCOPE_UNIVERSE, IPNet: ovntest.MustParseIPNet(dummyMasqIPv4CIDR)})
+				if err != nil {
+					return err
+				}
+				return netlink.AddrAdd(link, &netlink.Addr{
+					LinkIndex: link.Attrs().Index, Scope: unix.RT_SCOPE_UNIVERSE, IPNet: ovntest.MustParseIPNet(dummyMasqIPv6CIDR)})
+			})).ShouldNot(HaveOccurred())
+
+			Consistently(func() bool {
+				return nodeHasAddress(tc.fakeClient, nodeName, ovntest.MustParseIPNet(dummyMasqIPv4CIDR)) &&
+					nodeHasAddress(tc.fakeClient, nodeName, ovntest.MustParseIPNet(dummyMasqIPv6CIDR))
+			}, 3).Should(BeFalse())
+		})
+
+		ovntest.OnSupportedPlatformsIt("doesn't allow OVN management port IPs", func() {
+			config.OVNKubernetesFeature.EnableMultiNetwork = true
+			config.OVNKubernetesFeature.EnableNetworkSegmentation = true
+
+			runIpManagerRoutine(tc)
+			Expect(tc.ns.Do(func(ns.NetNS) error {
+				mpLink := ovntest.AddLink(fmt.Sprintf("%s1234", ovntypes.K8sMgmtIntfNamePrefix))
+				return netlink.AddrAdd(mpLink, &netlink.Addr{LinkIndex: mpLink.Attrs().Index, Scope: unix.RT_SCOPE_UNIVERSE,
+					IPNet: ovntest.MustParseIPNet(dummyAdditionalIPv4CIDR)})
+			})).ShouldNot(HaveOccurred())
+			Consistently(func() bool {
+				return nodeHasAddress(tc.fakeClient, nodeName, ovntest.MustParseIPNet(dummyAdditionalIPv4CIDR))
+			}, 2).Should(BeFalse())
+		})
+	})
+})
+
+// The runIpManagerRoutine reads from the config (e.g.,
+// IsNetworkSegmentationSupportEnabled()) so it must be called explicitly
+// from each test spec _AFTER_ all custom config changes happened.
+func runIpManagerRoutine(tc *testCtx) {
+	GinkgoHelper()
+	tc.doneWg.Add(1)
+	go func() {
+		defer GinkgoRecover()
+		defer tc.doneWg.Done()
+		err := tc.ns.Do(func(ns.NetNS) error {
+			tc.ipManager.runInternal(tc.stopCh, tc.ipManager.getNetlinkAddrSubFunc(tc.stopCh))
+			return nil
+		})
+		Expect(err).NotTo(HaveOccurred())
+	}()
+}
+
+func configureKubeOVNContextWithNs(nodeName string) *testCtx {
+	testNs, err := testutils.NewNS()
+	Expect(err).NotTo(HaveOccurred())
+	setupPrimaryInfFn := func() error {
+		link := ovntest.AddLink("breth0")
+		if err = netlink.AddrAdd(link, &netlink.Addr{IPNet: ovntest.MustParseIPNet("10.1.1.10/24")}); err != nil {
+			return err
+		}
+		return netlink.AddrAdd(link, &netlink.Addr{IPNet: ovntest.MustParseIPNet("2001:db8::10/64")})
+	}
+	Expect(testNs.Do(func(ns.NetNS) error {
+		return setupPrimaryInfFn()
+	})).To(Succeed())
+	useNetlink := true
+	var tc *testCtx
+	err = testNs.Do(func(ns.NetNS) error {
+		tc = configureKubeOVNContext(nodeName, useNetlink)
+		return nil
+	})
+	Expect(err).NotTo(HaveOccurred())
+	tc.ns = testNs
+	return tc
+}
+
+func configureKubeOVNContext(nodeName string, useNetlink bool) *testCtx {
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: nodeName,
+			Annotations: map[string]string{
+				util.OVNNodeHostCIDRs:           `["10.1.1.10/24", "2001:db8::10/64"]`,
+				"k8s.ovn.org/l3-gateway-config": `{"default":{"mac-address":"52:54:00:e2:ed:d0","ip-addresses":["10.1.1.10/24"],"ip-address":"10.1.1.10/24","next-hops":["10.1.1.1"],"next-hop":"10.1.1.1"}}`,
+			},
+		},
+		Status: corev1.NodeStatus{
+			Addresses: []corev1.NodeAddress{{Address: "10.1.1.10", Type: corev1.NodeInternalIP}, {Address: "2001:db8::10", Type: corev1.NodeInternalIP}},
+		},
+	}
+
+	tc := &testCtx{
+		doneWg:      &sync.WaitGroup{},
+		stopCh:      make(chan struct{}),
+		fakeClient:  fake.NewSimpleClientset(node),
+		mgmtPortIP4: ovntest.MustParseIPNet("10.1.1.2/24"),
+		mgmtPortIP6: ovntest.MustParseIPNet("2001:db8::1/64"),
+	}
+
+	var err error
+	fakeClientset := &util.OVNNodeClientset{
+		KubeClient: tc.fakeClient,
+	}
+	tc.watchFactory, err = factory.NewNodeWatchFactory(fakeClientset, nodeName)
+	Expect(err).NotTo(HaveOccurred())
+	err = tc.watchFactory.Start()
+	Expect(err).NotTo(HaveOccurred())
+
+	_ = nodenft.SetFakeNFTablesHelper()
+
+	mpmock := &mgmtportmock.Interface{}
+	mpmock.On("GetAddresses").Return([]*net.IPNet{tc.mgmtPortIP4, tc.mgmtPortIP6})
+
+	fakeBridgeConfiguration := bridgeconfig.TestBridgeConfig("breth0")
+
+	k := &kube.Kube{KClient: tc.fakeClient}
+	tc.ipManager = newAddressManagerInternal(nodeName, k, mpmock, tc.watchFactory, fakeBridgeConfiguration, useNetlink)
+	return tc
+}

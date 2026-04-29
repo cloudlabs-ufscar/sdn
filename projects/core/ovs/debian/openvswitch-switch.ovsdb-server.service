@@ -1,0 +1,22 @@
+[Unit]
+Description=Open vSwitch Database Unit
+After=systemd-journald.socket network-pre.target dpdk.service local-fs.target
+Before=network.target networking.service
+Requires=ovsdb-server.socket
+PartOf=openvswitch-switch.service
+DefaultDependencies=no
+
+[Service]
+LimitNOFILE=1048576
+Type=forking
+PIDFile=/run/openvswitch/ovsdb-server.pid
+Restart=on-failure
+EnvironmentFile=-/etc/default/openvswitch-switch
+ExecStart=/usr/share/openvswitch/scripts/ovs-ctl \
+          --no-ovs-vswitchd --no-monitor --system-id=random \
+          --no-record-hostname \
+          start $OVS_CTL_OPTS
+ExecStop=/usr/share/openvswitch/scripts/ovs-ctl --no-ovs-vswitchd stop
+ExecReload=/usr/share/openvswitch/scripts/ovs-ctl --no-ovs-vswitchd \
+          --no-record-hostname \
+          --no-monitor restart $OVS_CTL_OPTS

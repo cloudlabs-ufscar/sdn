@@ -1,0 +1,15 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
+package ovsdb
+
+import "github.com/ovn-kubernetes/libovsdb/model"
+
+// ObservDatabaseModel returns the DatabaseModel object to be used by observability library.
+func ObservDatabaseModel() (model.ClientDBModel, error) {
+	return model.NewClientDBModel("Open_vSwitch", map[string]model.Model{
+		"Bridge":                    &Bridge{},
+		"Flow_Sample_Collector_Set": &FlowSampleCollectorSet{},
+		"Interface":                 &Interface{},
+	})
+}

@@ -1,0 +1,70 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+networking:
+  # kube proxy will be disabled
+  kubeProxyMode: "none"
+  # the default CNI will not be installed
+  disableDefaultCNI: true
+{%- if net_cidr %}
+  podSubnet: "{{ net_cidr }}"
+{%- endif %}
+{%- if svc_cidr %}
+  serviceSubnet: "{{ svc_cidr }}"
+{%- endif %}
+{%- if ovn_ip_family %}
+  ipFamily: {{ ovn_ip_family }}
+{%- endif %}
+kubeadmConfigPatches:
+- |
+  kind: ClusterConfiguration
+  metadata:
+    name: config
+  apiServer:
+    extraArgs:
+      "v": "{{ cluster_log_level }}"
+  controllerManager:
+    extraArgs:
+      "v": "{{ cluster_log_level }}"
+      # Disable service-lb-controller for now
+      # https://github.com/kubernetes/kubernetes/issues/128121
+      # Once the upstream issue is fixed we can remove this controller
+      # customization fully. Tracked with
+      # https://github.com/ovn-kubernetes/ovn-kubernetes/issues/4785
+      "controllers": "*,bootstrap-signer-controller,token-cleaner-controller,-service-lb-controller"
+  scheduler:
+    extraArgs:
+      "v": "{{ cluster_log_level }}"
+  networking: 
+    dnsDomain: {{ dns_domain }}
+  ---
+  kind: InitConfiguration
+  nodeRegistration:
+    kubeletExtraArgs:
+      "v": "{{ cluster_log_level }}"
+  ---
+  kind: JoinConfiguration
+  nodeRegistration:
+    kubeletExtraArgs:
+      "v": "{{ cluster_log_level }}"
+nodes:
+ - role: control-plane
+   kubeadmConfigPatches:
+   - |
+     kind: InitConfiguration
+     nodeRegistration:
+       kubeletExtraArgs:
+         node-labels: "ingress-ready=true"
+         authorization-mode: "AlwaysAllow"
+{%- if ovn_ha is equalto "true" %}
+{%- for _ in range(1, ovn_num_master | int) %}
+ - role: worker
+{%- endfor %}
+{%- endif %}
+{%- for _ in range(ovn_num_worker | int) %}
+ - role: worker
+{%- endfor %}
+{%- if kind_num_infra is defined and kind_num_infra|int > 0 %}
+{%- for i in range(kind_num_infra|int) %}
+ - role: worker
+{%- endfor %}
+{%- endif %}

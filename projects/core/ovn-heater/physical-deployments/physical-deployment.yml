@@ -1,0 +1,12 @@
+internal-iface: eno1
+
+central-nodes:
+  - host02.mydomain.com
+
+tester-node:
+  name: host02.mydoman.com
+  ssh_key: /path/to/ssh_key
+
+worker-nodes:
+  - host03.mydomain.com
+  - host04.mydomain.com

@@ -1,0 +1,14 @@
+- name: Install ovn-fake-multinode
+  hosts: all
+  tasks:
+    - name: Ensure ovn-fake-multinode remote dirs
+      file:
+        path: "{{ ovn_fake_multinode_target_path }}"
+        state: directory
+
+    - name: Sync ovn-fake-multinode
+      ansible.posix.synchronize:
+        src: "{{ ovn_fake_multinode_local_path }}"
+        dest: "{{ ovn_fake_multinode_target_path }}"
+        delete: true
+        recursive: true

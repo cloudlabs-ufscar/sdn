@@ -1,0 +1,18 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
+package dnsnameresolver
+
+import (
+	libovsdbclient "github.com/ovn-kubernetes/libovsdb/client"
+
+	addressset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/address_set"
+)
+
+type DNSNameResolver interface {
+	Add(namespace, dnsName string) (addressset.AddressSet, error)
+	Delete(namespace string) error
+	Run() error
+	Shutdown()
+	DeleteStaleAddrSets(nbClient libovsdbclient.Client) error
+}

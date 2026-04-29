@@ -1,0 +1,8 @@
+netaddr
+numpy
+paramiko
+pandas
+plotly
+pyyaml
+randmac
+git+https://github.com/openstack/ovsdbapp@master#egg=ovsdbapp

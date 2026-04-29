@@ -1,0 +1,17 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
+package kubevirt
+
+import (
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+)
+
+const (
+	OvnZoneExternalIDKey = types.OvnK8sPrefix + "/zone"
+	OvnRemoteZone        = "remote"
+	OvnLocalZone         = "local"
+
+	NamespaceExternalIDsKey      = "k8s.ovn.org/namespace"
+	VirtualMachineExternalIDsKey = "k8s.ovn.org/vm"
+)
