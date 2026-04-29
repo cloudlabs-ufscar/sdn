@@ -1,4 +1,4 @@
-# Deploy existing OVN-SB Event Monitoring Dashboard (CLO-57)
+# [Deploy existing OVN-SB Event Monitoring Dashboard (CLO-57)](https://linear.app/cloudlabs/issue/CLO-57/deploy-existing-ovn-southbound-event-monitoring-dashboard)
 
 ### Scenario
 Observability is a fundamental pillar in OVN-based SDN environments, especially at scale, where tracking the *control plane* behavior in real time is essential to ensure reliable network operation. The Southbound database (**OVN-SB**) holds a central position in this ecosystem, since it concentrates information about *chassis*, *port bindings*, *MAC bindings*, *logical flows* and other entities that materialize the logical configuration into actual flows in the *datapath*. CloudFerro itself highlighted this point in their presentation *"Having OVN at scale and sanity at once by CloudFerro"*, reinforcing the importance of dedicated instrumentation for this kind of environment.
