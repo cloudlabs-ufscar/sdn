@@ -29,16 +29,33 @@ The setup quickly revealed a relevant packaging limitation: since the `ovn-centr
 The *workloads* are simulated with *network namespaces* connected to `br-int` via *veth pairs*.
 
 **Key debugging lessons:**
-1. The AZ name that `ovn-ic` registers in IC-SB comes from the `NB_Global.name` field of the local NB — without it, no *gateway* is registered even with the topology fully correct.
-2. The *transit switch* on the local NB **must not be created manually**: `ovn-ic` detects the `ts` declared in IC-NB and creates it automatically in each AZ with the `interconn-ts` annotation already applied; trying to create it manually causes a collision.
-3. Route propagation between AZs depends on `ic-route-adv` and `ic-route-learn` being configured not only on the local *logical router*, but also on the *transit switch* in IC-NB.
 
-### Expected results
-Obtain a **proof of concept for communication between virtual machines in different Incus clouds**, validating the use of OVN-IC as a federation solution applicable to our infrastructure. This will advance issue [CLO-73](https://linear.app/cloudlabs/issue/CLO-73/configure-ovn-ic-federation).
+1. **AZ identity comes from `NB_Global.name`.** The AZ name that `ovn-ic` registers in IC-SB is derived from the `NB_Global.name` field of the local NB — without it, no *gateway* is registered even with the topology fully correct.
 
-The lab today has:
-- *gateways* successfully registered;
+2. **The transit switch is managed by `ovn-ic`.** The `ts` on the local NB **must not be created manually**: `ovn-ic` detects the `ts` declared in IC-NB and creates it automatically in each AZ with the `interconn-ts` annotation already applied; trying to create it manually causes a collision.
+
+3. **`ovn-ic` startup race condition.** The first `ovn-ic` instance can process the `lsp-ts-az*` notification before its local cache contains the corresponding `lrp-az*-ts`, producing the warning `Can't get router uuid for transit switch port` followed by `Route sync ignores port ... Deleting it` — the port is dropped and never reprocessed. The fix is to restart `ovn-ic` after the full topology has been built, forcing a clean state read via the OVSDB monitor.
+
+4. **`ic-route-adv` and `ic-route-learn` live on `NB_Global.options`, not on `Logical_Router`.** This was the most time-consuming gotcha: the documentation suggests these options are per-router, but in OVN 24.03.6 they only have effect when applied on `NB_Global`. Confirmed by inspecting `strings` on the `ovn-ic` binary — the `Transit_Switch` table doesn't even have an `options` column in this version. Without this fix, `ovn-ic`'s debug log shows `Route ad: skip network 10.0.1.1/24 of lrp lrp-az1-ls.`, meaning it silently refuses to advertise connected networks even with `ic-route-adv=true` set on the LR.
+
+5. **Explicit gateway chassis on the transit LRP.** Even with the *control plane* working (routes advertised and learned in IC-SB), the *data plane* stayed broken. Inspecting the local SB `Port_Binding`, `lsp-ts-az2` (as seen from AZ1) had `chassis=[]`, and in IC-SB the `gateway` field was empty. It was necessary to explicitly pin a gateway chassis on the LRP that connects to the transit switch: `ovn-nbctl lrp-set-gateway-chassis lrp-az1-ts az1-chassis 1`. Without this, `ovn-ic` does not bind a gateway to the Port_Binding and inter-AZ traffic never gets encapsulated in GENEVE.
+
+### Results
+The lab is now **fully operational end-to-end**:
+- *gateways* registered in both AZs (`az1-chassis`, `az2-chassis` in IC-SB);
 - GENEVE tunnels established between the VMs;
-- *intra-AZ* traffic operational.
+- connected route propagation working automatically across AZs (`10.0.1.0/24` and `10.0.2.0/24` visible as `(learned)` routes on the opposite AZ);
+- *intra-AZ* and *inter-AZ* pings succeed with **0% packet loss**:
+  - `vm1-az1 ↔ vm2-az1`, `vm1-az2 ↔ vm2-az2` (intra-AZ);
+  - `vm1-az1 ↔ vm1-az2`, `vm1-az1 ↔ vm2-az2`, `vm1-az2 ↔ vm2-az1` (inter-AZ).
 
-The last step in progress is the propagation of *Route records* in IC-SB, which is still being adjusted to unblock *inter-AZ* traffic. The produced *scripts* are **idempotent** — they perform a full *cleanup* before each execution — and remain as a reproducible reference for spinning up the environment again, documenting the gotchas that are not evident in the official documentation.
+The produced *scripts* are **idempotent** — they perform a full *cleanup* before each execution — and remain as a reproducible reference for spinning up the environment again, documenting the gotchas above that are not evident in the official documentation.
+
+This proof of concept validates **OVN-IC as a federation solution applicable to our infrastructure** and unblocks the next step of the project, advancing issue [CLO-73](https://linear.app/cloudlabs/issue/CLO-73/configure-ovn-ic-federation): communication between virtual machines in different Incus clouds.
+
+### Repository contents
+- `setup-az1.sh` — full bootstrap for AZ1 (also hosts the global IC-NB/IC-SB databases)
+- `setup-az2.sh` — full bootstrap for AZ2 (connects remotely to AZ1's IC databases)
+- `verify.sh` — auto-detects which AZ it's running on and prints IC state, GENEVE tunnels, port bindings and runs the full ping matrix
+
+Run `setup-az1.sh` first and wait for it to finish, then run `setup-az2.sh` on the other VM. Both scripts are idempotent and can be re-run at any time.

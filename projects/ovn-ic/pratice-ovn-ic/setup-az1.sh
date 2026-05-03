@@ -9,7 +9,6 @@ IC_DIR="$LAB_DIR/ic"
 OVN_SRC="/tmp/ovn-24.03.6"
 
 echo "=== CLEANUP ==="
-sleep 3
 
 # Kill ovn-ic (default rundir from source build)
 if [ -f /usr/local/var/run/ovn/ovn-ic.pid ]; then
@@ -58,9 +57,6 @@ done
 sudo rm -rf "$AZ1_DIR" "$IC_DIR"
 
 echo "=== INSTALL DEPENDENCIES ==="
-
-sleep 3
-
 sudo apt-get update -qq
 sudo apt-get install -y \
     openvswitch-switch \
@@ -75,11 +71,9 @@ sudo systemctl stop ovn-central ovn-host ovn-ovsdb-server-nb ovn-ovsdb-server-sb
 sudo systemctl disable ovn-central ovn-host ovn-ovsdb-server-nb ovn-ovsdb-server-sb 2>/dev/null || true
 sudo systemctl enable openvswitch-switch
 sudo systemctl start openvswitch-switch
+sudo mkdir -p /var/run/openvswitch
 
 echo "=== COMPILE OVN + OVN-IC FROM SOURCE ==="
-
-sleep 3
-
 sudo rm -rf "$OVN_SRC"
 sudo mkdir -p "$OVN_SRC"
 sudo chown "$USER":"$USER" "$OVN_SRC"
@@ -122,54 +116,41 @@ sudo cp "$OVN_IC_NBCTL"  /usr/local/bin/ovn-ic-nbctl
 sudo cp "$OVN_IC_SBCTL"  /usr/local/bin/ovn-ic-sbctl
 
 echo "=== CREATE LAB DIRECTORIES ==="
-
-sleep 3
-
 sudo mkdir -p "$AZ1_DIR" "$IC_DIR"
 sudo chown -R "$USER":"$USER" "$LAB_DIR"
 
 echo "=== START IC-NB DATABASE (port 6645) ==="
-
-sleep 3
-
 ovsdb-tool create "$IC_DIR/ic-nb.db" "$IC_NB_SCHEMA"
 ovsdb-server "$IC_DIR/ic-nb.db" \
-    --remote="ptcp:6645:127.0.0.1" \
-    --remote="ptcp:6645:${AZ1_IP}" \
+    --remote="ptcp:6645" \
+    --unixctl="$IC_DIR/ic-nb.ctl" \
     --pidfile="$IC_DIR/ic-nb.pid" \
     --log-file="$IC_DIR/ic-nb.log" \
     --detach
 
 echo "=== START IC-SB DATABASE (port 6646) ==="
-
-sleep 3
-
 ovsdb-tool create "$IC_DIR/ic-sb.db" "$IC_SB_SCHEMA"
 ovsdb-server "$IC_DIR/ic-sb.db" \
-    --remote="ptcp:6646:127.0.0.1" \
-    --remote="ptcp:6646:${AZ1_IP}" \
+    --remote="ptcp:6646" \
+    --unixctl="$IC_DIR/ic-sb.ctl" \
     --pidfile="$IC_DIR/ic-sb.pid" \
     --log-file="$IC_DIR/ic-sb.log" \
     --detach
 
 echo "=== START AZ1 NB DATABASE (port 6641) ==="
-
-sleep 3
-
 ovsdb-tool create "$AZ1_DIR/ovnnb.db" /usr/share/ovn/ovn-nb.ovsschema
 ovsdb-server "$AZ1_DIR/ovnnb.db" \
     --remote="ptcp:6641:127.0.0.1" \
+    --unixctl="$AZ1_DIR/ovnnb.ctl" \
     --pidfile="$AZ1_DIR/ovnnb.pid" \
     --log-file="$AZ1_DIR/ovnnb.log" \
     --detach
 
 echo "=== START AZ1 SB DATABASE (port 6642) ==="
-
-sleep 3
-
 ovsdb-tool create "$AZ1_DIR/ovnsb.db" /usr/share/ovn/ovn-sb.ovsschema
 ovsdb-server "$AZ1_DIR/ovnsb.db" \
     --remote="ptcp:6642:127.0.0.1" \
+    --unixctl="$AZ1_DIR/ovnsb.ctl" \
     --pidfile="$AZ1_DIR/ovnsb.pid" \
     --log-file="$AZ1_DIR/ovnsb.log" \
     --detach
@@ -177,12 +158,11 @@ ovsdb-server "$AZ1_DIR/ovnsb.db" \
 sleep 2
 
 echo "=== START OVN-NORTHD ==="
-
-sleep 3
-
+sudo mkdir -p /var/run/ovn
 ovn-northd \
     --ovnnb-db="tcp:127.0.0.1:6641" \
     --ovnsb-db="tcp:127.0.0.1:6642" \
+    --unixctl="$AZ1_DIR/ovn-northd.ctl" \
     --pidfile="$AZ1_DIR/ovn-northd.pid" \
     --log-file="$AZ1_DIR/ovn-northd.log" \
     --detach
@@ -190,9 +170,6 @@ ovn-northd \
 sleep 1
 
 echo "=== CONFIGURE CHASSIS (AZ1) ==="
-
-sleep 3
-
 sudo ovs-vsctl set open_vswitch . \
     external_ids:system-id="az1-chassis" \
     external_ids:ovn-remote="tcp:127.0.0.1:6642" \
@@ -201,9 +178,6 @@ sudo ovs-vsctl set open_vswitch . \
     external_ids:ovn-is-interconn="true"
 
 echo "=== START OVN-CONTROLLER ==="
-
-sleep 3
-
 sudo ovn-controller \
     --pidfile="$AZ1_DIR/ovn-controller.pid" \
     --log-file="$AZ1_DIR/ovn-controller.log" \
@@ -211,14 +185,16 @@ sudo ovn-controller \
 
 sleep 2
 
-echo "=== SET AZ NAME IN NB_GLOBAL ==="
-# ovn-ic derives the availability zone name from NB_Global.name
-ovn-nbctl --db=tcp:127.0.0.1:6641 set NB_Global . name=az1
+echo "=== SET AZ NAME + IC ROUTE OPTIONS IN NB_GLOBAL ==="
+# ovn-ic derives the availability zone name from NB_Global.name.
+# In OVN 24.03 the ic-route-adv/ic-route-learn options live on NB_Global
+# (not on Logical_Router) — setting them on the LR has no effect.
+ovn-nbctl --db=tcp:127.0.0.1:6641 set NB_Global . \
+    name=az1 \
+    options:ic-route-adv=true \
+    options:ic-route-learn=true
 
 echo "=== START OVN-IC ==="
-
-sleep 3
-
 sudo mkdir -p /usr/local/var/run/ovn
 sudo ovn-ic \
     --ic-nb-db="tcp:127.0.0.1:6645" \
@@ -232,19 +208,7 @@ sudo ovn-ic \
 sleep 5
 
 echo "=== BUILD OVN TOPOLOGY (AZ1) ==="
-
-sleep 3
-
 NB="ovn-nbctl --db=tcp:127.0.0.1:6641"
-
-# Create transit switch in IC-NB — ovn-ic will automatically create it in OVN NB
-ovn-ic-nbctl --db="tcp:127.0.0.1:6645" ts-add ts
-# Enable route advertisement/learning at the global transit switch level
-ovn-ic-nbctl --db="tcp:127.0.0.1:6645" set transit_switch ts \
-    options:ic-route-adv=true \
-    options:ic-route-learn=true
-# Wait for ovn-ic to propagate ts into local OVN NB
-sleep 5
 
 # AZ1 logical switch
 $NB ls-add ls-az1
@@ -263,21 +227,56 @@ $NB lsp-set-type lsp-az1-router router
 $NB lsp-set-addresses lsp-az1-router router
 $NB lsp-set-options lsp-az1-router router-port=lrp-az1-ls
 
-# Connect lr-az1 to transit switch
+# Router port for transit switch — must exist before ts-add ts
+# so ovn-ic can link lsp-ts-az1 when the port is created below
 $NB lrp-add lr-az1 lrp-az1-ts 00:00:00:01:ff:02 169.254.100.1/24
+
+# Pin the TS router port to a gateway chassis. Without this the IC-SB
+# Port_Binding gateway field stays empty and remote chassis can't
+# encapsulate inter-AZ traffic (data-plane breaks even with routes).
+$NB lrp-set-gateway-chassis lrp-az1-ts az1-chassis 1
+
+# Add transit switch to IC-NB — ovn-ic propagates ts to local NB
+ovn-ic-nbctl --db="tcp:127.0.0.1:6645" ts-add ts
+
+# Wait for ovn-ic to propagate ts into local OVN NB
+echo "Aguardando ovn-ic propagar transit switch 'ts' para o NB da AZ1..."
+for i in $(seq 1 30); do
+    if ovn-nbctl --db=tcp:127.0.0.1:6641 ls-list 2>/dev/null | grep -qw "ts"; then
+        echo "transit switch 'ts' disponível no NB da AZ1"
+        break
+    fi
+    if [ "$i" -eq 30 ]; then
+        echo "ERROR: transit switch 'ts' não apareceu no NB da AZ1 em 60s"
+        echo "Verifique: ovn-ic log em $AZ1_DIR/ovn-ic.log"
+        exit 1
+    fi
+    sleep 2
+done
+
+# Connect lr-az1 to transit switch
 $NB lsp-add ts lsp-ts-az1
 $NB lsp-set-type lsp-ts-az1 router
 $NB lsp-set-addresses lsp-ts-az1 router
 $NB lsp-set-options lsp-ts-az1 router-port=lrp-az1-ts
 
-# Enable IC route advertisement on local router
-$NB set logical_router lr-az1 \
-    options:ic-route-adv=true \
-    options:ic-route-learn=true
+# Restart ovn-ic so it reads the complete topology from scratch (avoids
+# the race condition where it processed lsp-ts-az1 before lrp-az1-ts was
+# in its OVSDB cache)
+echo "=== RESTART OVN-IC (topologia completa) ==="
+sudo kill "$(cat "$AZ1_DIR/ovn-ic.pid")" 2>/dev/null || true
+sleep 2
+sudo ovn-ic \
+    --ic-nb-db="tcp:127.0.0.1:6645" \
+    --ic-sb-db="tcp:127.0.0.1:6646" \
+    --ovnnb-db="tcp:127.0.0.1:6641" \
+    --ovnsb-db="tcp:127.0.0.1:6642" \
+    --log-file="$AZ1_DIR/ovn-ic.log" \
+    --pidfile="$AZ1_DIR/ovn-ic.pid" \
+    --detach
+sleep 5
 
 echo "=== CREATE VM NAMESPACES (AZ1) ==="
-
-sleep 3
 
 # vm1-az1: 10.0.1.10
 sudo ip netns add vm1-az1
@@ -304,9 +303,6 @@ sudo ovs-vsctl add-port br-int veth-vm2-az1 \
     -- set interface veth-vm2-az1 external_ids:iface-id=lsp-vm2-az1
 
 echo "=== CONFIGURE UFW (allow AZ2) ==="
-
-sleep 3
-
 sudo ufw allow from "${AZ2_IP}" to any port 6645 proto tcp comment "IC-NB from AZ2" 2>/dev/null || true
 sudo ufw allow from "${AZ2_IP}" to any port 6646 proto tcp comment "IC-SB from AZ2" 2>/dev/null || true
 sudo ufw allow from "${AZ2_IP}" to any port 6081 proto udp comment "GENEVE from AZ2" 2>/dev/null || true
