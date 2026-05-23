@@ -53,9 +53,4 @@ The produced *scripts* are **idempotent** — they perform a full *cleanup* befo
 
 This proof of concept validates **OVN-IC as a federation solution applicable to our infrastructure** and unblocks the next step of the project, advancing issue [CLO-73](https://linear.app/cloudlabs/issue/CLO-73/configure-ovn-ic-federation): communication between virtual machines in different Incus clouds.
 
-### Repository contents
-- `setup-az1.sh` — full bootstrap for AZ1 (also hosts the global IC-NB/IC-SB databases)
-- `setup-az2.sh` — full bootstrap for AZ2 (connects remotely to AZ1's IC databases)
-- `verify.sh` — auto-detects which AZ it's running on and prints IC state, GENEVE tunnels, port bindings and runs the full ping matrix
-
 Run `setup-az1.sh` first and wait for it to finish, then run `setup-az2.sh` on the other VM. Both scripts are idempotent and can be re-run at any time.
