@@ -1,0 +1,22 @@
+[Unit]
+Description=OVN Interconnection controller (advanced-ovn-ic lab)
+After=ovn-nb-db.service ovn-sb-db.service openvswitch-switch.service
+Wants=ovn-nb-db.service ovn-sb-db.service
+
+[Service]
+Type=simple
+# ovn-ic talks to BOTH the global IC databases (on az1) and the LOCAL NB/SB.
+# It reads the transit switch + gateways from IC, propagates ts into the local
+# NB, and syncs advertised/learned routes between AZs.
+ExecStart=/usr/local/bin/ovn-ic \
+  --ic-nb-db=tcp:{{ ic_db_ip }}:{{ ic_nb_port }} \
+  --ic-sb-db=tcp:{{ ic_db_ip }}:{{ ic_sb_port }} \
+  --ovnnb-db=tcp:127.0.0.1:{{ nb_port }} \
+  --ovnsb-db=tcp:127.0.0.1:{{ sb_port }} \
+  --unixctl={{ lab_dir }}/ovn-ic.ctl \
+  --log-file={{ lab_dir }}/ovn-ic.log
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

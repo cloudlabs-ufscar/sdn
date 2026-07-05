@@ -1,0 +1,65 @@
+---
+# Install and run the FastAPI backend inside an app workload (loop_var `wl`).
+
+- name: Install Python venv tooling in {{ wl.name }}
+  become: true
+  ansible.builtin.command:
+    cmd: incus exec {{ wl.name }} -- bash -lc "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y python3-venv python3-pip"
+  changed_when: false
+
+- name: Create the app directory in {{ wl.name }}
+  become: true
+  ansible.builtin.command:
+    cmd: incus exec {{ wl.name }} -- mkdir -p /opt/app
+  changed_when: false
+
+# Copy app.py from the control node to the AZ host first; `incus file push` runs
+# ON the AZ host, so the source must exist there (role_path is a control-node path).
+- name: Stage app.py on the AZ host
+  ansible.builtin.copy:
+    src: app.py
+    dest: /tmp/app-{{ wl.name }}.py
+    mode: "0644"
+
+- name: Push the FastAPI app into {{ wl.name }}
+  become: true
+  ansible.builtin.command:
+    cmd: incus file push /tmp/app-{{ wl.name }}.py {{ wl.name }}/opt/app/app.py --mode 0644
+  changed_when: false
+
+- name: Create the venv and install FastAPI + psycopg in {{ wl.name }}
+  become: true
+  ansible.builtin.command:
+    cmd: >
+      incus exec {{ wl.name }} -- bash -lc
+      "test -d /opt/app/venv || python3 -m venv /opt/app/venv;
+       /opt/app/venv/bin/pip install --quiet --upgrade pip fastapi 'uvicorn[standard]' 'psycopg[binary]'"
+  changed_when: false
+
+- name: Render the FastAPI systemd unit
+  ansible.builtin.template:
+    src: fastapi.service.j2
+    dest: /tmp/fastapi-{{ wl.name }}.service
+    mode: "0644"
+
+- name: Push the systemd unit into {{ wl.name }}
+  become: true
+  ansible.builtin.command:
+    cmd: incus file push /tmp/fastapi-{{ wl.name }}.service {{ wl.name }}/etc/systemd/system/fastapi.service --mode 0644
+  changed_when: false
+
+- name: Enable and (re)start FastAPI in {{ wl.name }}
+  become: true
+  ansible.builtin.command:
+    cmd: incus exec {{ wl.name }} -- bash -lc "systemctl daemon-reload && systemctl enable fastapi && systemctl restart fastapi"
+  changed_when: false
+
+- name: Wait for FastAPI /health in {{ wl.name }}
+  become: true
+  ansible.builtin.command:
+    cmd: incus exec {{ wl.name }} -- bash -lc "curl -fs http://127.0.0.1:{{ backend_port }}/health"
+  register: health
+  retries: 15
+  delay: 2
+  until: health.rc == 0
+  changed_when: false

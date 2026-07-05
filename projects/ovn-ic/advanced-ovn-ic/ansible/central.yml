@@ -1,0 +1,9 @@
+---
+# central.yml — Stage 3. Local NB/SB + ovn-northd on both AZs; IC-NB/IC-SB on az1.
+#
+#   ansible-playbook central.yml
+- name: OVN control-plane databases and northd
+  hosts: azs
+  gather_facts: true
+  roles:
+    - ovn_central

@@ -1,0 +1,82 @@
+---
+# =============================================================================
+# verify.yml — exercises the four traffic paths the lab is about.
+#
+#   ansible-playbook verify.yml
+#
+#   1. LB ingress crossing AZs  -> curl the VIP, watch served_by flip AZ1/AZ2
+#   2. Cross-AZ DBaaS query      -> app-vm-1 (AZ1) "/" hits db-vm (AZ2): high latency
+#   3. Intra-AZ query (contrast) -> app-vm-2 (AZ2) "/" hits db-vm (AZ2): low latency
+#   4. North-south via SNAT      -> a container reaches the public internet
+# =============================================================================
+- name: Verify the lab end-to-end
+  hosts: azs
+  gather_facts: false
+  tasks:
+    - name: "[az1] IC-SB view (expect az1-chassis and az2-chassis as gateways)"
+      ansible.builtin.command: ovn-ic-sbctl --db=tcp:{{ ic_db_ip }}:{{ ic_sb_port }} show
+      register: ic_show
+      changed_when: false
+      when: is_ic_host | bool
+
+    - name: Show IC status
+      ansible.builtin.debug:
+        var: ic_show.stdout_lines
+      when: is_ic_host | bool
+
+    - name: "[host] GENEVE tunnels present in OVS"
+      become: true
+      ansible.builtin.shell: ovs-vsctl show | grep -A2 geneve || true
+      register: geneve
+      changed_when: false
+
+    - name: Show GENEVE tunnels
+      ansible.builtin.debug:
+        var: geneve.stdout_lines
+
+    - name: "[path #1] Hit the VIP 10x (served_by should flip between AZ1 and AZ2)"
+      become: true
+      ansible.builtin.shell: |
+        for i in $(seq 1 10); do curl -s --max-time 5 http://{{ vip_ip }}:{{ vip_port }}/; echo; done
+      register: vip
+      changed_when: false
+      when: is_ic_host | bool
+
+    - name: Show VIP responses
+      ansible.builtin.debug:
+        var: vip.stdout_lines
+      when: is_ic_host | bool
+
+    - name: "[paths #2/#3] Query each app backend directly (compare db_latency_ms)"
+      become: true
+      ansible.builtin.command: incus exec {{ item.name }} -- curl -s --max-time 8 http://127.0.0.1:{{ backend_port }}/
+      loop: "{{ workloads | selectattr('role', 'equalto', 'app') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: appq
+      changed_when: false
+      failed_when: false
+
+    - name: Show per-backend DB query result
+      ansible.builtin.debug:
+        msg: "{{ item.item.name }} -> {{ item.stdout }}"
+      loop: "{{ appq.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
+    - name: "[path #4] Internet from each app container via OVN SNAT"
+      become: true
+      ansible.builtin.command: incus exec {{ item.name }} -- curl -s -o /dev/null -w "%{http_code}" --max-time 8 https://example.org
+      loop: "{{ workloads | selectattr('role', 'equalto', 'app') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: netq
+      changed_when: false
+      failed_when: false
+
+    - name: Show internet reachability (expect HTTP 200)
+      ansible.builtin.debug:
+        msg: "{{ item.item.name }} -> internet HTTP {{ item.stdout }}"
+      loop: "{{ netq.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"

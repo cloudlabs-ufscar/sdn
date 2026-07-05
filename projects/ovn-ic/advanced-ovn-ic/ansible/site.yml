@@ -1,0 +1,51 @@
+---
+# =============================================================================
+# site.yml — the whole lab, in order. Each stage is its own play so the run is
+# easy to read in the output. You can also run any single stage with its own
+# playbook (common.yml, central.yml, ...).
+#
+#   ansible-playbook site.yml
+#
+# Safe to re-run: every role is idempotent.
+# =============================================================================
+- name: "Stage 2 - base packages + OVN-IC source build"
+  hosts: azs
+  gather_facts: true            # needs ansible_processor_vcpus
+  roles:
+    - common
+
+- name: "Stage 3 - control-plane databases + northd"
+  hosts: azs
+  gather_facts: false
+  roles:
+    - ovn_central
+
+- name: "Stage 4 - chassis + north-south plumbing"
+  hosts: azs
+  gather_facts: true            # needs ansible_default_ipv4.interface
+  roles:
+    - ovn_chassis
+
+- name: "Stage 5 - topology + transit federation"
+  hosts: azs
+  gather_facts: false
+  roles:
+    - ovn_topology
+
+- name: "Stage 6 - load balancer + SNAT"
+  hosts: azs
+  gather_facts: false
+  roles:
+    - ovn_services
+
+- name: "Stage 7 - Incus runtime"
+  hosts: azs
+  gather_facts: false
+  roles:
+    - incus
+
+- name: "Stage 8 - workloads (containers + FastAPI + PostgreSQL)"
+  hosts: azs
+  gather_facts: false
+  roles:
+    - workloads

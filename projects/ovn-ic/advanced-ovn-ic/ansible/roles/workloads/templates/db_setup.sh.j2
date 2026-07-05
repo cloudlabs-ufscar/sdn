@@ -1,0 +1,42 @@
+#!/bin/bash
+# Idempotent PostgreSQL setup for the advanced-ovn-ic lab. Runs INSIDE db-vm.
+set -e
+
+# 1. Listen on all interfaces (ALTER SYSTEM is version-independent).
+sudo -u postgres psql -c "ALTER SYSTEM SET listen_addresses = '*';"
+
+# 2. Allow the whole VPC supernet (both AZ subnets) to authenticate.
+HBA=$(sudo -u postgres psql -tAc 'SHOW hba_file')
+if ! grep -q 'advanced-ovn-ic' "$HBA"; then
+  echo 'host all all 10.10.0.0/16 md5 # advanced-ovn-ic' >> "$HBA"
+fi
+
+# 3. Apply listen_addresses + pg_hba changes.
+systemctl restart postgresql
+
+# 4. Application role (create only if missing).
+if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='{{ db_user }}'" | grep -q 1; then
+  sudo -u postgres psql -c "CREATE ROLE {{ db_user }} LOGIN PASSWORD '{{ db_password }}';"
+fi
+
+# 5. Application database (create only if missing).
+if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='{{ db_name }}'" | grep -q 1; then
+  sudo -u postgres createdb -O {{ db_user }} {{ db_name }}
+fi
+
+# 6. Demo table + one row the FastAPI app reads back.
+sudo -u postgres psql -d {{ db_name }} -c \
+  "CREATE TABLE IF NOT EXISTS lab_info(id serial primary key, message text);"
+if sudo -u postgres psql -d {{ db_name }} -tAc "SELECT count(*) FROM lab_info" | grep -q '^0$'; then
+  sudo -u postgres psql -d {{ db_name }} -c \
+    "INSERT INTO lab_info(message) VALUES ('hello from db-vm in {{ az_name }}');"
+fi
+
+# 7. The table was created by the postgres superuser, so grant the app role access
+#    (otherwise the FastAPI app connects fine but gets "permission denied").
+sudo -u postgres psql -d {{ db_name }} -c \
+  "GRANT USAGE ON SCHEMA public TO {{ db_user }};
+   GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA public TO {{ db_user }};
+   GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {{ db_user }};"
+
+echo "DB setup complete."

@@ -1,0 +1,16 @@
+[Unit]
+Description=OVN controller (advanced-ovn-ic lab)
+After=openvswitch-switch.service
+Wants=openvswitch-switch.service
+
+[Service]
+Type=simple
+# ovn-controller reads the local OVS db (default socket) for the chassis config
+# set above, connects to the local SB via external_ids:ovn-remote, programs
+# br-int, and brings up GENEVE tunnels to other chassis.
+ExecStart={{ ovnctl_bin.stdout }} --log-file={{ lab_dir }}/ovn-controller.log
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

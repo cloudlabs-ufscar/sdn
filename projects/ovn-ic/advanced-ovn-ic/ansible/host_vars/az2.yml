@@ -1,0 +1,46 @@
+---
+# =============================================================================
+# host_vars/az2.yml — values specific to the VM "az2" (hostname ovn-ic-lab2).
+# AZ2 holds the app's database (db-vm) plus the second app backend.
+# =============================================================================
+az_name: az2                       # MUST equal NB_Global.name (gotcha #1)
+az_private_ip: 172.18.33.126       # interface IP -> used as the GENEVE encap-ip
+az_public_ip: 201.23.74.156
+chassis_name: az2-chassis
+is_ic_host: false                  # az2 dials the IC databases on az1
+
+# --- VPC (tenant) network in this AZ ----------------------------------------
+ls_name: ls-az2
+lr_name: lr-az2
+vpc_cidr: 10.10.2.0/24
+vpc_gw: 10.10.2.1                   # lrp-az2-ls = default gateway for workloads
+lrp_ls_mac: "00:00:00:20:00:01"
+
+# --- Transit (interconnect) router port -------------------------------------
+lrp_ts_ip: 169.254.100.2
+lrp_ts_mac: "00:00:00:20:00:02"
+
+# --- External / SNAT (north-south) ------------------------------------------
+ext_bridge: br-ex
+ext_cidr: 192.168.242.0/24
+ext_host_ip: 192.168.242.1
+ext_router_ip: 192.168.242.2
+lrp_ext_mac: "00:00:00:20:00:03"
+
+# --- No load balancer on this AZ (the VIP lives on lr-az1) -------------------
+has_lb: false
+
+# --- Workloads (Incus containers) in this AZ --------------------------------
+workloads:
+  - name: app-vm-2
+    role: app
+    ip: 10.10.2.20
+    mac: "00:00:00:20:02:14"
+    lsp: lsp-app-vm-2
+    host_iface: veth-app2
+  - name: db-vm
+    role: db
+    ip: 10.10.2.10
+    mac: "00:00:00:20:01:0a"
+    lsp: lsp-db-vm
+    host_iface: veth-db

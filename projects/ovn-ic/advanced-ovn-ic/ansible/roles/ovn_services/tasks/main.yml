@@ -1,0 +1,137 @@
+---
+# =============================================================================
+# role: ovn_services
+# The two OVN features the previous lab never touched.
+#
+#   A) North-south SNAT (both AZs): give each gateway router an external port on
+#      the physnet-ext network (br-ex), a default route to the host, and a SNAT
+#      rule so the VPC subnet can reach the internet.
+#   B) Native OVN load balancer (az1 only): VIP -> the app backends in BOTH AZs.
+#
+# Note: lr-az1 now has TWO distributed gateway ports (transit + external), so the
+# SNAT rule must say which one it belongs to (--gateway-port), otherwise OVN
+# can't decide. Route resolution by next-hop is automatic.
+# =============================================================================
+
+# ---------- A) External connectivity + SNAT (both AZs) ----------------------
+- name: Create the external logical switch
+  ansible.builtin.command:
+    cmd: ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} --may-exist ls-add ls-ext-{{ az_name }}
+  changed_when: false
+
+- name: Add the localnet port (bridges ls-ext to physnet-ext / br-ex)
+  ansible.builtin.command:
+    cmd: >
+      ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} --may-exist
+      lsp-add ls-ext-{{ az_name }} ln-ext-{{ az_name }}
+  changed_when: false
+
+- name: Configure the localnet port
+  ansible.builtin.command:
+    cmd: >
+      ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }}
+      -- lsp-set-type ln-ext-{{ az_name }} localnet
+      -- lsp-set-addresses ln-ext-{{ az_name }} unknown
+      -- lsp-set-options ln-ext-{{ az_name }} network_name=physnet-ext
+  changed_when: false
+
+- name: Add the router's external port
+  ansible.builtin.command:
+    cmd: >
+      ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} --may-exist
+      lrp-add {{ lr_name }} lrp-{{ az_name }}-ext {{ lrp_ext_mac }} {{ ext_router_ip }}/24
+  changed_when: false
+
+- name: Pin a gateway chassis on the external port (NAT runs there)
+  ansible.builtin.command:
+    cmd: >
+      ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }}
+      lrp-set-gateway-chassis lrp-{{ az_name }}-ext {{ chassis_name }} 1
+  changed_when: false
+
+- name: Connect the external switch to the router
+  ansible.builtin.command:
+    cmd: >
+      ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} --may-exist
+      lsp-add ls-ext-{{ az_name }} lsp-extrtr-{{ az_name }}
+  changed_when: false
+
+- name: Make that a router patch port
+  ansible.builtin.command:
+    cmd: >
+      ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }}
+      -- lsp-set-type lsp-extrtr-{{ az_name }} router
+      -- lsp-set-addresses lsp-extrtr-{{ az_name }} router
+      -- lsp-set-options lsp-extrtr-{{ az_name }} router-port=lrp-{{ az_name }}-ext
+  changed_when: false
+
+- name: Default route out the external port (next hop = host on br-ex)
+  ansible.builtin.command:
+    cmd: >
+      ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} --may-exist
+      lr-route-add {{ lr_name }} 0.0.0.0/0 {{ ext_host_ip }}
+  changed_when: false
+
+# Idempotent SNAT: only add it if lr-nat-list doesn't already show this subnet.
+- name: Read existing NAT rules
+  ansible.builtin.command:
+    cmd: ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} lr-nat-list {{ lr_name }}
+  register: nat_list
+  changed_when: false
+
+- name: Add OVN SNAT for the VPC subnet (north-south)
+  ansible.builtin.command:
+    cmd: >
+      ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }}
+      --gateway-port=lrp-{{ az_name }}-ext
+      lr-nat-add {{ lr_name }} snat {{ ext_router_ip }} {{ vpc_cidr }}
+  when: vpc_cidr not in nat_list.stdout
+
+# ---------- B) Native OVN load balancer (az1 only) --------------------------
+- name: Build the LB backend list (every app workload, both AZs)
+  ansible.builtin.set_fact:
+    lb_backends: >-
+      {{ groups['azs']
+         | map('extract', hostvars)
+         | map(attribute='workloads')
+         | flatten
+         | selectattr('role', 'equalto', 'app')
+         | map(attribute='ip')
+         | map('regex_replace', '$', ':' ~ backend_port | string)
+         | join(',') }}
+  when: has_lb | bool
+
+- name: Create the OVN load balancer (VIP -> app backends)
+  ansible.builtin.command:
+    cmd: >
+      ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} --may-exist
+      lb-add lb-web {{ vip_ip }}:{{ vip_port }} {{ lb_backends }} tcp
+  when: has_lb | bool
+  changed_when: false
+
+- name: Attach the load balancer to this AZ's gateway router
+  ansible.builtin.command:
+    cmd: >
+      ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} --may-exist
+      lr-lb-add {{ lr_name }} lb-web
+  when: has_lb | bool
+  changed_when: false
+
+# Force the gateway router to SNAT load-balanced traffic to its own port IP. This
+# is what makes the AZ2 backend work: app-vm-2 then replies to lr-az1 (over the
+# transit), so the LB sees the return and can un-DNAT it. Without it, app-vm-2
+# would reply straight to the client and the connection would hang.
+- name: Force SNAT for load-balanced traffic
+  ansible.builtin.command:
+    cmd: >
+      ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }}
+      set logical_router {{ lr_name }} options:lb_force_snat_ip=router_ip
+  when: has_lb | bool
+  changed_when: false
+
+- name: Add a host route to the VIP so you can curl it from outside the fabric
+  become: true
+  ansible.builtin.command:
+    cmd: ip route replace {{ vip_ip }}/32 via {{ ext_router_ip }} dev {{ ext_bridge }}
+  when: has_lb | bool
+  changed_when: false

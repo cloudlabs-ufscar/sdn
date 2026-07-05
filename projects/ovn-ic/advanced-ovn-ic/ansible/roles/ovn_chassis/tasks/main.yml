@@ -1,0 +1,151 @@
+---
+# =============================================================================
+# role: ovn_chassis
+# Turns THIS VM into an OVN chassis and wires up north-south connectivity.
+#
+#   1. Configure OVS (system-id, ovn-remote, GENEVE encap-ip, interconn flag,
+#      bridge mapping for the external network).
+#   2. Run ovn-controller (it auto-creates br-int and binds logical ports).
+#   3. Create an external OVS bridge (br-ex) with a host gateway IP, enable
+#      forwarding and MASQUERADE so the OVN routers can reach the internet.
+#   4. Open the firewall between the two chassis (GENEVE + IC databases).
+# =============================================================================
+
+- name: Resolve ovn-controller path
+  ansible.builtin.shell:
+    cmd: "command -v ovn-controller"
+  environment:
+    PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  register: ovnctl_bin
+  changed_when: false
+
+# external_ids:ovn-encap-ip is the GENEVE tunnel source. We use the private
+# interface IP because (as we verified) the two VMs route to each other on it.
+# ovn-is-interconn=true is what makes ovn-ic register this chassis as a gateway.
+- name: Configure the OVS chassis
+  become: true
+  ansible.builtin.command:
+    cmd: >
+      ovs-vsctl set open_vswitch .
+      external_ids:system-id={{ chassis_name }}
+      external_ids:ovn-remote=tcp:127.0.0.1:{{ sb_port }}
+      external_ids:ovn-encap-type=geneve
+      external_ids:ovn-encap-ip={{ az_private_ip }}
+      external_ids:ovn-is-interconn=true
+      external_ids:ovn-bridge-mappings=physnet-ext:{{ ext_bridge }}
+  changed_when: false        # ovs-vsctl set is idempotent in effect
+
+- name: Create the external OVS bridge (br-ex)
+  become: true
+  ansible.builtin.command:
+    cmd: ovs-vsctl --may-exist add-br {{ ext_bridge }}
+  changed_when: false
+
+# The host owns .1 on br-ex; OVN's external router port will be .2 and ARP for
+# this. `ip addr replace` is idempotent (adds or updates). Not reboot-persistent:
+# re-running this playbook re-applies it, which is fine for a lab.
+- name: Bring up br-ex and give the host its gateway IP on it
+  become: true
+  ansible.builtin.shell:
+    cmd: |
+      ip link set {{ ext_bridge }} up
+      ip addr replace {{ ext_host_ip }}/24 dev {{ ext_bridge }}
+  changed_when: false
+
+- name: Install the ovn-controller systemd unit
+  become: true
+  ansible.builtin.template:
+    src: ovn-controller.service.j2
+    dest: /etc/systemd/system/ovn-controller.service
+    mode: "0644"
+  notify: reload systemd
+
+- name: Apply pending systemd unit changes
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start ovn-controller
+  become: true
+  ansible.builtin.systemd_service:
+    name: ovn-controller
+    enabled: true
+    state: started
+
+- name: Wait for ovn-controller to create br-int
+  become: true
+  ansible.builtin.command: ovs-vsctl br-exists br-int
+  register: brint
+  retries: 10
+  delay: 2
+  until: brint.rc == 0
+  changed_when: false
+
+# --- North-south plumbing on the host ---------------------------------------
+- name: Enable IPv4 forwarding on the host
+  become: true
+  ansible.posix.sysctl:
+    name: net.ipv4.ip_forward
+    value: "1"
+    sysctl_set: true
+    state: present
+    reload: true
+
+# OVN SNATs the VPC subnet to the router's external IP (192.168.24x.2); this rule
+# then MASQUERADEs that external subnet out the real uplink (ens3). Two NATs, but
+# it keeps ens3 untouched so SSH/Ansible never break.
+- name: MASQUERADE the external subnet out the uplink (host-level SNAT)
+  become: true
+  ansible.builtin.iptables:
+    table: nat
+    chain: POSTROUTING
+    source: "{{ ext_cidr }}"
+    out_interface: "{{ ansible_facts.default_ipv4.interface }}"
+    jump: MASQUERADE
+    comment: "advanced-ovn-ic: host SNAT for OVN external subnet"
+
+- name: Allow forwarding br-ex -> uplink
+  become: true
+  ansible.builtin.iptables:
+    chain: FORWARD
+    in_interface: "{{ ext_bridge }}"
+    out_interface: "{{ ansible_facts.default_ipv4.interface }}"
+    jump: ACCEPT
+    comment: "advanced-ovn-ic: forward out"
+
+- name: Allow return traffic uplink -> br-ex
+  become: true
+  ansible.builtin.iptables:
+    chain: FORWARD
+    in_interface: "{{ ansible_facts.default_ipv4.interface }}"
+    out_interface: "{{ ext_bridge }}"
+    ctstate: ["RELATED", "ESTABLISHED"]
+    jump: ACCEPT
+    comment: "advanced-ovn-ic: forward return"
+
+# --- Firewall between the two chassis ---------------------------------------
+- name: Determine the peer AZ's private IP
+  ansible.builtin.set_fact:
+    peer_private_ip: "{{ hostvars[(groups['azs'] | difference([inventory_hostname]))[0]].az_private_ip }}"
+
+- name: Allow GENEVE (UDP 6081) from the peer AZ
+  become: true
+  community.general.ufw:
+    rule: allow
+    proto: udp
+    port: "6081"
+    src: "{{ peer_private_ip }}"
+    comment: "advanced-ovn-ic: GENEVE from peer"
+  failed_when: false          # harmless if ufw is inactive/absent
+
+- name: Allow IC-NB/IC-SB from the peer AZ (ic_host only)
+  become: true
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    port: "{{ item }}"
+    src: "{{ peer_private_ip }}"
+    comment: "advanced-ovn-ic: IC database from peer"
+  loop:
+    - "{{ ic_nb_port }}"
+    - "{{ ic_sb_port }}"
+  when: is_ic_host | bool
+  failed_when: false

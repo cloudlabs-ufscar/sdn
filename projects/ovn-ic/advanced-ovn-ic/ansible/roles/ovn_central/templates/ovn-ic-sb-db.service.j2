@@ -1,0 +1,17 @@
+[Unit]
+Description=OVN Interconnection Southbound DB (advanced-ovn-ic lab)
+After=openvswitch-switch.service
+Wants=openvswitch-switch.service
+
+[Service]
+Type=simple
+# Global IC-SB. Holds the registered gateways and the learned IC routes.
+ExecStart={{ bin['ovsdb-server'] }} {{ lab_dir }}/ic-sb.db \
+  --remote=ptcp:{{ ic_sb_port }}:{{ az_private_ip }} \
+  --unixctl={{ lab_dir }}/ic-sb.ctl \
+  --log-file={{ lab_dir }}/ic-sb.log
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

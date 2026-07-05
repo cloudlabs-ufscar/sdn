@@ -1,0 +1,202 @@
+---
+# =============================================================================
+# role: common
+# Runs on BOTH AZs. Installs the base packages, then compiles OVN v24.03.6 from
+# source ONLY to obtain what the Ubuntu package omits: the `ovn-ic` daemon, the
+# ovn-ic-nbctl/ovn-ic-sbctl tools, and the IC-NB / IC-SB schemas.
+#
+# The base running daemons (ovsdb-server, ovn-northd, ovn-controller, ovs-*) come
+# from apt; only the interconnect pieces come from source. This mirrors the
+# working previous lab.
+#
+# Idempotency: the whole compile is wrapped in `when: not ovn_ic.stat.exists`, so
+# the expensive step runs once. Delete /usr/local/bin/ovn-ic to force a rebuild.
+# =============================================================================
+
+- name: Install base + build dependencies
+  become: true
+  ansible.builtin.apt:
+    name:
+      # --- base OVS/OVN runtime (provides ovs-vsctl, ovsdb-server, ovn-northd,
+      #     ovn-controller and the local NB/SB schemas in /usr/share/ovn) ---
+      - openvswitch-switch
+      - ovn-central
+      - ovn-host
+      # --- toolchain to build OVN/OVS from source ---
+      - git
+      - automake
+      - autoconf
+      - libtool
+      - make
+      - gcc
+      - libssl-dev
+      - libcap-ng-dev
+      - python3-dev
+      - python3-pip
+      - python3-sphinx
+      - libunbound-dev
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+    install_recommends: false
+
+# The apt packages ship systemd units that would fight our hand-run daemons for
+# the same ports/sockets. Stop and disable them; we manage OVN ourselves.
+- name: Disable the apt-shipped OVN services (we run our own)
+  become: true
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    state: stopped
+    enabled: false
+  loop:
+    - ovn-central
+    - ovn-host
+    - ovn-ovsdb-server-nb
+    - ovn-ovsdb-server-sb
+  failed_when: false        # some of these units may not exist; that's fine
+
+- name: Ensure Open vSwitch itself is enabled and running
+  become: true
+  ansible.builtin.systemd_service:
+    name: openvswitch-switch
+    state: started
+    enabled: true
+
+# ---------------------------------------------------------------------------
+# Build OVN + ovn-ic from source (only if ovn-ic is not already installed)
+# ---------------------------------------------------------------------------
+- name: Check whether ovn-ic is already installed
+  ansible.builtin.stat:
+    path: /usr/local/bin/ovn-ic
+  register: ovn_ic
+
+- name: Compile and install OVN-IC from source
+  when: not ovn_ic.stat.exists
+  become: true
+  block:
+    - name: Create the build directory
+      ansible.builtin.file:
+        path: "{{ build_dir }}"
+        state: directory
+        owner: "{{ ansible_user }}"
+        mode: "0755"
+
+    - name: Clone OVS (pinned to {{ ovs_version }})
+      become: false        # clone as the normal user into a dir it owns
+      ansible.builtin.git:
+        repo: https://github.com/openvswitch/ovs.git
+        dest: "{{ build_dir }}/ovs"
+        version: "{{ ovs_version }}"
+        depth: 1
+        single_branch: true
+
+    - name: Clone OVN (pinned to {{ ovn_version }}, includes ovn-ic)
+      become: false
+      ansible.builtin.git:
+        repo: https://github.com/ovn-org/ovn.git
+        dest: "{{ build_dir }}/ovn"
+        version: "{{ ovn_version }}"
+        depth: 1
+        single_branch: true
+
+    # --- build OVS first (OVN's build needs the OVS source + build tree) ---
+    - name: OVS - bootstrap (./boot.sh)
+      become: false
+      ansible.builtin.command:
+        cmd: ./boot.sh
+        chdir: "{{ build_dir }}/ovs"
+        creates: "{{ build_dir }}/ovs/configure"
+
+    - name: OVS - configure
+      become: false
+      ansible.builtin.command:
+        cmd: ./configure
+        chdir: "{{ build_dir }}/ovs"
+        creates: "{{ build_dir }}/ovs/Makefile"
+
+    - name: OVS - make (this is the long one)
+      become: false
+      ansible.builtin.command:
+        cmd: make -j{{ ansible_processor_vcpus | default(2) }}
+        chdir: "{{ build_dir }}/ovs"
+        creates: "{{ build_dir }}/ovs/lib/libopenvswitch.la"
+
+    # --- build OVN against that OVS tree ---
+    - name: OVN - bootstrap (./boot.sh)
+      become: false
+      ansible.builtin.command:
+        cmd: ./boot.sh
+        chdir: "{{ build_dir }}/ovn"
+        creates: "{{ build_dir }}/ovn/configure"
+
+    - name: OVN - configure (point at the OVS source/build trees)
+      become: false
+      ansible.builtin.command:
+        cmd: ./configure --with-ovs-source={{ build_dir }}/ovs --with-ovs-build={{ build_dir }}/ovs
+        chdir: "{{ build_dir }}/ovn"
+        creates: "{{ build_dir }}/ovn/Makefile"
+
+    - name: OVN - make (builds ovn-ic and the IC tools)
+      become: false
+      ansible.builtin.command:
+        cmd: make -j{{ ansible_processor_vcpus | default(2) }}
+        chdir: "{{ build_dir }}/ovn"
+        creates: "{{ build_dir }}/ovn/northd/ovn-northd"
+
+    # --- locate and install the interconnect artifacts ---
+    - name: Find the ovn-ic binaries in the build tree
+      ansible.builtin.find:
+        paths: "{{ build_dir }}/ovn"
+        patterns: "{{ item }}"
+        recurse: true
+        file_type: file
+      register: ic_bins
+      loop:
+        - ovn-ic
+        - ovn-ic-nbctl
+        - ovn-ic-sbctl
+
+    - name: Install the ovn-ic binaries into /usr/local/bin
+      ansible.builtin.copy:
+        src: "{{ item.files[0].path }}"
+        dest: "/usr/local/bin/{{ item.item }}"
+        remote_src: true
+        mode: "0755"
+      loop: "{{ ic_bins.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Find the IC-NB / IC-SB schemas in the build tree
+      ansible.builtin.find:
+        paths: "{{ build_dir }}/ovn"
+        patterns: "{{ item }}"
+        recurse: true
+      register: ic_schemas
+      loop:
+        - ovn-ic-nb.ovsschema
+        - ovn-ic-sb.ovsschema
+
+    - name: Ensure /usr/local/share/ovn exists
+      ansible.builtin.file:
+        path: /usr/local/share/ovn
+        state: directory
+        mode: "0755"
+
+    - name: Install the IC schemas into /usr/local/share/ovn
+      ansible.builtin.copy:
+        src: "{{ item.files[0].path }}"
+        dest: "/usr/local/share/ovn/{{ item.item }}"
+        remote_src: true
+        mode: "0644"
+      loop: "{{ ic_schemas.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+- name: Confirm the interconnect tooling is present
+  ansible.builtin.command: ovn-ic --version
+  register: ovn_ic_version
+  changed_when: false
+
+- name: Show ovn-ic version
+  ansible.builtin.debug:
+    msg: "{{ ovn_ic_version.stdout_lines | first }}"

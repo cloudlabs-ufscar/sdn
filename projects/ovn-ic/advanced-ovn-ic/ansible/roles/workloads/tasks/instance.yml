@@ -1,0 +1,82 @@
+---
+# Per-container lifecycle (called once per workload, with loop_var `wl`).
+# The launch/device tasks are made idempotent by tolerating "already exists".
+
+- name: Launch container {{ wl.name }}
+  become: true
+  ansible.builtin.command:
+    cmd: incus launch images:ubuntu/24.04 {{ wl.name }} -p ovn
+  register: launch
+  changed_when: launch.rc == 0
+  failed_when: launch.rc != 0 and 'already exists' not in (launch.stderr | lower)
+
+# nictype=p2p: Incus only builds the veth pair (container side = eth0 with our MAC
+# and MTU; host side = host_iface, left unbridged). We do the OVS plumbing
+# ourselves below, instead of relying on Incus's native OVS client (which fails
+# to talk to the OVS db on Incus 6.0). This matches the lab's "OVN driven
+# manually, Incus only provides the workload" design.
+- name: Attach a p2p veth to {{ wl.name }}
+  become: true
+  ansible.builtin.command:
+    cmd: >
+      incus config device add {{ wl.name }} eth0 nic
+      nictype=p2p name=eth0 host_name={{ wl.host_iface }}
+      hwaddr={{ wl.mac }} mtu={{ overlay_mtu }}
+  register: nicadd
+  changed_when: nicadd.rc == 0
+  failed_when: nicadd.rc != 0 and 'already exists' not in (nicadd.stderr | lower)
+
+- name: Plug the host veth into br-int with its OVN iface-id
+  become: true
+  ansible.builtin.shell:
+    cmd: |
+      ip link set {{ wl.host_iface }} up
+      ovs-vsctl --may-exist add-port br-int {{ wl.host_iface }} \
+        -- set interface {{ wl.host_iface }} external_ids:iface-id={{ wl.lsp }}
+  changed_when: false
+
+- name: Render the static netplan for {{ wl.name }}
+  ansible.builtin.template:
+    src: netplan-ovn.yaml.j2
+    dest: /tmp/netplan-{{ wl.name }}.yaml
+    mode: "0600"
+
+- name: Push the netplan into {{ wl.name }}
+  become: true
+  ansible.builtin.command:
+    cmd: >
+      incus file push /tmp/netplan-{{ wl.name }}.yaml
+      {{ wl.name }}/etc/netplan/90-ovn.yaml --mode 0600 --uid 0 --gid 0
+  changed_when: false
+
+- name: Remove the default DHCP netplan in {{ wl.name }}
+  become: true
+  ansible.builtin.command:
+    cmd: incus exec {{ wl.name }} -- rm -f /etc/netplan/10-cloud-init.yaml /etc/netplan/50-cloud-init.yaml
+  changed_when: false
+
+- name: Apply the static network config in {{ wl.name }}
+  become: true
+  ansible.builtin.command:
+    cmd: incus exec {{ wl.name }} -- netplan apply
+  changed_when: false
+
+- name: Wait until {{ wl.name }} can reach its gateway over OVN
+  become: true
+  ansible.builtin.command:
+    cmd: incus exec {{ wl.name }} -- ping -c1 -W2 {{ vpc_gw }}
+  register: gwping
+  retries: 15
+  delay: 2
+  until: gwping.rc == 0
+  changed_when: false
+
+- name: Wait until {{ wl.name }} can reach the internet via OVN SNAT
+  become: true
+  ansible.builtin.command:
+    cmd: incus exec {{ wl.name }} -- ping -c1 -W3 1.1.1.1
+  register: netping
+  retries: 15
+  delay: 2
+  until: netping.rc == 0
+  changed_when: false

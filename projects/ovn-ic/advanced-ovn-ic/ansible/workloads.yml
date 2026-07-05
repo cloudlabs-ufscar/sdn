@@ -1,0 +1,9 @@
+---
+# workloads.yml — Stage 8. Containers on br-int + FastAPI + PostgreSQL.
+#
+#   ansible-playbook workloads.yml
+- name: Deploy the Incus workloads and their software
+  hosts: azs
+  gather_facts: false
+  roles:
+    - workloads

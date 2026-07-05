@@ -1,0 +1,133 @@
+---
+# =============================================================================
+# role: ovn_central
+# Brings up the OVN control-plane databases and ovn-northd for THIS AZ, each as
+# its own systemd unit (cleaner and more idempotent than the bash `--detach`).
+#
+#   - both AZs: local NB (6641) + local SB (6642), bound to 127.0.0.1
+#   - ic_host (az1) ALSO: global IC-NB (6645) + IC-SB (6646), bound to its
+#     private IP so the az2 ovn-ic daemon can dial in.
+#
+# The local NB/SB schemas come from the apt package (/usr/share/ovn). The IC
+# schemas come from the source build the `common` role placed in
+# /usr/local/share/ovn.
+# =============================================================================
+
+- name: Ensure the lab working directory exists
+  become: true
+  ansible.builtin.file:
+    path: "{{ lab_dir }}"
+    state: directory
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0755"
+
+# systemd's ExecStart wants absolute paths. ovsdb-server/ovn-northd may live in
+# /usr/sbin or /usr/bin depending on the build, so we resolve them at runtime
+# and store name->path in the `bin` fact for the unit templates.
+- name: Resolve OVN/OVS daemon paths
+  ansible.builtin.shell:
+    cmd: "command -v {{ item }}"
+  environment:
+    PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  register: central_bins
+  changed_when: false
+  loop:
+    - ovsdb-server
+    - ovn-northd
+
+- name: Map daemon name -> absolute path
+  ansible.builtin.set_fact:
+    bin: "{{ bin | default({}) | combine({item.item: item.stdout}) }}"
+  loop: "{{ central_bins.results }}"
+  loop_control:
+    label: "{{ item.item }} -> {{ item.stdout }}"
+
+# --- Local Northbound / Southbound databases (both AZs) ----------------------
+- name: Create the local NB database file
+  become: true
+  ansible.builtin.command:
+    cmd: ovsdb-tool create {{ lab_dir }}/ovnnb.db /usr/share/ovn/ovn-nb.ovsschema
+    creates: "{{ lab_dir }}/ovnnb.db"
+
+- name: Create the local SB database file
+  become: true
+  ansible.builtin.command:
+    cmd: ovsdb-tool create {{ lab_dir }}/ovnsb.db /usr/share/ovn/ovn-sb.ovsschema
+    creates: "{{ lab_dir }}/ovnsb.db"
+
+- name: Install NB / SB / northd systemd units
+  become: true
+  ansible.builtin.template:
+    src: "{{ item }}.service.j2"
+    dest: "/etc/systemd/system/{{ item }}.service"
+    mode: "0644"
+  loop:
+    - ovn-nb-db
+    - ovn-sb-db
+    - ovn-northd
+  notify: reload systemd
+
+# --- Global interconnect databases (only on az1) -----------------------------
+- name: Create the IC-NB / IC-SB database files (ic_host only)
+  become: true
+  ansible.builtin.command:
+    cmd: "ovsdb-tool create {{ lab_dir }}/{{ item.db }} {{ item.schema }}"
+    creates: "{{ lab_dir }}/{{ item.db }}"
+  loop:
+    - { db: ic-nb.db, schema: /usr/local/share/ovn/ovn-ic-nb.ovsschema }
+    - { db: ic-sb.db, schema: /usr/local/share/ovn/ovn-ic-sb.ovsschema }
+  when: is_ic_host | bool
+
+- name: Install IC-NB / IC-SB systemd units (ic_host only)
+  become: true
+  ansible.builtin.template:
+    src: "{{ item }}.service.j2"
+    dest: "/etc/systemd/system/{{ item }}.service"
+    mode: "0644"
+  loop:
+    - ovn-ic-nb-db
+    - ovn-ic-sb-db
+  when: is_ic_host | bool
+  notify: reload systemd
+
+# Apply the daemon-reload now so the units below exist before we start them.
+- name: Apply pending systemd unit changes
+  ansible.builtin.meta: flush_handlers
+
+# --- Start everything in dependency order ------------------------------------
+- name: Enable and start the IC databases first (ic_host only)
+  become: true
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+  loop:
+    - ovn-ic-nb-db
+    - ovn-ic-sb-db
+  when: is_ic_host | bool
+
+- name: Enable and start local NB and SB
+  become: true
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+  loop:
+    - ovn-nb-db
+    - ovn-sb-db
+
+- name: Enable and start ovn-northd
+  become: true
+  ansible.builtin.systemd_service:
+    name: ovn-northd
+    enabled: true
+    state: started
+
+- name: Wait for the local NB to accept connections
+  ansible.builtin.command: ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} --timeout=5 ls-list
+  register: nb_ready
+  retries: 10
+  delay: 2
+  until: nb_ready.rc == 0
+  changed_when: false

@@ -1,0 +1,50 @@
+---
+# =============================================================================
+# group_vars/all.yml — variables visible to EVERY host in the inventory.
+# Anything that is the same on both AZs lives here; per-AZ values live in
+# host_vars/az1.yml and host_vars/az2.yml.
+# =============================================================================
+
+# --- Source build (carries over from the previous lab) -----------------------
+# The ovn-central package on Ubuntu 24.04 ships neither the ovn-ic binary nor the
+# IC-NB/IC-SB schemas, so we compile OVN from source. OVS is pinned to v3.3.0
+# because OVS main renamed a symbol that breaks the OVN 24.03 build.
+ovn_version: "v24.03.6"
+ovs_version: "v3.3.0"
+build_dir: /opt/ovn-build          # persistent: a re-run skips the ~10-20 min compile
+lab_dir: /opt/ovn-lab              # local databases, logs and sockets live here
+
+# --- Local OVN databases (one pair per AZ, bound to localhost) ---------------
+nb_port: 6641                      # local Northbound  (bound to 127.0.0.1)
+sb_port: 6642                      # local Southbound  (bound to 127.0.0.1)
+
+# --- Global interconnect databases (only on ic_host = az1) -------------------
+ic_nb_port: 6645
+ic_sb_port: 6646
+ic_host: az1                                       # which VM runs IC-NB/IC-SB
+ic_db_ip: "{{ hostvars[ic_host].az_private_ip }}"  # both ovn-ic daemons dial this
+
+# --- Interconnect transit switch --------------------------------------------
+# Created ONLY in IC-NB; ovn-ic propagates it into each local NB. Never create it
+# by hand in a local NB (gotcha #2 from the previous lab).
+transit_switch: ts
+transit_subnet_cidr: 169.254.100.0/24
+
+# --- MTU --------------------------------------------------------------------
+# Host NIC (ens3) MTU is 1500. OVN GENEVE adds ~58 bytes of encapsulation, so the
+# inner workload MTU must be <= 1442 or cross-AZ TCP (app -> db over the tunnel)
+# stalls on full-size segments. This is the MTU pressure that plain ping hid.
+overlay_mtu: 1442
+
+# --- Application + native OVN load balancer ---------------------------------
+vip_ip: 10.10.1.100                # OVN load-balancer VIP (lives in the AZ1 subnet)
+vip_port: 80
+backend_port: 8000                 # FastAPI listens here on every app workload
+
+# --- Managed database (db-vm, in AZ2) ---------------------------------------
+db_az: az2                         # which AZ the database lives in (for the UI)
+db_host_ip: 10.10.2.10
+db_port: 5432
+db_name: appdb
+db_user: appuser
+db_password: apppass

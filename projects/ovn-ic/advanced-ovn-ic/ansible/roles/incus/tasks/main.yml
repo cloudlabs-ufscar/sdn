@@ -1,0 +1,43 @@
+---
+# =============================================================================
+# role: incus
+# Installs Incus and initializes it minimally. Incus provides ONLY the container
+# runtime here; every workload's networking is OVN, wired by the workloads role
+# (we attach each container's veth into br-int with the right iface-id).
+# =============================================================================
+
+- name: Install Incus
+  become: true
+  ansible.builtin.apt:
+    name: incus
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Ensure the Incus socket is enabled and active
+  become: true
+  ansible.builtin.systemd_service:
+    name: incus.socket
+    enabled: true
+    state: started
+
+# `incus admin init --minimal` is not idempotent (it errors if already done), so
+# we only run it when no storage pool exists yet.
+- name: Check whether Incus is already initialized
+  become: true
+  ansible.builtin.command: incus storage list --format csv
+  register: incus_storage
+  changed_when: false
+  failed_when: false
+
+- name: Initialize Incus (default dir storage pool + incusbr0)
+  become: true
+  ansible.builtin.command: incus admin init --minimal
+  when: incus_storage.stdout | trim == ""
+
+- name: Add the login user to the incus-admin group (run incus without sudo)
+  become: true
+  ansible.builtin.user:
+    name: "{{ ansible_user }}"
+    groups: incus-admin
+    append: true

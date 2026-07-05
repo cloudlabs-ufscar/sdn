@@ -1,0 +1,17 @@
+[Unit]
+Description=OVN Southbound ovsdb-server (advanced-ovn-ic lab)
+After=openvswitch-switch.service
+Wants=openvswitch-switch.service
+
+[Service]
+Type=simple
+# Bound to 127.0.0.1: ovn-controller and ovn-ic on THIS host connect locally.
+ExecStart={{ bin['ovsdb-server'] }} {{ lab_dir }}/ovnsb.db \
+  --remote=ptcp:{{ sb_port }}:127.0.0.1 \
+  --unixctl={{ lab_dir }}/ovnsb.ctl \
+  --log-file={{ lab_dir }}/ovnsb.log
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

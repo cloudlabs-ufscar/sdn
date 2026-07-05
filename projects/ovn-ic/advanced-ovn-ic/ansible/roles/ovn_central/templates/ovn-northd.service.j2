@@ -1,0 +1,18 @@
+[Unit]
+Description=OVN northd (advanced-ovn-ic lab)
+After=ovn-nb-db.service ovn-sb-db.service
+Wants=ovn-nb-db.service ovn-sb-db.service
+
+[Service]
+Type=simple
+# northd translates the Northbound (intent) into the Southbound (flows).
+ExecStart={{ bin['ovn-northd'] }} \
+  --ovnnb-db=tcp:127.0.0.1:{{ nb_port }} \
+  --ovnsb-db=tcp:127.0.0.1:{{ sb_port }} \
+  --unixctl={{ lab_dir }}/ovn-northd.ctl \
+  --log-file={{ lab_dir }}/ovn-northd.log
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

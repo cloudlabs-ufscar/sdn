@@ -1,0 +1,24 @@
+---
+# =============================================================================
+# ping.yml — the smallest possible playbook. Run this FIRST to prove Ansible can
+# reach both VMs before you spend 20 minutes compiling anything.
+#
+#   ansible-playbook ping.yml
+#
+# ansible.builtin.ping is NOT ICMP: it logs in over SSH, copies a tiny Python
+# module, runs it, and expects "pong" back. So a green result proves SSH + sudo
+# user + a working Python 3 on the target — exactly what every later task needs.
+# =============================================================================
+- name: Connectivity check
+  hosts: azs
+  gather_facts: false
+  tasks:
+    - name: Reach the host and run Python on it
+      ansible.builtin.ping:
+
+    - name: Print identity and addressing for each AZ
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} = {{ az_name }}
+          private={{ az_private_ip }} public={{ az_public_ip }}
+          vpc={{ vpc_cidr }}

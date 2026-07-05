@@ -1,0 +1,17 @@
+[Unit]
+Description=OVN Northbound ovsdb-server (advanced-ovn-ic lab)
+After=openvswitch-switch.service
+Wants=openvswitch-switch.service
+
+[Service]
+Type=simple
+# Bound to 127.0.0.1: the local NB is private to this AZ.
+ExecStart={{ bin['ovsdb-server'] }} {{ lab_dir }}/ovnnb.db \
+  --remote=ptcp:{{ nb_port }}:127.0.0.1 \
+  --unixctl={{ lab_dir }}/ovnnb.ctl \
+  --log-file={{ lab_dir }}/ovnnb.log
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,13 @@
+---
+# =============================================================================
+# common.yml — Stage 2. Runs the `common` role on both AZs: base packages plus
+# compiling OVN-IC from source. The first run takes ~10-20 min per VM (they run
+# in parallel); later runs finish in seconds because the binary already exists.
+#
+#   ansible-playbook common.yml
+# =============================================================================
+- name: Base packages and OVN-IC source build
+  hosts: azs
+  gather_facts: true          # we need ansible_processor_vcpus for `make -j`
+  roles:
+    - common

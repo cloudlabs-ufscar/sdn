@@ -1,0 +1,13 @@
+---
+# topology.yml — Stage 5. Per-AZ logical network + transit switch federation.
+#
+# Run as one play over BOTH hosts: Ansible finishes each task on every host
+# before moving on, which gives us the cross-host ordering we need (az1 creates
+# the transit switch in IC-NB before either ovn-ic starts).
+#
+#   ansible-playbook topology.yml
+- name: Build and federate the OVN topology
+  hosts: azs
+  gather_facts: false
+  roles:
+    - ovn_topology

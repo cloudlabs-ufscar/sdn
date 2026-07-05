@@ -1,0 +1,8 @@
+---
+# Handlers run only when a task "notifies" them, and only once at the end of the
+# play (or where we call flush_handlers). This one re-reads unit files after we
+# add or change them.
+- name: reload systemd
+  become: true
+  ansible.builtin.systemd_service:
+    daemon_reload: true

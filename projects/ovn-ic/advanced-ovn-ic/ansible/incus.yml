@@ -1,0 +1,9 @@
+---
+# incus.yml — Stage 7. Install and initialize Incus on both AZs.
+#
+#   ansible-playbook incus.yml
+- name: Install and initialize Incus
+  hosts: azs
+  gather_facts: false
+  roles:
+    - incus

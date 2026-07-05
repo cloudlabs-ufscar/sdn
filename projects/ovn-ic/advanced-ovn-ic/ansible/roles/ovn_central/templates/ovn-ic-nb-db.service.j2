@@ -1,0 +1,18 @@
+[Unit]
+Description=OVN Interconnection Northbound DB (advanced-ovn-ic lab)
+After=openvswitch-switch.service
+Wants=openvswitch-switch.service
+
+[Service]
+Type=simple
+# Global IC-NB. Bound to this AZ's PRIVATE IP so the remote ovn-ic (az2) can
+# reach it; the transit switch is declared here and propagated to every AZ.
+ExecStart={{ bin['ovsdb-server'] }} {{ lab_dir }}/ic-nb.db \
+  --remote=ptcp:{{ ic_nb_port }}:{{ az_private_ip }} \
+  --unixctl={{ lab_dir }}/ic-nb.ctl \
+  --log-file={{ lab_dir }}/ic-nb.log
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

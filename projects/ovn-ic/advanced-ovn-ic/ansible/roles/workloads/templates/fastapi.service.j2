@@ -1,0 +1,21 @@
+[Unit]
+Description=FastAPI backend (advanced-ovn-ic lab)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# The app reads everything from the environment so the same code runs in both AZs.
+Environment=APP_AZ={{ az_name }}
+Environment=APP_HOST={{ wl.name }}
+Environment=DB_AZ={{ db_az }}
+Environment=DB_HOST={{ db_host_ip }}
+Environment=DB_PORT={{ db_port }}
+Environment=DB_NAME={{ db_name }}
+Environment=DB_USER={{ db_user }}
+Environment=DB_PASSWORD={{ db_password }}
+ExecStart=/opt/app/venv/bin/uvicorn app:app --host 0.0.0.0 --port {{ backend_port }} --app-dir /opt/app
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

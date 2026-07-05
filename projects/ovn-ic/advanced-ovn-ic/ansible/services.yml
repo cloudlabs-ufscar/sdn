@@ -1,0 +1,9 @@
+---
+# services.yml — Stage 6. OVN load balancer + north-south SNAT.
+#
+#   ansible-playbook services.yml
+- name: OVN load balancer and SNAT
+  hosts: azs
+  gather_facts: false
+  roles:
+    - ovn_services

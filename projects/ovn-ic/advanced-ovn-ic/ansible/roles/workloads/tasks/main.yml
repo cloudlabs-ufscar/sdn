@@ -1,0 +1,74 @@
+---
+# =============================================================================
+# role: workloads
+# For each workload defined in host_vars:
+#   1. create its OVN logical switch port (addresses + port security);
+#   2. launch an Incus container with NO default nic;
+#   3. attach a veth into br-int and tag it with iface-id=<lsp> so ovn-controller
+#      binds it (this is the "Incus only provides the workload" design);
+#   4. configure the container's network statically (IP, MTU 1442, gw, DNS);
+#   5. install the software: PostgreSQL on db-vm, FastAPI on the app-vm's.
+#
+# Ordering note: db workloads are deployed before app workloads, so app backends
+# find the database ready. In the linear strategy a whole task (incl. an
+# include_tasks loop) finishes on all hosts before the next begins, so db-vm in
+# AZ2 is ready before the AZ1 app deploy runs.
+# =============================================================================
+
+# ---------- 1. OVN logical switch ports for the workloads --------------------
+- name: Create the workload logical switch ports
+  ansible.builtin.command:
+    cmd: >
+      ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} --may-exist
+      lsp-add {{ ls_name }} {{ item.lsp }}
+  loop: "{{ workloads }}"
+  loop_control:
+    label: "{{ item.lsp }}"
+  changed_when: false
+
+- name: Set addresses + port security on the workload ports
+  ansible.builtin.command:
+    cmd: >
+      ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }}
+      -- lsp-set-addresses {{ item.lsp }} "{{ item.mac }} {{ item.ip }}"
+      -- lsp-set-port-security {{ item.lsp }} "{{ item.mac }} {{ item.ip }}"
+  loop: "{{ workloads }}"
+  loop_control:
+    label: "{{ item.lsp }}"
+  changed_when: false
+
+# ---------- 2. The 'ovn' Incus profile (root disk, no default nic) -----------
+- name: Ensure the 'ovn' Incus profile exists
+  become: true
+  ansible.builtin.shell:
+    cmd: |
+      set -e
+      if ! incus profile show ovn >/dev/null 2>&1; then
+        incus profile create ovn
+        incus profile device add ovn root disk pool=default path=/
+      fi
+  changed_when: false
+
+# ---------- 3+4. Launch + network each container -----------------------------
+- name: Bring up each container and plug it into OVN
+  ansible.builtin.include_tasks: instance.yml
+  loop: "{{ workloads }}"
+  loop_control:
+    loop_var: wl
+    label: "{{ wl.name }}"
+
+# ---------- 5a. Database first ------------------------------------------------
+- name: Deploy PostgreSQL on db workloads
+  ansible.builtin.include_tasks: deploy_db.yml
+  loop: "{{ workloads | selectattr('role', 'equalto', 'db') | list }}"
+  loop_control:
+    loop_var: wl
+    label: "{{ wl.name }}"
+
+# ---------- 5b. Then the app backends ----------------------------------------
+- name: Deploy FastAPI on app workloads
+  ansible.builtin.include_tasks: deploy_app.yml
+  loop: "{{ workloads | selectattr('role', 'equalto', 'app') | list }}"
+  loop_control:
+    loop_var: wl
+    label: "{{ wl.name }}"

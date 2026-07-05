@@ -1,0 +1,45 @@
+---
+# =============================================================================
+# host_vars/az1.yml — values specific to the VM "az1" (hostname ovn-ic-lab1).
+# AZ1 also hosts the two GLOBAL interconnect databases (IC-NB / IC-SB).
+# =============================================================================
+az_name: az1                       # MUST equal NB_Global.name (gotcha #1)
+az_private_ip: 172.18.3.175        # interface IP -> used as the GENEVE encap-ip
+az_public_ip: 201.23.73.63         # provider 1:1 NAT, only relevant for north-south
+chassis_name: az1-chassis
+is_ic_host: true                   # this VM runs the IC-NB/IC-SB ovsdb servers
+
+# --- VPC (tenant) network in this AZ ----------------------------------------
+ls_name: ls-az1
+lr_name: lr-az1
+vpc_cidr: 10.10.1.0/24
+vpc_gw: 10.10.1.1                   # lrp-az1-ls = default gateway for workloads
+lrp_ls_mac: "00:00:00:10:00:01"
+
+# --- Transit (interconnect) router port -------------------------------------
+lrp_ts_ip: 169.254.100.1
+lrp_ts_mac: "00:00:00:10:00:02"
+
+# --- External / SNAT (north-south) ------------------------------------------
+# A dedicated host OVS bridge (br-ex) connects OVN's external router port to the
+# host, which then MASQUERADEs out ens3. We never touch ens3 itself, so SSH stays
+# up. Per-AZ external subnets keep the two VMs independent.
+ext_bridge: br-ex
+ext_cidr: 192.168.241.0/24
+ext_host_ip: 192.168.241.1         # host side of br-ex
+ext_router_ip: 192.168.241.2       # lr-az1 external port
+lrp_ext_mac: "00:00:00:10:00:03"
+
+# --- The OVN load balancer lives on this AZ's gateway router -----------------
+has_lb: true
+
+# --- Workloads (Incus containers) in this AZ --------------------------------
+# host_iface = the predictable host-side veth name we hand to Incus and then tag
+# in OVS with external_ids:iface-id=<lsp> so ovn-controller binds the port.
+workloads:
+  - name: app-vm-1
+    role: app
+    ip: 10.10.1.10
+    mac: "00:00:00:10:01:0a"
+    lsp: lsp-app-vm-1
+    host_iface: veth-app1

@@ -1,0 +1,28 @@
+---
+# Install and configure PostgreSQL inside the db workload (loop_var `wl`).
+# All the SQL/quoting lives in a single templated script to avoid nested-shell
+# escaping through incus exec.
+
+- name: Install PostgreSQL in {{ wl.name }}
+  become: true
+  ansible.builtin.command:
+    cmd: incus exec {{ wl.name }} -- bash -lc "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql"
+  changed_when: false
+
+- name: Render the DB setup script
+  ansible.builtin.template:
+    src: db_setup.sh.j2
+    dest: /tmp/db_setup-{{ wl.name }}.sh
+    mode: "0755"
+
+- name: Push the DB setup script into {{ wl.name }}
+  become: true
+  ansible.builtin.command:
+    cmd: incus file push /tmp/db_setup-{{ wl.name }}.sh {{ wl.name }}/root/db_setup.sh --mode 0755
+  changed_when: false
+
+- name: Run the DB setup script
+  become: true
+  ansible.builtin.command:
+    cmd: incus exec {{ wl.name }} -- bash /root/db_setup.sh
+  changed_when: false

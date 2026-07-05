@@ -1,0 +1,9 @@
+---
+# chassis.yml — Stage 4. OVS chassis + ovn-controller + external bridge + host SNAT.
+#
+#   ansible-playbook chassis.yml
+- name: OVN chassis and north-south plumbing
+  hosts: azs
+  gather_facts: true          # needs ansible_default_ipv4.interface (the uplink)
+  roles:
+    - ovn_chassis
