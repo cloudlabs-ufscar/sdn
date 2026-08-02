@@ -1,46 +1,101 @@
 ---
 # =============================================================================
 # host_vars/az2.yml — values specific to the VM "az2" (hostname ovn-ic-lab2).
-# AZ2 holds the app's database (db-vm) plus the second app backend.
+#
+# Same two-plane cell shape as AZ1. AZ2 additionally holds the managed database,
+# which lives on the MANAGEMENT plane only (no client-plane NIC).
 # =============================================================================
 az_name: az2                       # MUST equal NB_Global.name (gotcha #1)
 az_private_ip: 172.18.33.126       # interface IP -> used as the GENEVE encap-ip
 az_public_ip: 201.23.74.156
 chassis_name: az2-chassis
-is_ic_host: false                  # az2 dials the IC databases on az1
+# az2 also carries the second member of the IC database RAFT cluster.
 
-# --- VPC (tenant) network in this AZ ----------------------------------------
-ls_name: ls-az2
-lr_name: lr-az2
-vpc_cidr: 10.10.2.0/24
-vpc_gw: 10.10.2.1                   # lrp-az2-ls = default gateway for workloads
-lrp_ls_mac: "00:00:00:20:00:01"
-
-# --- Transit (interconnect) router port -------------------------------------
-lrp_ts_ip: 169.254.100.2
-lrp_ts_mac: "00:00:00:20:00:02"
-
-# --- External / SNAT (north-south) ------------------------------------------
+# --- The cell's edge ("Gateway Nodes") — see host_vars/az1.yml for the why ----
 ext_bridge: br-ex
 ext_cidr: 192.168.242.0/24
 ext_host_ip: 192.168.242.1
-ext_router_ip: 192.168.242.2
-lrp_ext_mac: "00:00:00:20:00:03"
 
-# --- No load balancer on this AZ (the VIP lives on lr-az1) -------------------
-has_lb: false
+edge_ls: ls-edge-az2
+edge_lr: lr-edge-az2
+edge_cidr: 192.168.252.0/24
+edge_int_ip: 192.168.252.254
+edge_int_mac: "00:00:00:20:ee:01"
+edge_ext_mac: "00:00:00:20:ee:02"
+
+# --- The two planes ----------------------------------------------------------
+planes:
+  # ---- Client plane: the tenant VPC. Carries the web traffic and the VIP. -----
+  - name: client
+    ls: ls-client-az2
+    lr: lr-client-az2
+    cidr: 10.10.2.0/24
+    gw: 10.10.2.1
+    supernet: "{{ client_supernet }}"
+    lrp_ls_mac: "00:00:00:20:00:01"
+
+    ts: ts-client
+    ts_ip: 169.254.100.2
+    ts_mac: "00:00:00:20:00:02"
+
+    edge_ip: 192.168.252.1
+    edge_mac: "00:00:00:20:00:03"
+    snat_ip: 192.168.242.2
+
+    # AZ2 has its OWN load balancer and its OWN VIP (the design is symmetric:
+    # every cell offers the service locally).
+    lb_name: lb-web-az2
+    vip: 10.10.2.100
+
+  # ---- Management plane: the "service management network" (DBaaS side). -------
+  - name: mgmt
+    ls: ls-mgmt-az2
+    lr: lr-mgmt-az2
+    cidr: 10.20.2.0/24
+    gw: 10.20.2.1
+    supernet: "{{ mgmt_supernet }}"
+    lrp_ls_mac: "00:00:00:20:10:01"
+
+    ts: ts-mgmt
+    ts_ip: 169.254.200.2
+    ts_mac: "00:00:00:20:10:02"
+
+    edge_ip: 192.168.252.2
+    edge_mac: "00:00:00:20:10:03"
+    snat_ip: 192.168.242.3
 
 # --- Workloads (Incus containers) in this AZ --------------------------------
 workloads:
+  # The BACKEND tier: a Java service on the client plane that reads the database
+  # over its second (management) NIC.
   - name: app-vm-2
-    role: app
-    ip: 10.10.2.20
-    mac: "00:00:00:20:02:14"
-    lsp: lsp-app-vm-2
-    host_iface: veth-app2
+    role: backend
+    service_port: "{{ backend_port }}"
+    nics:
+      - plane: client
+        iface: eth0
+        ip: 10.10.2.20
+        mac: "00:00:00:20:02:14"
+        lsp: lsp-app-vm-2-client
+        host_iface: veth-app2c
+        default_route: true
+      - plane: mgmt
+        iface: eth1
+        ip: 10.20.2.20
+        mac: "00:00:00:20:12:14"
+        lsp: lsp-app-vm-2-mgmt
+        host_iface: veth-app2m
+        default_route: false
+
+  # The database has a SINGLE nic, on the management plane. There is no path from
+  # the client plane to this address anywhere in the fabric.
   - name: db-vm
     role: db
-    ip: 10.10.2.10
-    mac: "00:00:00:20:01:0a"
-    lsp: lsp-db-vm
-    host_iface: veth-db
+    nics:
+      - plane: mgmt
+        iface: eth0
+        ip: 10.20.2.10
+        mac: "00:00:00:20:11:0a"
+        lsp: lsp-db-vm-mgmt
+        host_iface: veth-dbm
+        default_route: true

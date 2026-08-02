@@ -5,12 +5,25 @@ Wants=openvswitch-switch.service
 
 [Service]
 Type=simple
+# Gotcha #9. ovn-controller binds its control socket at /var/run/ovn/<pid>.ctl and
+# will NOT create that directory itself — and unlike ovn-ic (gotcha #6), the
+# apt-shipped binary has no --unixctl option to point it somewhere else. /run is a
+# tmpfs, so after a reboot the directory is gone and every start dies with
+# "binding failed: No such file or directory". systemd then restarts it forever,
+# each attempt appending to the log: that loop filled a 38 GB disk with an 8 GB
+# ovn-controller.log (mirrored again into /var/log/syslog) and took the lab down.
+#
+# RuntimeDirectory makes systemd create /run/ovn before every start, which is the
+# only fix available for this binary.
+RuntimeDirectory=ovn
 # ovn-controller reads the local OVS db (default socket) for the chassis config
 # set above, connects to the local SB via external_ids:ovn-remote, programs
 # br-int, and brings up GENEVE tunnels to other chassis.
 ExecStart={{ ovnctl_bin.stdout }} --log-file={{ lab_dir }}/ovn-controller.log
 Restart=on-failure
-RestartSec=2
+# Deliberately slow: a restart loop must never be able to fill the disk faster
+# than the hourly logrotate can trim it.
+RestartSec=10
 
 [Install]
 WantedBy=multi-user.target

@@ -1,5 +1,7 @@
 ---
-# workloads.yml — Stage 8. Containers on br-int + FastAPI + PostgreSQL.
+# workloads.yml — Stage 8. Dual-NIC containers on br-int, then the three
+# application tiers: PostgreSQL (AZ2), the Java backend (AZ2), the infrastructure
+# state publish, and the React frontend (AZ1).
 #
 #   ansible-playbook workloads.yml
 - name: Deploy the Incus workloads and their software

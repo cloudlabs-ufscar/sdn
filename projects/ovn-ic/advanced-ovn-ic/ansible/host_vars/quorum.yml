@@ -1,0 +1,17 @@
+---
+# =============================================================================
+# host_vars/quorum.yml — the RAFT arbiter (hostname ovn-ic-lab3-quroum).
+#
+# This VM is NOT an availability zone. It is deliberately minimal, exactly as the
+# design specifies: no chassis, no br-int, no GENEVE, no workloads, no local
+# NB/SB. It runs one thing — the third member of the IC-NB/IC-SB RAFT cluster —
+# so that the cluster has an odd number of members and keeps a majority when
+# either AZ goes down.
+#
+# It is therefore only in the [ic_cluster] group, never in [azs].
+# =============================================================================
+az_private_ip: 172.18.3.240
+
+# ovsdb-server and ovsdb-tool come from openvswitch-common. The arbiter must NOT
+# get openvswitch-switch: it has no datapath to run.
+is_ic_arbiter: true

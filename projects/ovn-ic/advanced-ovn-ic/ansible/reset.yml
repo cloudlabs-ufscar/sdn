@@ -1,0 +1,90 @@
+---
+# =============================================================================
+# reset.yml — tear the lab's logical state down to bare metal, keeping the
+# expensive parts (the compiled OVN from stage 2, and Incus itself).
+#
+#   ansible-playbook reset.yml
+#   ansible-playbook site.yml      # rebuild
+#
+# Use it when the *shape* of the topology changes (renamed routers, a new plane,
+# a new transit switch) — the roles are idempotent for values, but they cannot
+# rename or remove objects that a previous design created. Everything it deletes
+# is rebuilt by site.yml.
+#
+# It does NOT touch: the source build in /opt/ovn-build, the installed binaries,
+# or the Incus storage pool.
+# =============================================================================
+- name: Reset the lab's logical state
+  hosts: azs:ic_cluster
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Delete every lab container
+      ansible.builtin.shell:
+        cmd: incus delete -f {{ workloads | map(attribute='name') | join(' ') }} 2>/dev/null || true
+      changed_when: false
+
+    # Matches by prefix rather than by the current host_vars, so veths left over
+    # from a PREVIOUS topology (differently named) are cleaned up too.
+    - name: Remove every workload veth from br-int
+      ansible.builtin.shell:
+        cmd: |
+          for p in $(ovs-vsctl --if-exists list-ports br-int); do
+            case "$p" in veth-*) ovs-vsctl --if-exists del-port br-int "$p" ;; esac
+          done
+      changed_when: false
+      failed_when: false
+
+    - name: Stop the OVN daemons that hold the databases open
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        state: stopped
+      loop:
+        - ovn-ic
+        - ovn-northd
+        - ovn-nb-db
+        - ovn-sb-db
+      failed_when: false
+
+    - name: Stop the global IC databases
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        state: stopped
+      loop:
+        - ovn-ic-nb-db
+        - ovn-ic-sb-db
+      failed_when: false
+
+    # Deleting the .db files is the reliable way to drop a whole topology: the
+    # ovn_central role recreates them from the schemas on the next run.
+    - name: Delete the local NB/SB database files
+      ansible.builtin.file:
+        path: "{{ lab_dir }}/{{ item }}"
+        state: absent
+      loop:
+        - ovnnb.db
+        - ovnsb.db
+
+    - name: Delete the global IC database files
+      ansible.builtin.file:
+        path: "{{ lab_dir }}/{{ item }}"
+        state: absent
+      loop:
+        - ic-nb.db
+        - ic-sb.db
+
+    # ovn-controller caches the chassis' view of the old southbound; without this
+    # it re-registers stale port bindings against the fresh SB.
+    - name: Restart ovn-controller against the (soon to be recreated) SB
+      ansible.builtin.systemd_service:
+        name: ovn-controller
+        state: stopped
+      failed_when: false
+
+    - name: Drop the host routes to the old VIPs
+      ansible.builtin.shell:
+        cmd: ip route del {{ item.vip }}/32 2>/dev/null || true
+      loop: "{{ planes | selectattr('vip', 'defined') | list }}"
+      loop_control:
+        label: "{{ item.vip }}"
+      changed_when: false

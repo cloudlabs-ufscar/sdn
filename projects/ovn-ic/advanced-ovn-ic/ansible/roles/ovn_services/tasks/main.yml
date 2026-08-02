@@ -1,19 +1,35 @@
 ---
 # =============================================================================
 # role: ovn_services
-# The two OVN features the previous lab never touched.
+# The cell's edge ("Gateway Nodes") and the client-plane load balancer.
 #
-#   A) North-south SNAT (both AZs): give each gateway router an external port on
-#      the physnet-ext network (br-ex), a default route to the host, and a SNAT
-#      rule so the VPC subnet can reach the internet.
-#   B) Native OVN load balancer (az1 only): VIP -> the app backends in BOTH AZs.
+#   A) EDGE. Both plane routers hand north-south traffic to ONE edge gateway
+#      router per AZ, over an internal switch (ls-edge). The edge router owns the
+#      uplink to br-ex and SNATs each plane to its OWN external address, so the
+#      two planes are still distinguishable on the wire.
 #
-# Note: lr-az1 now has TWO distributed gateway ports (transit + external), so the
-# SNAT rule must say which one it belongs to (--gateway-port), otherwise OVN
-# can't decide. Route resolution by next-hop is automatic.
+#      Besides matching the design's Gateway Nodes block, this is what makes the
+#      load balancer possible: OVN will not program a load balancer on a router
+#      with more than one distributed gateway port, and a plane router that also
+#      owned an external port would have two (transit + external). Moving
+#      north-south to the edge leaves each plane router with exactly one DGP.
+#
+#   B) LOAD BALANCER. Each AZ gets its own VIP on its own client plane, fronting
+#      BOTH app backends, so a request may cross ts-client to the other AZ.
+#      It is attached in two places, and both are needed:
+#        - to ls-client-<az>, because the VIP lives inside the tenant subnet and
+#          only a switch-attached LB answers ARP for it (that is how workloads on
+#          the switch reach the VIP at all);
+#        - to lr-client-<az>, because traffic arriving from outside the VPC is
+#          routed in and OVN deliberately skips the switch LB for packets that
+#          enter a switch from a router port.
 # =============================================================================
 
-# ---------- A) External connectivity + SNAT (both AZs) ----------------------
+- name: Select this AZ's client plane (it owns the VIP)
+  ansible.builtin.set_fact:
+    client_plane: "{{ planes | selectattr('name', 'equalto', 'client') | first }}"
+
+# ---------- A1) The external (provider) switch ------------------------------
 - name: Create the external logical switch
   ansible.builtin.command:
     cmd: ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} --may-exist ls-add ls-ext-{{ az_name }}
@@ -35,21 +51,71 @@
       -- lsp-set-options ln-ext-{{ az_name }} network_name=physnet-ext
   changed_when: false
 
-- name: Add the router's external port
+# ---------- A2) The internal edge switch (plane routers <-> edge router) -----
+- name: Create the internal edge switch
   ansible.builtin.command:
-    cmd: >
-      ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} --may-exist
-      lrp-add {{ lr_name }} lrp-{{ az_name }}-ext {{ lrp_ext_mac }} {{ ext_router_ip }}/24
+    cmd: ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} --may-exist ls-add {{ edge_ls }}
   changed_when: false
 
-- name: Pin a gateway chassis on the external port (NAT runs there)
+# ---------- A3) Each plane's uplink into the edge ---------------------------
+- name: Connect each plane router to the edge and default-route through it
+  ansible.builtin.include_tasks: plane_edge.yml
+  loop: "{{ planes }}"
+  loop_control:
+    loop_var: plane
+    label: "{{ plane.name }} -> edge ({{ plane.edge_ip }}, SNAT {{ plane.snat_ip }})"
+
+# ---------- A4) The edge gateway router -------------------------------------
+# A GATEWAY router (options:chassis), not a distributed one: it is pinned to this
+# AZ's chassis, which is what "Gateway Nodes" means here and what lets it do NAT
+# without a distributed gateway port.
+- name: Create the edge gateway router
+  ansible.builtin.command:
+    cmd: ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} --may-exist lr-add {{ edge_lr }}
+  changed_when: false
+
+- name: Pin the edge router to this AZ's chassis
   ansible.builtin.command:
     cmd: >
       ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }}
-      lrp-set-gateway-chassis lrp-{{ az_name }}-ext {{ chassis_name }} 1
+      set logical_router {{ edge_lr }} options:chassis={{ chassis_name }}
   changed_when: false
 
-- name: Connect the external switch to the router
+- name: Add the edge router's internal port
+  ansible.builtin.command:
+    cmd: >
+      ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} --may-exist
+      lrp-add {{ edge_lr }} lrp-edge-{{ az_name }}-int
+      {{ edge_int_mac }} {{ edge_int_ip }}/24
+  changed_when: false
+
+- name: Attach the edge router to the edge switch
+  ansible.builtin.command:
+    cmd: >
+      ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} --may-exist
+      lsp-add {{ edge_ls }} lsp-edge-{{ az_name }}-rtr
+  changed_when: false
+
+- name: Make that a router patch port
+  ansible.builtin.command:
+    cmd: >
+      ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }}
+      -- lsp-set-type lsp-edge-{{ az_name }}-rtr router
+      -- lsp-set-addresses lsp-edge-{{ az_name }}-rtr router
+      -- lsp-set-options lsp-edge-{{ az_name }}-rtr router-port=lrp-edge-{{ az_name }}-int
+  changed_when: false
+
+# One external address PER PLANE on the single uplink port, so each plane SNATs
+# to its own address and stays distinguishable outside the fabric.
+- name: Add the edge router's external port (one address per plane)
+  ansible.builtin.command:
+    cmd: >
+      ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} --may-exist
+      lrp-add {{ edge_lr }} lrp-edge-{{ az_name }}-ext {{ edge_ext_mac }}
+      {{ planes | map(attribute='snat_ip') | map('regex_replace', '$', '/24') | join(' ') }}
+  changed_when: false
+
+- name: Connect the external switch to the edge router
   ansible.builtin.command:
     cmd: >
       ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} --may-exist
@@ -62,76 +128,212 @@
       ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }}
       -- lsp-set-type lsp-extrtr-{{ az_name }} router
       -- lsp-set-addresses lsp-extrtr-{{ az_name }} router
-      -- lsp-set-options lsp-extrtr-{{ az_name }} router-port=lrp-{{ az_name }}-ext
+      -- lsp-set-options lsp-extrtr-{{ az_name }} router-port=lrp-edge-{{ az_name }}-ext
   changed_when: false
 
-- name: Default route out the external port (next hop = host on br-ex)
+- name: Default route from the edge out to the host on br-ex
   ansible.builtin.command:
     cmd: >
       ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} --may-exist
-      lr-route-add {{ lr_name }} 0.0.0.0/0 {{ ext_host_ip }}
+      lr-route-add {{ edge_lr }} 0.0.0.0/0 {{ ext_host_ip }}
   changed_when: false
 
-# Idempotent SNAT: only add it if lr-nat-list doesn't already show this subnet.
-- name: Read existing NAT rules
+# The edge must know how to get BACK into each plane, or replies to inbound
+# traffic have nowhere to go. Routed on the plane SUPERNET, not this AZ's subnet,
+# so the edge can also reach the backend that lives in the OTHER AZ (via the
+# plane router and its transit switch) when the load balancer picks it.
+- name: Return routes from the edge into each plane
   ansible.builtin.command:
-    cmd: ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} lr-nat-list {{ lr_name }}
+    cmd: >
+      ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} --may-exist
+      lr-route-add {{ edge_lr }} {{ item.supernet }} {{ item.edge_ip }}
+  loop: "{{ planes }}"
+  loop_control:
+    label: "{{ item.supernet }} via {{ item.edge_ip }}"
+  changed_when: false
+
+# ---------- A5) Keep the edge from becoming a back door between planes -------
+# The edge router necessarily knows a route into BOTH planes (it has to, to send
+# replies back). That alone re-connects them: a workload on the client plane can
+# reach its default gateway, be routed to the edge, and be routed straight back
+# down into the management plane — silently undoing the isolation that the two
+# separate transit switches exist to provide.
+#
+# These policies are the "Edge Firewall" from the design. They drop any traffic
+# that arrives at the edge trying to cross from one plane's supernet to the
+# other's, in both directions, while leaving north-south (destination outside
+# both supernets) untouched.
+- name: Deny plane-to-plane transit through the edge (the Edge Firewall)
+  ansible.builtin.command:
+    cmd: >
+      ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} --may-exist
+      lr-policy-add {{ edge_lr }} 100
+      "ip4.src == {{ item.0.supernet }} && ip4.dst == {{ item.1.supernet }}" drop
+  loop: "{{ planes | product(planes) | list }}"
+  loop_control:
+    label: "{{ item.0.name }} -x-> {{ item.1.name }}"
+  when: item.0.name != item.1.name
+  changed_when: false
+
+# Idempotent SNAT: one rule per plane, each to that plane's own external address.
+- name: Read the edge router's existing NAT rules
+  ansible.builtin.command:
+    cmd: ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} lr-nat-list {{ edge_lr }}
   register: nat_list
   changed_when: false
 
-- name: Add OVN SNAT for the VPC subnet (north-south)
+- name: SNAT each plane to its own external address
   ansible.builtin.command:
     cmd: >
       ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }}
-      --gateway-port=lrp-{{ az_name }}-ext
-      lr-nat-add {{ lr_name }} snat {{ ext_router_ip }} {{ vpc_cidr }}
-  when: vpc_cidr not in nat_list.stdout
+      lr-nat-add {{ edge_lr }} snat {{ item.snat_ip }} {{ item.cidr }}
+  loop: "{{ planes }}"
+  loop_control:
+    label: "{{ item.cidr }} -> {{ item.snat_ip }}"
+  when: item.cidr not in nat_list.stdout
 
-# ---------- B) Native OVN load balancer (az1 only) --------------------------
-- name: Build the LB backend list (every app workload, both AZs)
+# ---------- B) Native OVN load balancer, once per AZ ------------------------
+# The application is split across the AZs (React in AZ1, Java in AZ2), so each
+# AZ's VIP fronts the tier that actually lives in THAT AZ. Both VIPs therefore sit
+# in the path of every dashboard refresh: the browser hits AZ1's, and AZ1's nginx
+# hits AZ2's across the interconnect.
+- name: Build this AZ's LB backend list (the serving tier in this AZ)
   ansible.builtin.set_fact:
     lb_backends: >-
-      {{ groups['azs']
-         | map('extract', hostvars)
-         | map(attribute='workloads')
-         | flatten
-         | selectattr('role', 'equalto', 'app')
+      {{ workloads
+         | rejectattr('role', 'equalto', 'db')
+         | map('to_json') | map('from_json')
+         | map(attribute='nics') | flatten
+         | selectattr('plane', 'equalto', 'client')
          | map(attribute='ip')
-         | map('regex_replace', '$', ':' ~ backend_port | string)
+         | zip(workloads | rejectattr('role', 'equalto', 'db') | map(attribute='service_port'))
+         | map('join', ':')
          | join(',') }}
-  when: has_lb | bool
 
-- name: Create the OVN load balancer (VIP -> app backends)
+- name: Create this AZ's OVN load balancer (VIP -> both app backends)
   ansible.builtin.command:
     cmd: >
       ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} --may-exist
-      lb-add lb-web {{ vip_ip }}:{{ vip_port }} {{ lb_backends }} tcp
-  when: has_lb | bool
+      lb-add {{ client_plane.lb_name }}
+      {{ client_plane.vip }}:{{ vip_port }} {{ lb_backends }} tcp
+  when: client_plane.lb_name is defined
   changed_when: false
 
-- name: Attach the load balancer to this AZ's gateway router
+# On the SWITCH: gives the VIP an ARP responder, so workloads inside the tenant
+# subnet can reach it. Without this the VIP is simply an unanswered ARP.
+- name: Attach the load balancer to the client logical switch
   ansible.builtin.command:
     cmd: >
       ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} --may-exist
-      lr-lb-add {{ lr_name }} lb-web
-  when: has_lb | bool
+      ls-lb-add {{ client_plane.ls }} {{ client_plane.lb_name }}
+  when: client_plane.lb_name is defined
   changed_when: false
 
-# Force the gateway router to SNAT load-balanced traffic to its own port IP. This
-# is what makes the AZ2 backend work: app-vm-2 then replies to lr-az1 (over the
-# transit), so the LB sees the return and can un-DNAT it. Without it, app-vm-2
-# would reply straight to the client and the connection would hang.
+# On the EDGE gateway router: this is what serves clients from OUTSIDE the VPC.
+# It has to live here rather than on the plane router, because on a DISTRIBUTED
+# router OVN only programs the load balancer on the distributed gateway port —
+# traffic arriving on any other port (such as the one from the edge) skips it.
+# lr-edge is a real gateway router (options:chassis), where the LB applies to
+# every port.
+- name: Attach the load balancer to the edge gateway router
+  ansible.builtin.command:
+    cmd: >
+      ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} --may-exist
+      lr-lb-add {{ edge_lr }} {{ client_plane.lb_name }}
+  when: client_plane.lb_name is defined
+  changed_when: false
+
+# Without this, a request the edge balances to the backend in the OTHER AZ would
+# arrive there carrying the original client's address, and the reply would leave
+# that AZ through its own edge instead of coming back here — so the connection
+# would hang. SNATing to the edge's internal address forces the reply to return
+# the way it came, which is also why the edge subnet is advertised over the
+# interconnect (see ic_route_blacklist).
+- name: Force SNAT for load-balanced traffic on the edge
+  ansible.builtin.command:
+    cmd: >
+      ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }}
+      set logical_router {{ edge_lr }} options:lb_force_snat_ip={{ edge_int_ip }}
+  when: client_plane.lb_name is defined
+  changed_when: false
+
+# Also on the plane router, so that a client in the OTHER AZ hitting this VIP is
+# balanced too: that traffic arrives on this router's transit port, which IS its
+# distributed gateway port, so the LB does apply there.
+- name: Attach the load balancer to the client plane router
+  ansible.builtin.command:
+    cmd: >
+      ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} --may-exist
+      lr-lb-add {{ client_plane.lr }} {{ client_plane.lb_name }}
+  when: client_plane.lb_name is defined
+  changed_when: false
+
+# Force the router to SNAT load-balanced traffic to its own transit address. This
+# is what makes the REMOTE backend usable: app-vm in the other AZ then replies to
+# this router over ts-client instead of answering the client directly, so the LB
+# sees the return traffic and can un-DNAT it.
+#
+# NOTE: the documented `router_ip` keyword is rejected by this OVN build
+# ("bad ip router_ip in options of router"), so the address is given literally.
 - name: Force SNAT for load-balanced traffic
   ansible.builtin.command:
     cmd: >
       ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }}
-      set logical_router {{ lr_name }} options:lb_force_snat_ip=router_ip
-  when: has_lb | bool
+      set logical_router {{ client_plane.lr }}
+      options:lb_force_snat_ip={{ client_plane.ts_ip }}
+  when: client_plane.lb_name is defined
   changed_when: false
 
-- name: Add a host route to the VIP so you can curl it from outside the fabric
+# ---------- B2) A service VIP fronting a tier in the OTHER AZ ---------------
+- name: Build the backend list for the cross-AZ service VIP
+  ansible.builtin.set_fact:
+    service_backends: >-
+      {{ groups['azs'] | map('extract', hostvars) | map(attribute='workloads') | flatten
+         | selectattr('role', 'equalto', client_plane.service_tier)
+         | map('to_json') | map('from_json')
+         | map(attribute='nics') | flatten
+         | selectattr('plane', 'equalto', 'client') | map(attribute='ip')
+         | map('regex_replace', '$', ':' ~ backend_port | string) | join(',') }}
+  when: client_plane.service_vip is defined
+
+- name: Create the cross-AZ service load balancer
+  ansible.builtin.command:
+    cmd: >
+      ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} --may-exist
+      lb-add {{ client_plane.service_lb_name }}
+      {{ client_plane.service_vip }}:{{ vip_port }} {{ service_backends }} tcp
+  when: client_plane.service_vip is defined
+  changed_when: false
+
+# On the switch, so the DNAT happens locally in this AZ. The rewritten packet then
+# leaves for the other AZ over ts-client, and lb_force_snat_ip (already set on this
+# router) is what brings the reply back the same way.
+- name: Attach the service load balancer to the client logical switch
+  ansible.builtin.command:
+    cmd: >
+      ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} --may-exist
+      ls-lb-add {{ client_plane.ls }} {{ client_plane.service_lb_name }}
+  when: client_plane.service_vip is defined
+  changed_when: false
+
+# ALSO on the router, and not optionally: a VIP inside the tenant subnet only gets
+# an ARP responder when its load balancer is attached to the router that owns that
+# subnet as well. With the switch attachment alone the DNAT rules are present but
+# nothing answers ARP for the VIP, so clients on the switch never get as far as
+# sending the first packet.
+- name: Attach the service load balancer to the client plane router (ARP responder)
+  ansible.builtin.command:
+    cmd: >
+      ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} --may-exist
+      lr-lb-add {{ client_plane.lr }} {{ client_plane.service_lb_name }}
+  when: client_plane.service_vip is defined
+  changed_when: false
+
+- name: Add a host route to this AZ's VIP so you can curl it from outside the fabric
   become: true
   ansible.builtin.command:
-    cmd: ip route replace {{ vip_ip }}/32 via {{ ext_router_ip }} dev {{ ext_bridge }}
-  when: has_lb | bool
+    cmd: >
+      ip route replace {{ client_plane.vip }}/32
+      via {{ client_plane.snat_ip }} dev {{ ext_bridge }}
+  when: client_plane.lb_name is defined
   changed_when: false

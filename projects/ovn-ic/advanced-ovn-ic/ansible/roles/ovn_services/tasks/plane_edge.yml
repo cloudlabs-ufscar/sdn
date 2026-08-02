@@ -1,0 +1,42 @@
+---
+# =============================================================================
+# Connect ONE plane router to the cell's edge switch (loop_var `plane`) and send
+# its north-south traffic there.
+#
+# Deliberately a PLAIN router port — no lrp-set-gateway-chassis. The plane router
+# must keep exactly one distributed gateway port (its transit port), otherwise
+# OVN refuses to program the client-plane load balancer. NAT for this plane
+# happens on the edge router instead.
+# =============================================================================
+
+- name: "[{{ plane.name }}] Add the router's port onto the edge switch"
+  ansible.builtin.command:
+    cmd: >
+      ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} --may-exist
+      lrp-add {{ plane.lr }} lrp-{{ plane.name }}-{{ az_name }}-edge
+      {{ plane.edge_mac }} {{ plane.edge_ip }}/24
+  changed_when: false
+
+- name: "[{{ plane.name }}] Attach that port to the edge switch"
+  ansible.builtin.command:
+    cmd: >
+      ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} --may-exist
+      lsp-add {{ edge_ls }} lsp-edge-{{ plane.name }}-{{ az_name }}
+  changed_when: false
+
+- name: "[{{ plane.name }}] Make that a router patch port"
+  ansible.builtin.command:
+    cmd: >
+      ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }}
+      -- lsp-set-type lsp-edge-{{ plane.name }}-{{ az_name }} router
+      -- lsp-set-addresses lsp-edge-{{ plane.name }}-{{ az_name }} router
+      -- lsp-set-options lsp-edge-{{ plane.name }}-{{ az_name }}
+         router-port=lrp-{{ plane.name }}-{{ az_name }}-edge
+  changed_when: false
+
+- name: "[{{ plane.name }}] Default route out through the edge router"
+  ansible.builtin.command:
+    cmd: >
+      ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} --may-exist
+      lr-route-add {{ plane.lr }} 0.0.0.0/0 {{ edge_int_ip }}
+  changed_when: false

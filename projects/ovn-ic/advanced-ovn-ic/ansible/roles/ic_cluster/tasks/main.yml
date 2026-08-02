@@ -1,0 +1,201 @@
+---
+# =============================================================================
+# role: ic_cluster
+# The global interconnect databases (IC-NB + IC-SB) as a 3-member RAFT cluster
+# spread over az1, az2 and the quorum arbiter.
+#
+# Why a cluster: the interconnect databases are what every AZ's ovn-ic reads to
+# learn the transit switches and to exchange routes. Running them on a single VM
+# (as this lab did before) makes that VM a control-plane single point of failure
+# for the whole federation.
+#
+# Why THREE members: RAFT needs a strict majority to elect a leader and commit a
+# write. With 2 members a majority is still 2, so losing either one freezes the
+# database — no better than a single node. With 3, a majority is 2, so the
+# cluster keeps working when any single member is lost. The arbiter exists only
+# to be that third vote; it carries no chassis and no workloads.
+#
+# Ordering: with Ansible's default linear strategy every task finishes on all
+# hosts before the next one starts, so "create the cluster on the bootstrap node"
+# is fully done before "join the cluster" runs anywhere else. That is exactly the
+# order RAFT needs, without any serial/delegation tricks.
+# =============================================================================
+
+- name: Ensure the lab working directory exists
+  become: true
+  ansible.builtin.file:
+    path: "{{ lab_dir }}"
+    state: directory
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0755"
+
+# The arbiter is a bare VM. It needs ovsdb-server + ovsdb-tool, which live in
+# openvswitch-common — NOT openvswitch-switch, which would also pull in the
+# datapath daemons the arbiter must not run.
+- name: Install ovsdb tooling on the arbiter
+  become: true
+  ansible.builtin.apt:
+    name: openvswitch-common
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+    install_recommends: false
+  when: is_ic_arbiter | default(false) | bool
+
+- name: Resolve the ovsdb binaries
+  ansible.builtin.shell:
+    cmd: "command -v {{ item }}"
+  environment:
+    PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  register: icdb_bins
+  changed_when: false
+  loop:
+    - ovsdb-server
+    - ovsdb-tool
+
+- name: Map binary name -> absolute path
+  ansible.builtin.set_fact:
+    bin: "{{ bin | default({}) | combine({item.item: item.stdout}) }}"
+  loop: "{{ icdb_bins.results }}"
+  loop_control:
+    label: "{{ item.item }} -> {{ item.stdout }}"
+
+# ---------------------------------------------------------------------------
+# The IC schemas only exist on the AZs, which compiled OVN from source (the
+# Ubuntu package ships neither). The arbiter has no compiler budget (1 vCPU /
+# 1 GB), and does not need one: a schema is just a JSON file, so we copy it.
+# ---------------------------------------------------------------------------
+- name: Read the IC schemas from the bootstrap member
+  ansible.builtin.slurp:
+    src: "/usr/local/share/ovn/{{ item }}"
+  loop: "{{ ic_schema_files }}"
+  register: ic_schema_blobs
+  delegate_to: "{{ ic_bootstrap }}"
+  run_once: true
+
+- name: Ensure /usr/local/share/ovn exists
+  become: true
+  ansible.builtin.file:
+    path: /usr/local/share/ovn
+    state: directory
+    mode: "0755"
+
+- name: Install the IC schemas
+  become: true
+  ansible.builtin.copy:
+    content: "{{ item.content | b64decode }}"
+    dest: "/usr/local/share/ovn/{{ item.item }}"
+    mode: "0644"
+  loop: "{{ ic_schema_blobs.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+# ---------------------------------------------------------------------------
+# Build the cluster: create on the bootstrap member, then join from the others.
+#
+# The RAFT address is baked into the database file at create/join time, which is
+# why both commands are guarded by `creates:` — re-running must never re-form a
+# cluster that already exists.
+# ---------------------------------------------------------------------------
+- name: Create the cluster on the bootstrap member
+  become: true
+  ansible.builtin.command:
+    cmd: >
+      {{ bin['ovsdb-tool'] }} create-cluster {{ lab_dir }}/{{ item.db }}
+      /usr/local/share/ovn/{{ item.schema }}
+      tcp:{{ az_private_ip }}:{{ item.raft_port }}
+    creates: "{{ lab_dir }}/{{ item.db }}"
+  loop: "{{ ic_databases }}"
+  loop_control:
+    label: "{{ item.name }} (raft :{{ item.raft_port }})"
+  when: inventory_hostname == ic_bootstrap
+
+- name: Install the IC database systemd units
+  become: true
+  ansible.builtin.template:
+    src: ic-db.service.j2
+    dest: "/etc/systemd/system/{{ item.service }}.service"
+    mode: "0644"
+  loop: "{{ ic_databases }}"
+  loop_control:
+    label: "{{ item.service }}"
+  notify: reload systemd
+
+- name: Apply pending systemd unit changes
+  ansible.builtin.meta: flush_handlers
+
+- name: Start the bootstrap member (it must lead before anyone can join)
+  become: true
+  ansible.builtin.systemd_service:
+    name: "{{ item.service }}"
+    enabled: true
+    state: started
+  loop: "{{ ic_databases }}"
+  loop_control:
+    label: "{{ item.service }}"
+  when: inventory_hostname == ic_bootstrap
+
+- name: Wait for the bootstrap member to accept connections
+  ansible.builtin.wait_for:
+    host: "{{ hostvars[ic_bootstrap].az_private_ip }}"
+    port: "{{ item.client_port }}"
+    timeout: 60
+  loop: "{{ ic_databases }}"
+  loop_control:
+    label: "{{ item.name }}:{{ item.client_port }}"
+  when: inventory_hostname == ic_bootstrap
+
+- name: Join the cluster from the remaining members
+  become: true
+  ansible.builtin.command:
+    cmd: >
+      {{ bin['ovsdb-tool'] }} join-cluster {{ lab_dir }}/{{ item.db }}
+      {{ item.name }}
+      tcp:{{ az_private_ip }}:{{ item.raft_port }}
+      tcp:{{ hostvars[ic_bootstrap].az_private_ip }}:{{ item.raft_port }}
+    creates: "{{ lab_dir }}/{{ item.db }}"
+  loop: "{{ ic_databases }}"
+  loop_control:
+    label: "{{ item.name }} joining via {{ ic_bootstrap }}"
+  when: inventory_hostname != ic_bootstrap
+
+- name: Start the joining members
+  become: true
+  ansible.builtin.systemd_service:
+    name: "{{ item.service }}"
+    enabled: true
+    state: started
+  loop: "{{ ic_databases }}"
+  loop_control:
+    label: "{{ item.service }}"
+  when: inventory_hostname != ic_bootstrap
+
+# ---------------------------------------------------------------------------
+# Converge + verify
+# ---------------------------------------------------------------------------
+- name: Wait for this member to report all three servers and a leader
+  become: true
+  ansible.builtin.command:
+    cmd: ovs-appctl -t {{ lab_dir }}/{{ item.ctl }} cluster/status {{ item.name }}
+  loop: "{{ ic_databases }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: ic_status
+  retries: 30
+  delay: 4
+  until:
+    - ic_status.rc == 0
+    - "'Servers:' in ic_status.stdout"
+    - ic_status.stdout | regex_findall('at tcp:') | length == ic_cluster_size
+    - "'candidate' not in ic_status.stdout"
+  changed_when: false
+
+- name: Report the cluster state
+  ansible.builtin.debug:
+    msg: >-
+      {{ item.item.name }} on {{ inventory_hostname }}:
+      {{ item.stdout_lines | select('search', '^(Role|Term|Servers):') | join(' | ') }}
+  loop: "{{ ic_status.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"

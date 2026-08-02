@@ -2,6 +2,10 @@
 # Per-container lifecycle (called once per workload, with loop_var `wl`).
 # The launch/device tasks are made idempotent by tolerating "already exists".
 
+- name: Resolve the NIC that carries the default route for {{ wl.name }}
+  ansible.builtin.set_fact:
+    wl_default_nic: "{{ wl.nics | selectattr('default_route', 'equalto', true) | first }}"
+
 - name: Launch container {{ wl.name }}
   become: true
   ansible.builtin.command:
@@ -10,29 +14,37 @@
   changed_when: launch.rc == 0
   failed_when: launch.rc != 0 and 'already exists' not in (launch.stderr | lower)
 
-# nictype=p2p: Incus only builds the veth pair (container side = eth0 with our MAC
-# and MTU; host side = host_iface, left unbridged). We do the OVS plumbing
-# ourselves below, instead of relying on Incus's native OVS client (which fails
-# to talk to the OVS db on Incus 6.0). This matches the lab's "OVN driven
-# manually, Incus only provides the workload" design.
-- name: Attach a p2p veth to {{ wl.name }}
+# nictype=p2p: Incus only builds the veth pair (container side = the named iface
+# with our MAC and MTU; host side = host_iface, left unbridged). We do the OVS
+# plumbing ourselves below, instead of relying on Incus's native OVS client
+# (which fails to talk to the OVS db on Incus 6.0). This matches the lab's "OVN
+# driven manually, Incus only provides the workload" design.
+#
+# One device per plane the workload lives on: app backends get two, db-vm one.
+- name: Attach a p2p veth to {{ wl.name }} for each plane
   become: true
   ansible.builtin.command:
     cmd: >
-      incus config device add {{ wl.name }} eth0 nic
-      nictype=p2p name=eth0 host_name={{ wl.host_iface }}
-      hwaddr={{ wl.mac }} mtu={{ overlay_mtu }}
+      incus config device add {{ wl.name }} {{ item.iface }} nic
+      nictype=p2p name={{ item.iface }} host_name={{ item.host_iface }}
+      hwaddr={{ item.mac }} mtu={{ overlay_mtu }}
+  loop: "{{ wl.nics }}"
+  loop_control:
+    label: "{{ wl.name }}/{{ item.iface }} ({{ item.plane }} {{ item.ip }})"
   register: nicadd
   changed_when: nicadd.rc == 0
   failed_when: nicadd.rc != 0 and 'already exists' not in (nicadd.stderr | lower)
 
-- name: Plug the host veth into br-int with its OVN iface-id
+- name: Plug each host veth of {{ wl.name }} into br-int with its OVN iface-id
   become: true
   ansible.builtin.shell:
     cmd: |
-      ip link set {{ wl.host_iface }} up
-      ovs-vsctl --may-exist add-port br-int {{ wl.host_iface }} \
-        -- set interface {{ wl.host_iface }} external_ids:iface-id={{ wl.lsp }}
+      ip link set {{ item.host_iface }} up
+      ovs-vsctl --may-exist add-port br-int {{ item.host_iface }} \
+        -- set interface {{ item.host_iface }} external_ids:iface-id={{ item.lsp }}
+  loop: "{{ wl.nics }}"
+  loop_control:
+    label: "{{ item.host_iface }} -> {{ item.lsp }}"
   changed_when: false
 
 - name: Render the static netplan for {{ wl.name }}
@@ -61,17 +73,22 @@
     cmd: incus exec {{ wl.name }} -- netplan apply
   changed_when: false
 
-- name: Wait until {{ wl.name }} can reach its gateway over OVN
+- name: Wait until every NIC of {{ wl.name }} can reach its plane gateway
   become: true
   ansible.builtin.command:
-    cmd: incus exec {{ wl.name }} -- ping -c1 -W2 {{ vpc_gw }}
+    cmd: >
+      incus exec {{ wl.name }} -- ping -c1 -W2 -I {{ item.iface }}
+      {{ plane_map[item.plane].gw }}
+  loop: "{{ wl.nics }}"
+  loop_control:
+    label: "{{ wl.name }}/{{ item.iface }} -> {{ plane_map[item.plane].gw }}"
   register: gwping
   retries: 15
   delay: 2
   until: gwping.rc == 0
   changed_when: false
 
-- name: Wait until {{ wl.name }} can reach the internet via OVN SNAT
+- name: Wait until {{ wl.name }} can reach the internet via its plane's OVN SNAT
   become: true
   ansible.builtin.command:
     cmd: incus exec {{ wl.name }} -- ping -c1 -W3 1.1.1.1

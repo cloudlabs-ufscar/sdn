@@ -2,39 +2,57 @@
 # =============================================================================
 # role: workloads
 # For each workload defined in host_vars:
-#   1. create its OVN logical switch port (addresses + port security);
+#   1. create ONE OVN logical switch port per NIC, on that NIC's plane switch;
 #   2. launch an Incus container with NO default nic;
-#   3. attach a veth into br-int and tag it with iface-id=<lsp> so ovn-controller
+#   3. attach a veth per NIC into br-int, tagged iface-id=<lsp> so ovn-controller
 #      binds it (this is the "Incus only provides the workload" design);
-#   4. configure the container's network statically (IP, MTU 1442, gw, DNS);
-#   5. install the software: PostgreSQL on db-vm, FastAPI on the app-vm's.
+#   4. configure the container's network statically (IP, MTU 1442, routes, DNS);
+#   5. install the software for this workload's TIER.
 #
-# Ordering note: db workloads are deployed before app workloads, so app backends
-# find the database ready. In the linear strategy a whole task (incl. an
-# include_tasks loop) finishes on all hosts before the next begins, so db-vm in
-# AZ2 is ready before the AZ1 app deploy runs.
+# The application is split across the AZs on purpose, so that using it exercises
+# the interconnect:
+#
+#   browser -> AZ1 VIP -> React + nginx (app-vm-1, AZ1)
+#                            |
+#                            +-- /api/* -> AZ2 VIP -> Java backend (app-vm-2, AZ2)
+#                                                        |
+#                                                        +-- JDBC -> db-vm (mgmt)
+#
+# The app tiers are dual-homed: a client-plane NIC that serves HTTP behind their
+# AZ's VIP, and a mgmt-plane NIC that is the ONLY way they reach the database.
+# db-vm has a mgmt NIC only, so nothing on the client plane can address it.
+#
+# Ordering note: the tiers are deployed database -> backend -> frontend, so each
+# one finds its dependency ready. In the linear strategy a whole task (incl. an
+# include_tasks loop) finishes on ALL hosts before the next begins, so db-vm and
+# the backend in AZ2 are both up before the AZ1 frontend deploy runs.
 # =============================================================================
 
-# ---------- 1. OVN logical switch ports for the workloads --------------------
+# Lets a NIC look up its plane's switch / gateway by name.
+- name: Index the planes by name
+  ansible.builtin.set_fact:
+    plane_map: "{{ dict(planes | map(attribute='name') | zip(planes)) }}"
+
+# ---------- 1. OVN logical switch ports for every workload NIC ---------------
 - name: Create the workload logical switch ports
   ansible.builtin.command:
     cmd: >
       ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} --may-exist
-      lsp-add {{ ls_name }} {{ item.lsp }}
-  loop: "{{ workloads }}"
+      lsp-add {{ plane_map[item.1.plane].ls }} {{ item.1.lsp }}
+  loop: "{{ workloads | subelements('nics') }}"
   loop_control:
-    label: "{{ item.lsp }}"
+    label: "{{ item.1.lsp }} on {{ plane_map[item.1.plane].ls }}"
   changed_when: false
 
 - name: Set addresses + port security on the workload ports
   ansible.builtin.command:
     cmd: >
       ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }}
-      -- lsp-set-addresses {{ item.lsp }} "{{ item.mac }} {{ item.ip }}"
-      -- lsp-set-port-security {{ item.lsp }} "{{ item.mac }} {{ item.ip }}"
-  loop: "{{ workloads }}"
+      -- lsp-set-addresses {{ item.1.lsp }} "{{ item.1.mac }} {{ item.1.ip }}"
+      -- lsp-set-port-security {{ item.1.lsp }} "{{ item.1.mac }} {{ item.1.ip }}"
+  loop: "{{ workloads | subelements('nics') }}"
   loop_control:
-    label: "{{ item.lsp }}"
+    label: "{{ item.1.lsp }}"
   changed_when: false
 
 # ---------- 2. The 'ovn' Incus profile (root disk, no default nic) -----------
@@ -65,10 +83,26 @@
     loop_var: wl
     label: "{{ wl.name }}"
 
-# ---------- 5b. Then the app backends ----------------------------------------
-- name: Deploy FastAPI on app workloads
-  ansible.builtin.include_tasks: deploy_app.yml
-  loop: "{{ workloads | selectattr('role', 'equalto', 'app') | list }}"
+# ---------- 5b. Then the Java backend tier (AZ2) ------------------------------
+- name: Deploy the Java backend
+  ansible.builtin.include_tasks: deploy_backend.yml
+  loop: "{{ workloads | selectattr('role', 'equalto', 'backend') | list }}"
+  loop_control:
+    loop_var: wl
+    label: "{{ wl.name }}"
+
+# ---------- 6. Publish the infrastructure state the dashboard renders ---------
+# Before the frontend, so the dashboard has data on its very first load. Needs
+# the database and the schema, hence after 5a.
+- name: Publish this AZ's OVN state into the database
+  ansible.builtin.include_tasks: publish_infra_state.yml
+
+# ---------- 7. Finally the React frontend tier (AZ1) --------------------------
+# Last, because its deploy ends by calling straight through to the backend in the
+# other AZ — which only works once that backend is serving.
+- name: Deploy the React frontend
+  ansible.builtin.include_tasks: deploy_frontend.yml
+  loop: "{{ workloads | selectattr('role', 'equalto', 'frontend') | list }}"
   loop_control:
     loop_var: wl
     label: "{{ wl.name }}"

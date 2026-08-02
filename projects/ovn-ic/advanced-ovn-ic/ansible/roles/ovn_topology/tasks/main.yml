@@ -1,20 +1,31 @@
 ---
 # =============================================================================
 # role: ovn_topology
-# Builds each AZ's logical network and federates the two through the transit
-# switch. This is where every gotcha from pratice-ovn-ic is enforced:
+# Builds this AZ's logical network — ONE independent stack per plane — and
+# federates each plane with its peer AZ through its OWN transit switch.
 #
+#   client plane:  ls-client-<az> -- lr-client-<az> -- ts-client
+#   mgmt plane:    ls-mgmt-<az>   -- lr-mgmt-<az>   -- ts-mgmt
+#
+# The two planes never touch inside the fabric: separate switches, separate
+# routers, separate transit switches, no route between them. They share only the
+# GENEVE fabric (UDP 6081) and the chassis — the isolation is logical.
+#
+# Every gotcha from pratice-ovn-ic is enforced here:
 #   #1 AZ identity = NB_Global.name
-#   #2 transit switch created ONLY in IC-NB (never the local NB)
+#   #2 transit switches created ONLY in IC-NB (never the local NB)
 #   #3 restart ovn-ic after the topology is complete (startup race)
 #   #4 ic-route-adv / ic-route-learn on NB_Global.options (not the router)
-#   #5 pin a gateway chassis on the transit LRP
+#   #5 pin a gateway chassis on each transit LRP
 #
 # All ovn-nbctl calls hit tcp:127.0.0.1:6641, which is world-accessible locally,
 # so they need no sudo. They use --may-exist / set, so the role is idempotent.
 # =============================================================================
 
 # -- Gotchas #1 and #4 --------------------------------------------------------
+# ic-route-blacklist keeps the provider (br-ex) subnets out of the interconnect:
+# they are host plumbing, not tenant routes. The edge subnets stay advertised on
+# purpose — see ic_route_blacklist in group_vars/all.yml.
 - name: Set NB_Global identity and IC route advertisement/learning
   ansible.builtin.command:
     cmd: >
@@ -22,66 +33,30 @@
       name={{ az_name }}
       options:ic-route-adv=true
       options:ic-route-learn=true
+      options:ic-route-blacklist={{ ic_route_blacklist }}
   changed_when: false
 
-# -- The tenant VPC: one switch, one router -----------------------------------
-- name: Create the VPC logical switch
-  ansible.builtin.command:
-    cmd: ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} --may-exist ls-add {{ ls_name }}
-  changed_when: false
+# -- Per-plane logical stack --------------------------------------------------
+- name: Build the logical stack for each plane
+  ansible.builtin.include_tasks: plane.yml
+  loop: "{{ planes }}"
+  loop_control:
+    loop_var: plane
+    label: "{{ plane.name }} ({{ plane.cidr }})"
 
-- name: Create the VPC logical router
-  ansible.builtin.command:
-    cmd: ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} --may-exist lr-add {{ lr_name }}
-  changed_when: false
-
-- name: Add the router port that is the workloads' default gateway
-  ansible.builtin.command:
-    cmd: >
-      ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} --may-exist
-      lrp-add {{ lr_name }} lrp-{{ az_name }}-ls {{ lrp_ls_mac }} {{ vpc_gw }}/24
-  changed_when: false
-
-- name: Attach the VPC switch to the router (switch side port)
+# -- Gotcha #2 (ic_host only): declare BOTH transit switches in IC-NB ---------
+# One transit switch per plane. ovn-ic copies each one into every local NB.
+- name: Create the transit switches in IC-NB
   ansible.builtin.command:
     cmd: >
-      ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} --may-exist
-      lsp-add {{ ls_name }} lsp-{{ az_name }}-router
+      ovn-ic-nbctl --db={{ ic_nb_remote }}
+      --may-exist ts-add {{ item }}
+  loop: "{{ transit_switches }}"
+  when: inventory_hostname == ic_bootstrap
   changed_when: false
 
-- name: Make that port a router patch port
-  ansible.builtin.command:
-    cmd: >
-      ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }}
-      -- lsp-set-type lsp-{{ az_name }}-router router
-      -- lsp-set-addresses lsp-{{ az_name }}-router router
-      -- lsp-set-options lsp-{{ az_name }}-router router-port=lrp-{{ az_name }}-ls
-  changed_when: false
-
-# -- Transit router port (must exist before we connect it to ts) --------------
-- name: Add the transit router port
-  ansible.builtin.command:
-    cmd: >
-      ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} --may-exist
-      lrp-add {{ lr_name }} lrp-{{ az_name }}-ts {{ lrp_ts_mac }} {{ lrp_ts_ip }}/24
-  changed_when: false
-
-# -- Gotcha #5 ----------------------------------------------------------------
-- name: Pin a gateway chassis on the transit router port
-  ansible.builtin.command:
-    cmd: >
-      ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }}
-      lrp-set-gateway-chassis lrp-{{ az_name }}-ts {{ chassis_name }} 1
-  changed_when: false
-
-# -- Gotcha #2 (ic_host only): declare the transit switch in IC-NB ------------
-- name: Create the transit switch in IC-NB
-  ansible.builtin.command:
-    cmd: ovn-ic-nbctl --db=tcp:{{ ic_db_ip }}:{{ ic_nb_port }} --may-exist ts-add {{ transit_switch }}
-  when: is_ic_host | bool
-  changed_when: false
-
-# -- Start ovn-ic so it propagates ts and registers this chassis as a gateway -
+# -- Start ovn-ic so it propagates the transit switches and registers this
+#    chassis as a gateway ----------------------------------------------------
 - name: Install the ovn-ic systemd unit
   become: true
   ansible.builtin.template:
@@ -100,30 +75,21 @@
     enabled: true
     state: started
 
-- name: Wait for ovn-ic to propagate the transit switch into the local NB
+- name: Wait for ovn-ic to propagate both transit switches into the local NB
   ansible.builtin.command: ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} ls-list
   register: ls_list
   retries: 30
   delay: 2
-  until: transit_switch in ls_list.stdout
+  until: transit_switches | select('in', ls_list.stdout) | list | length == transit_switches | length
   changed_when: false
 
-# -- Connect this AZ's router to the propagated transit switch ----------------
-- name: Add this AZ's port on the transit switch
-  ansible.builtin.command:
-    cmd: >
-      ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} --may-exist
-      lsp-add {{ transit_switch }} lsp-ts-{{ az_name }}
-  changed_when: false
-
-- name: Make the transit switch port a router patch port
-  ansible.builtin.command:
-    cmd: >
-      ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }}
-      -- lsp-set-type lsp-ts-{{ az_name }} router
-      -- lsp-set-addresses lsp-ts-{{ az_name }} router
-      -- lsp-set-options lsp-ts-{{ az_name }} router-port=lrp-{{ az_name }}-ts
-  changed_when: false
+# -- Connect each plane's router to its propagated transit switch -------------
+- name: Attach each plane's router to its transit switch
+  ansible.builtin.include_tasks: plane_transit.yml
+  loop: "{{ planes }}"
+  loop_control:
+    loop_var: plane
+    label: "{{ plane.name }} -> {{ plane.ts }}"
 
 # -- Gotcha #3 ----------------------------------------------------------------
 - name: Restart ovn-ic so it re-reads the complete topology
@@ -133,18 +99,25 @@
     state: restarted
 
 - name: Wait for this AZ's gateway to register in IC-SB
-  ansible.builtin.command: ovn-ic-sbctl --db=tcp:{{ ic_db_ip }}:{{ ic_sb_port }} list Gateway
+  ansible.builtin.command: ovn-ic-sbctl --db={{ ic_sb_remote }} list Gateway
   register: ic_gw
   retries: 20
   delay: 3
   until: chassis_name in ic_gw.stdout
   changed_when: false
 
-- name: Show the learned IC routes (sanity)
-  ansible.builtin.command: ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} lr-route-list {{ lr_name }}
+- name: Read the routes on each plane's router (sanity)
+  ansible.builtin.command:
+    cmd: ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} lr-route-list {{ item.lr }}
+  loop: "{{ planes }}"
+  loop_control:
+    label: "{{ item.lr }}"
   register: lr_routes
   changed_when: false
 
-- name: Print learned routes for this AZ
+- name: Print the routes per plane
   ansible.builtin.debug:
-    var: lr_routes.stdout_lines
+    msg: "{{ item.item.lr }}: {{ item.stdout_lines }}"
+  loop: "{{ lr_routes.results }}"
+  loop_control:
+    label: "{{ item.item.lr }}"

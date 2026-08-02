@@ -1,0 +1,109 @@
+---
+# Build and serve the React frontend tier inside a workload (loop_var `wl`).
+#
+# nginx does two jobs here:
+#   1. serve the built React bundle;
+#   2. proxy /api/* to the OTHER AZ's load-balancer VIP.
+#
+# That proxy hop is the point of the lab: it is what makes every dashboard
+# refresh cross the client transit switch over GENEVE. It also means the browser
+# only ever needs to reach AZ1 — it never has to route into the fabric itself.
+
+- name: Install nginx and the Node toolchain in {{ wl.name }}
+  become: true
+  ansible.builtin.command:
+    cmd: >
+      incus exec {{ wl.name }} -- bash -lc
+      "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y
+      nginx nodejs npm"
+  changed_when: false
+
+- name: Create the build directory in {{ wl.name }}
+  become: true
+  ansible.builtin.command:
+    cmd: incus exec {{ wl.name }} -- mkdir -p /opt/frontend/src
+  changed_when: false
+
+- name: Stage the frontend sources on the AZ host
+  ansible.builtin.copy:
+    src: frontend/
+    dest: /tmp/frontend-{{ wl.name }}/
+    mode: "0644"
+  register: staged_fe
+
+- name: Push the frontend sources into {{ wl.name }}
+  become: true
+  ansible.builtin.command:
+    cmd: incus file push -r /tmp/frontend-{{ wl.name }}/{{ item }} {{ wl.name }}/opt/frontend/
+  loop:
+    - package.json
+    - vite.config.js
+    - index.html
+    - src
+  changed_when: false
+
+# npm reaches the internet through this plane's SNAT and the cell's edge router,
+# so a failure here is usually a north-south problem, not a Node problem.
+- name: Install the frontend dependencies in {{ wl.name }}
+  become: true
+  ansible.builtin.command:
+    cmd: >
+      incus exec {{ wl.name }} -- bash -lc
+      "cd /opt/frontend && npm install --no-audit --no-fund --loglevel=error"
+  register: npm_install
+  retries: 2
+  delay: 5
+  until: npm_install.rc == 0
+  changed_when: false
+
+- name: Build the React bundle in {{ wl.name }}
+  become: true
+  ansible.builtin.command:
+    cmd: incus exec {{ wl.name }} -- bash -lc "cd /opt/frontend && npm run build"
+  changed_when: false
+
+- name: Render the nginx site (static bundle + cross-AZ /api proxy)
+  ansible.builtin.template:
+    src: nginx-frontend.conf.j2
+    dest: /tmp/nginx-{{ wl.name }}.conf
+    mode: "0644"
+
+- name: Push the nginx site into {{ wl.name }}
+  become: true
+  ansible.builtin.command:
+    cmd: incus file push /tmp/nginx-{{ wl.name }}.conf {{ wl.name }}/etc/nginx/sites-available/default --mode 0644
+  changed_when: false
+
+- name: Restart nginx in {{ wl.name }}
+  become: true
+  ansible.builtin.command:
+    cmd: >
+      incus exec {{ wl.name }} -- bash -lc
+      "nginx -t && systemctl enable nginx && systemctl restart nginx"
+  changed_when: false
+
+- name: Wait for the frontend to serve the dashboard in {{ wl.name }}
+  become: true
+  ansible.builtin.command:
+    cmd: >
+      incus exec {{ wl.name }} -- bash -lc
+      "curl -fs -o /dev/null http://{{ (wl.nics | selectattr('plane', 'equalto', 'client') | first).ip }}:{{ frontend_port }}/"
+  register: fhealth
+  retries: 20
+  delay: 3
+  until: fhealth.rc == 0
+  changed_when: false
+
+# Proves the whole chain end to end from inside AZ1: nginx -> AZ2 VIP ->
+# ts-client -> Java backend -> Postgres on the mgmt plane, and back.
+- name: Verify the cross-AZ API proxy from {{ wl.name }}
+  become: true
+  ansible.builtin.command:
+    cmd: >
+      incus exec {{ wl.name }} -- bash -lc
+      "curl -fs --max-time 15 http://{{ (wl.nics | selectattr('plane', 'equalto', 'client') | first).ip }}:{{ frontend_port }}/api/health"
+  register: proxycheck
+  retries: 15
+  delay: 4
+  until: proxycheck.rc == 0 and 'backend' in proxycheck.stdout
+  changed_when: false

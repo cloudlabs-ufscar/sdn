@@ -1,11 +1,11 @@
 ---
 # =============================================================================
 # group_vars/all.yml — variables visible to EVERY host in the inventory.
-# Anything that is the same on both AZs lives here; per-AZ values live in
-# host_vars/az1.yml and host_vars/az2.yml.
+# Anything that is the same on both AZs lives here; per-AZ values (including the
+# whole per-plane topology) live in host_vars/az1.yml and host_vars/az2.yml.
 # =============================================================================
 
-# --- Source build (carries over from the previous lab) -----------------------
+# --- Source build ------------------------------------------------------------
 # The ovn-central package on Ubuntu 24.04 ships neither the ovn-ic binary nor the
 # IC-NB/IC-SB schemas, so we compile OVN from source. OVS is pinned to v3.3.0
 # because OVS main renamed a symbol that breaks the OVN 24.03 build.
@@ -18,32 +18,124 @@ lab_dir: /opt/ovn-lab              # local databases, logs and sockets live here
 nb_port: 6641                      # local Northbound  (bound to 127.0.0.1)
 sb_port: 6642                      # local Southbound  (bound to 127.0.0.1)
 
-# --- Global interconnect databases (only on ic_host = az1) -------------------
-ic_nb_port: 6645
-ic_sb_port: 6646
-ic_host: az1                                       # which VM runs IC-NB/IC-SB
-ic_db_ip: "{{ hostvars[ic_host].az_private_ip }}"  # both ovn-ic daemons dial this
+# --- Global interconnect databases: a 3-member RAFT cluster ------------------
+# IC-NB and IC-SB are the only databases shared between AZs, which makes them the
+# federation's control-plane single point of failure if they live on one VM. They
+# are therefore clustered across az1, az2 and a dedicated quorum arbiter.
+#
+# THREE members, not two: RAFT commits need a strict majority. A majority of 2 is
+# 2, so a 2-member cluster stops on any single failure — no better than one node.
+# A majority of 3 is 2, so the cluster survives losing any one member. The
+# arbiter's only job is to be that third vote.
+#
+# Each database uses two ports: a client port the ovn-ic daemons connect to, and
+# a separate RAFT port for member-to-member replication.
+ic_nb_port: 6645                   # IC-NB client port
+ic_sb_port: 6646                   # IC-SB client port
+ic_nb_raft_port: 6647              # IC-NB RAFT peer port
+ic_sb_raft_port: 6648              # IC-SB RAFT peer port
 
-# --- Interconnect transit switch --------------------------------------------
-# Created ONLY in IC-NB; ovn-ic propagates it into each local NB. Never create it
-# by hand in a local NB (gotcha #2 from the previous lab).
-transit_switch: ts
-transit_subnet_cidr: 169.254.100.0/24
+ic_bootstrap: az1                  # the member that runs `create-cluster`; the
+                                   # others `join-cluster` against it
+ic_cluster_size: "{{ groups['ic_cluster'] | length }}"
+
+ic_schema_files:
+  - ovn-ic-nb.ovsschema
+  - ovn-ic-sb.ovsschema
+
+# Everything the ic_cluster role needs to build one database, x2.
+ic_databases:
+  - name: OVN_IC_Northbound
+    db: ic-nb.db
+    schema: ovn-ic-nb.ovsschema
+    service: ovn-ic-nb-db
+    ctl: ic-nb.ctl
+    log: ic-nb.log
+    client_port: "{{ ic_nb_port }}"
+    raft_port: "{{ ic_nb_raft_port }}"
+  - name: OVN_IC_Southbound
+    db: ic-sb.db
+    schema: ovn-ic-sb.ovsschema
+    service: ovn-ic-sb-db
+    ctl: ic-sb.ctl
+    log: ic-sb.log
+    client_port: "{{ ic_sb_port }}"
+    raft_port: "{{ ic_sb_raft_port }}"
+
+# Clients are given EVERY member. A clustered ovsdb serves reads from any member
+# and redirects writes to the leader, so an ovn-ic daemon keeps working when the
+# member it happened to be talking to goes away.
+ic_nb_remote: "{{ groups['ic_cluster'] | map('extract', hostvars, 'az_private_ip') | map('regex_replace', '^(.*)$', 'tcp:\\1:' ~ ic_nb_port) | join(',') }}"
+ic_sb_remote: "{{ groups['ic_cluster'] | map('extract', hostvars, 'az_private_ip') | map('regex_replace', '^(.*)$', 'tcp:\\1:' ~ ic_sb_port) | join(',') }}"
+
+# --- Interconnect: TWO transit switches, one per plane -----------------------
+# The design separates a tenant-facing "client" plane from an operator-facing
+# "mgmt" (service management) plane. Each plane is federated across AZs by its
+# OWN transit switch, so the two planes are distinct OVN datapaths that never
+# exchange traffic inside the fabric.
+#
+# Both transit switches ride the SAME GENEVE fabric (UDP 6081) between the two
+# chassis — the isolation is logical (separate datapaths), not physical.
+#
+# Created ONLY in IC-NB; ovn-ic propagates each into every local NB. Never create
+# a transit switch by hand in a local NB (gotcha #2).
+transit_switches:
+  - ts-client
+  - ts-mgmt
+
+# Supernets covering every AZ's subnet on a given plane. Used for routing inside
+# the workloads and for the PostgreSQL host-based authentication rules.
+client_supernet: 10.10.0.0/16      # 10.10.1.0/24 (AZ1) + 10.10.2.0/24 (AZ2)
+mgmt_supernet: 10.20.0.0/16        # 10.20.1.0/24 (AZ1) + 10.20.2.0/24 (AZ2)
+
+# The per-AZ PROVIDER subnets (br-ex) are connected routes on the edge routers and
+# are pure host-local plumbing, so ovn-ic is told not to advertise them.
+#
+# The per-AZ EDGE subnets are deliberately NOT blacklisted. They must cross the
+# interconnect: when a load balancer sends a request to the backend in the other
+# AZ, the edge router SNATs it to its own edge address, and the remote backend can
+# only reply if its AZ has learned a route back to that address.
+ic_route_blacklist: "{{ groups['azs'] | map('extract', hostvars, 'ext_cidr') | join(',') }}"
 
 # --- MTU --------------------------------------------------------------------
 # Host NIC (ens3) MTU is 1500. OVN GENEVE adds ~58 bytes of encapsulation, so the
 # inner workload MTU must be <= 1442 or cross-AZ TCP (app -> db over the tunnel)
-# stalls on full-size segments. This is the MTU pressure that plain ping hid.
+# stalls on full-size segments. Applies to BOTH workload NICs.
 overlay_mtu: 1442
 
-# --- Application + native OVN load balancer ---------------------------------
-vip_ip: 10.10.1.100                # OVN load-balancer VIP (lives in the AZ1 subnet)
-vip_port: 80
-backend_port: 8000                 # FastAPI listens here on every app workload
+# --- Application: a React frontend in AZ1, a Java backend in AZ2 -------------
+# The application is deliberately SPLIT ACROSS THE AZs so that simply using it
+# exercises the interconnect:
+#
+#   browser -> AZ1 VIP -> nginx + React     (app-vm-1, AZ1, client plane)
+#                           |
+#                           +-- /api/* ---> AZ2 VIP -> Java backend   <-- CROSS-AZ,
+#                                             (app-vm-2, AZ2, client)     over ts-client
+#                                               |
+#                                               +-- JDBC -> db-vm      <-- mgmt plane
+#                                                    (10.20.2.10, AZ2)
+#
+# Each AZ's load balancer fronts the tier that lives in THAT AZ, so both VIPs are
+# in the request path of every dashboard refresh.
+vip_port: 80                       # both VIPs listen here
+frontend_port: 80                  # nginx on app-vm-1
+backend_port: 8080                 # Java backend on app-vm-2
 
-# --- Managed database (db-vm, in AZ2) ---------------------------------------
+frontend_az: az1                   # which AZ serves the dashboard
+backend_az: az2                    # which AZ answers /api/* (with the database)
+
+# The frontend reaches the backend through a VIP in ITS OWN AZ that fronts the
+# remote backend, so the cross-AZ hop still goes through the OVN load balancer.
+# (A VIP can only be used from inside the AZ that owns it — see service_lb_name
+# in host_vars/az1.yml.)
+backend_vip: "{{ hostvars['az1'].planes | selectattr('name', 'equalto', 'client') | map(attribute='service_vip') | first }}"
+
+# --- Managed database (db-vm) ------------------------------------------------
+# The database lives on the MANAGEMENT plane only. It has no client-plane NIC, so
+# it is unreachable from the tenant network by construction; the app backends
+# reach it through their second (mgmt) NIC.
 db_az: az2                         # which AZ the database lives in (for the UI)
-db_host_ip: 10.10.2.10
+db_host_ip: 10.20.2.10             # mgmt-plane address of db-vm
 db_port: 5432
 db_name: appdb
 db_user: appuser

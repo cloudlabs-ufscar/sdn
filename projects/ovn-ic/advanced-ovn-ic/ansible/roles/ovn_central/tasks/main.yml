@@ -68,45 +68,15 @@
     - ovn-northd
   notify: reload systemd
 
-# --- Global interconnect databases (only on az1) -----------------------------
-- name: Create the IC-NB / IC-SB database files (ic_host only)
-  become: true
-  ansible.builtin.command:
-    cmd: "ovsdb-tool create {{ lab_dir }}/{{ item.db }} {{ item.schema }}"
-    creates: "{{ lab_dir }}/{{ item.db }}"
-  loop:
-    - { db: ic-nb.db, schema: /usr/local/share/ovn/ovn-ic-nb.ovsschema }
-    - { db: ic-sb.db, schema: /usr/local/share/ovn/ovn-ic-sb.ovsschema }
-  when: is_ic_host | bool
-
-- name: Install IC-NB / IC-SB systemd units (ic_host only)
-  become: true
-  ansible.builtin.template:
-    src: "{{ item }}.service.j2"
-    dest: "/etc/systemd/system/{{ item }}.service"
-    mode: "0644"
-  loop:
-    - ovn-ic-nb-db
-    - ovn-ic-sb-db
-  when: is_ic_host | bool
-  notify: reload systemd
+# The GLOBAL interconnect databases are not created here: they are a 3-member
+# RAFT cluster spanning az1, az2 and the quorum arbiter, owned by the
+# `ic_cluster` role (stage 3a) which runs before this one.
 
 # Apply the daemon-reload now so the units below exist before we start them.
 - name: Apply pending systemd unit changes
   ansible.builtin.meta: flush_handlers
 
 # --- Start everything in dependency order ------------------------------------
-- name: Enable and start the IC databases first (ic_host only)
-  become: true
-  ansible.builtin.systemd_service:
-    name: "{{ item }}"
-    enabled: true
-    state: started
-  loop:
-    - ovn-ic-nb-db
-    - ovn-ic-sb-db
-  when: is_ic_host | bool
-
 - name: Enable and start local NB and SB
   become: true
   ansible.builtin.systemd_service:

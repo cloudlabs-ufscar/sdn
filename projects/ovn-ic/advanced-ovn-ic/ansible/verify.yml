@@ -1,82 +1,435 @@
 ---
 # =============================================================================
-# verify.yml — exercises the four traffic paths the lab is about.
+# verify.yml — the test suite for the dual-plane architecture.
 #
 #   ansible-playbook verify.yml
 #
-#   1. LB ingress crossing AZs  -> curl the VIP, watch served_by flip AZ1/AZ2
-#   2. Cross-AZ DBaaS query      -> app-vm-1 (AZ1) "/" hits db-vm (AZ2): high latency
-#   3. Intra-AZ query (contrast) -> app-vm-2 (AZ2) "/" hits db-vm (AZ2): low latency
-#   4. North-south via SNAT      -> a container reaches the public internet
+# Every check is an `assert`, so a broken path FAILS the run instead of printing
+# something you have to read. Grouped into:
+#
+#   T1  control plane   — both transit switches federated, per-plane routes learned
+#   T2  plane isolation — the client plane cannot reach the database, by design
+#   T3  client plane    — each AZ's VIP load-balances across BOTH AZs
+#   T4  mgmt plane      — cross-AZ vs intra-AZ database queries over ts-mgmt
+#   T5  north-south     — every plane SNATs to the internet independently
+#   T6  MTU             — the GENEVE encap ceiling holds on both planes
+#   T7  application     — the React/Java split actually moves data across the AZs
 # =============================================================================
-- name: Verify the lab end-to-end
+- name: Verify the dual-plane OVN-IC lab
   hosts: azs
   gather_facts: false
+  vars:
+    client_plane: "{{ planes | selectattr('name', 'equalto', 'client') | first }}"
+    mgmt_plane: "{{ planes | selectattr('name', 'equalto', 'mgmt') | first }}"
+    peer: "{{ (groups['azs'] | difference([inventory_hostname]))[0] }}"
+    app_wl: "{{ workloads | rejectattr('role', 'equalto', 'db') | first }}"
+    has_frontend: "{{ workloads | selectattr('role', 'equalto', 'frontend') | list | length > 0 }}"
   tasks:
-    - name: "[az1] IC-SB view (expect az1-chassis and az2-chassis as gateways)"
-      ansible.builtin.command: ovn-ic-sbctl --db=tcp:{{ ic_db_ip }}:{{ ic_sb_port }} show
-      register: ic_show
-      changed_when: false
-      when: is_ic_host | bool
 
-    - name: Show IC status
-      ansible.builtin.debug:
-        var: ic_show.stdout_lines
-      when: is_ic_host | bool
-
-    - name: "[host] GENEVE tunnels present in OVS"
-      become: true
-      ansible.builtin.shell: ovs-vsctl show | grep -A2 geneve || true
-      register: geneve
+    # =========================================================================
+    # T1 — CONTROL PLANE
+    # =========================================================================
+    - name: "T1.1 Both transit switches exist in IC-NB"
+      ansible.builtin.command:
+        cmd: ovn-ic-nbctl --db={{ ic_nb_remote }} show
+      register: t1_icnb
       changed_when: false
 
-    - name: Show GENEVE tunnels
-      ansible.builtin.debug:
-        var: geneve.stdout_lines
+    - name: "T1.1 assert — ts-client and ts-mgmt are both declared globally"
+      ansible.builtin.assert:
+        that: transit_switches | select('in', t1_icnb.stdout) | list | length == transit_switches | length
+        fail_msg: "IC-NB is missing a transit switch. Got:\n{{ t1_icnb.stdout }}"
+        success_msg: "IC-NB declares {{ transit_switches | join(' and ') }}"
 
-    - name: "[path #1] Hit the VIP 10x (served_by should flip between AZ1 and AZ2)"
-      become: true
-      ansible.builtin.shell: |
-        for i in $(seq 1 10); do curl -s --max-time 5 http://{{ vip_ip }}:{{ vip_port }}/; echo; done
-      register: vip
+    - name: "T1.2 Both AZ gateways are registered in IC-SB"
+      ansible.builtin.command:
+        cmd: ovn-ic-sbctl --db={{ ic_sb_remote }} show
+      register: t1_icsb
       changed_when: false
-      when: is_ic_host | bool
 
-    - name: Show VIP responses
-      ansible.builtin.debug:
-        var: vip.stdout_lines
-      when: is_ic_host | bool
+    - name: "T1.2 assert — az1-chassis and az2-chassis both registered"
+      ansible.builtin.assert:
+        that:
+          - "'az1-chassis' in t1_icsb.stdout"
+          - "'az2-chassis' in t1_icsb.stdout"
+        fail_msg: "A gateway is missing from IC-SB. Got:\n{{ t1_icsb.stdout }}"
+        success_msg: "Both AZ gateways are registered in IC-SB"
 
-    - name: "[paths #2/#3] Query each app backend directly (compare db_latency_ms)"
+    - name: "T1.3 GENEVE tunnel to the peer chassis is up"
       become: true
-      ansible.builtin.command: incus exec {{ item.name }} -- curl -s --max-time 8 http://127.0.0.1:{{ backend_port }}/
-      loop: "{{ workloads | selectattr('role', 'equalto', 'app') | list }}"
-      loop_control:
-        label: "{{ item.name }}"
-      register: appq
+      ansible.builtin.shell:
+        cmd: ovs-vsctl show | grep -A3 geneve
+      register: t1_geneve
       changed_when: false
       failed_when: false
 
-    - name: Show per-backend DB query result
-      ansible.builtin.debug:
-        msg: "{{ item.item.name }} -> {{ item.stdout }}"
-      loop: "{{ appq.results }}"
-      loop_control:
-        label: "{{ item.item.name }}"
+    - name: "T1.3 assert — the tunnel points at the peer's encap-ip"
+      ansible.builtin.assert:
+        that: hostvars[peer].az_private_ip in t1_geneve.stdout
+        fail_msg: "No GENEVE tunnel to {{ hostvars[peer].az_private_ip }}. Got:\n{{ t1_geneve.stdout }}"
+        success_msg: "GENEVE tunnel up to {{ peer }} ({{ hostvars[peer].az_private_ip }})"
 
-    - name: "[path #4] Internet from each app container via OVN SNAT"
-      become: true
-      ansible.builtin.command: incus exec {{ item.name }} -- curl -s -o /dev/null -w "%{http_code}" --max-time 8 https://example.org
-      loop: "{{ workloads | selectattr('role', 'equalto', 'app') | list }}"
+    # The heart of the design: each plane's router must learn ONLY its own
+    # plane's remote subnet. A client router that knows a 10.20.x route, or a
+    # mgmt router that knows a 10.10.x route, means the transit switches are
+    # leaking into each other.
+    - name: "T1.4 Read the route table of each plane's router"
+      ansible.builtin.command:
+        cmd: ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} lr-route-list {{ item.lr }}
+      loop: "{{ planes }}"
       loop_control:
-        label: "{{ item.name }}"
-      register: netq
+        label: "{{ item.lr }}"
+      register: t1_routes
+      changed_when: false
+
+    - name: "T1.4 assert — the client router learned the peer's CLIENT subnet only"
+      ansible.builtin.assert:
+        that:
+          - hostvars[peer].planes | selectattr('name', 'equalto', 'client') | map(attribute='cidr') | first in client_routes
+          - "'10.20.' not in client_routes"
+        fail_msg: >-
+          {{ client_plane.lr }} route table is wrong (expected the peer's client
+          subnet, and NO mgmt-plane route):\n{{ client_routes }}
+        success_msg: "{{ client_plane.lr }} learned only client-plane routes"
+      vars:
+        client_routes: "{{ (t1_routes.results | selectattr('item.name', 'equalto', 'client') | first).stdout }}"
+
+    - name: "T1.4 assert — the mgmt router learned the peer's MGMT subnet only"
+      ansible.builtin.assert:
+        that:
+          - hostvars[peer].planes | selectattr('name', 'equalto', 'mgmt') | map(attribute='cidr') | first in mgmt_routes
+          - "'10.10.' not in mgmt_routes"
+        fail_msg: >-
+          {{ mgmt_plane.lr }} route table is wrong (expected the peer's mgmt
+          subnet, and NO client-plane route):\n{{ mgmt_routes }}
+        success_msg: "{{ mgmt_plane.lr }} learned only mgmt-plane routes"
+      vars:
+        mgmt_routes: "{{ (t1_routes.results | selectattr('item.name', 'equalto', 'mgmt') | first).stdout }}"
+
+    # =========================================================================
+    # T2 — PLANE ISOLATION (the property the whole design exists for)
+    # =========================================================================
+    - name: "T2.1 Try to reach the database FROM the client plane (must fail)"
+      become: true
+      ansible.builtin.command:
+        cmd: >
+          incus exec {{ app_wl.name }} -- ping -c2 -W2
+          -I {{ (app_wl.nics | selectattr('plane', 'equalto', 'client') | first).iface }}
+          {{ db_host_ip }}
+      register: t2_leak
       changed_when: false
       failed_when: false
 
-    - name: Show internet reachability (expect HTTP 200)
+    - name: "T2.1 assert — the client plane has NO path to the database"
+      ansible.builtin.assert:
+        that: t2_leak.rc != 0
+        fail_msg: >-
+          PLANE ISOLATION BROKEN: {{ app_wl.name }} reached {{ db_host_ip }} from its
+          client-plane address. The database must only be reachable over mgmt.
+        success_msg: "Client plane cannot reach {{ db_host_ip }} — isolation holds"
+
+    - name: "T2.2 Try to reach a client-plane workload FROM the mgmt NIC (must fail)"
+      become: true
+      ansible.builtin.command:
+        cmd: >
+          incus exec {{ app_wl.name }} -- ping -c2 -W2
+          -I {{ (app_wl.nics | selectattr('plane', 'equalto', 'mgmt') | first).iface }}
+          {{ (hostvars[peer].workloads | rejectattr('role', 'equalto', 'db') | first).nics
+             | selectattr('plane', 'equalto', 'client') | map(attribute='ip') | first }}
+      register: t2_rev
+      changed_when: false
+      failed_when: false
+
+    - name: "T2.2 assert — the mgmt plane has no path into the client plane either"
+      ansible.builtin.assert:
+        that: t2_rev.rc != 0
+        fail_msg: >-
+          PLANE ISOLATION BROKEN in reverse: {{ app_wl.name }} reached a client-plane
+          address from its mgmt NIC. The edge router is bridging the two planes.
+        success_msg: "Mgmt plane cannot reach the client plane — isolation holds both ways"
+
+    - name: "T2.3 Confirm db-vm has no client-plane address at all"
+      ansible.builtin.assert:
+        that: >-
+          hostvars['az2'].workloads | selectattr('role', 'equalto', 'db')
+          | map(attribute='nics') | flatten
+          | selectattr('plane', 'equalto', 'client') | list | length == 0
+        fail_msg: "db-vm has a client-plane NIC; the design says mgmt-only."
+        success_msg: "db-vm is mgmt-only (single NIC), as designed"
+      run_once: true
+
+    # =========================================================================
+    # T3 — CLIENT PLANE: each AZ's VIP fronts the tier that lives in that AZ
+    #
+    # The application is split, so the two VIPs are no longer interchangeable:
+    # AZ1's fronts the React frontend, AZ2's fronts the Java backend. AZ1 also
+    # owns a SERVICE VIP that fronts the backend in the OTHER AZ, and that one is
+    # where the load balancer does its cross-AZ work.
+    # =========================================================================
+    - name: "T3.1 Hit this AZ's VIP 12x from the host"
+      become: true
+      ansible.builtin.shell:
+        cmd: |
+          for i in $(seq 1 12); do
+            curl -s -o /dev/null -w "%{http_code}\n" --max-time 8 \
+              http://{{ client_plane.vip }}:{{ vip_port }}{{ '/' if has_frontend else '/api/health' }}
+          done
+      register: t3_vip
+      changed_when: false
+
+    - name: "T3.1 assert — {{ client_plane.vip }} answered every request"
+      ansible.builtin.assert:
+        that: t3_vip.stdout_lines | select('equalto', '200') | list | length == 12
+        fail_msg: >-
+          VIP {{ client_plane.vip }} did not answer 12/12:
+          {{ t3_vip.stdout_lines | join(' ') }}
+        success_msg: >-
+          VIP {{ client_plane.vip }} answered 12/12
+          ({{ 'frontend tier' if has_frontend else 'backend tier' }})
+
+    # This is the load balancer doing the interesting thing: a VIP in AZ1 whose
+    # only backend lives in AZ2, so every hit is DNATed and sent over ts-client.
+    - name: "T3.2 Hit the cross-AZ service VIP 8x"
+      become: true
+      ansible.builtin.shell:
+        cmd: |
+          for i in $(seq 1 8); do
+            incus exec {{ app_wl.name }} -- curl -s --max-time 10 \
+              http://{{ client_plane.service_vip }}:{{ vip_port }}/api/health \
+              | sed -n 's/.*"az":"\([^"]*\)".*/\1/p'
+            echo
+          done
+      register: t3_svc
+      changed_when: false
+      when: client_plane.service_vip is defined
+
+    - name: "T3.2 assert — the service VIP is answered by the backend in the OTHER AZ"
+      ansible.builtin.assert:
+        that:
+          - t3_svc.stdout_lines | select('equalto', backend_az) | list | length == 8
+        fail_msg: >-
+          Service VIP {{ client_plane.service_vip | default('n/a') }} did not reach the
+          backend in {{ backend_az }} on every request:
+          {{ t3_svc.stdout_lines | join(' ') }}
+        success_msg: >-
+          Service VIP {{ client_plane.service_vip | default('n/a') }} load-balanced 8/8
+          into {{ backend_az }} across ts-client
+      when: client_plane.service_vip is defined
+
+    # =========================================================================
+    # T4 — MGMT PLANE: the database, over ts-mgmt
+    # =========================================================================
+    - name: "T4.1 Query the backend tier (it reaches Postgres over its mgmt NIC)"
+      become: true
+      ansible.builtin.command:
+        cmd: >
+          incus exec {{ app_wl.name }} -- curl -s --max-time 15
+          http://{{ (app_wl.nics | selectattr('plane', 'equalto', 'client') | first).ip }}:{{ backend_port }}/api/status
+      register: t4_query
+      changed_when: false
+      failed_when: false
+      when: az_name == backend_az
+
+    - name: "T4.1 assert — the query succeeded end-to-end"
+      ansible.builtin.assert:
+        that: (t4_query.stdout | from_json).db_ok
+        fail_msg: "{{ app_wl.name }} could not query the database:\n{{ t4_query.stdout }}"
+        success_msg: "{{ app_wl.name }} read the DB through the backend, over the mgmt plane"
+      when: az_name == backend_az
+
+    # Runs on BOTH AZs: from az1 this crosses ts-mgmt, from az2 it stays local.
+    # Deliberately NOT timed here — the wall clock would be dominated by container
+    # exec and psql startup, which swamps the few milliseconds of interconnect and
+    # would read as intra-AZ being *slower*. T4.3 reports the real per-query cost
+    # from inside the long-running backend, and T4.4 the raw network RTT.
+    - name: "T4.2 Raw Postgres wire protocol over the mgmt plane"
+      become: true
+      ansible.builtin.shell:
+        cmd: |
+          incus exec {{ app_wl.name }} -- env PGPASSWORD='{{ db_password }}' \
+            psql -h {{ db_host_ip }} -U {{ db_user }} -d {{ db_name }} -tAc 'SELECT 1' 2>&1
+      register: t4_raw
+      changed_when: false
+      failed_when: false
+
+    - name: "T4.2 assert — a real Postgres session opened over the mgmt plane"
+      ansible.builtin.assert:
+        that: t4_raw.stdout_lines[0] | trim == '1' 
+        fail_msg: "Raw Postgres connection failed:\n{{ t4_raw.stdout }}{{ t4_raw.stderr }}"
+        success_msg: >-
+          Postgres wire protocol works from {{ app_wl.name }}
+          [{{ 'intra-AZ, local' if az_name == db_az else 'cross-AZ, over ts-mgmt + GENEVE' }}]
+
+    - name: "T4.3 report — where the time goes"
+      when: az_name == backend_az
       ansible.builtin.debug:
-        msg: "{{ item.item.name }} -> internet HTTP {{ item.stdout }}"
-      loop: "{{ netq.results }}"
+        msg: >-
+          {{ az_name }}: backend->db {{ (t4_query.stdout | from_json).db_latency_ms }} ms
+          (intra-AZ on the mgmt plane; the backend and the database are both in {{ db_az }})
+
+    - name: "T4.4 Measure the raw mgmt-plane RTT to the database"
+      become: true
+      ansible.builtin.shell:
+        cmd: >
+          incus exec {{ app_wl.name }} -- ping -c5 -q -W2
+          -I {{ (app_wl.nics | selectattr('plane', 'equalto', 'mgmt') | first).iface }}
+          {{ db_host_ip }} | tail -1
+      register: t4_rtt
+      changed_when: false
+
+    - name: "T4.4 report — the interconnect's real cost, cross-AZ vs intra-AZ"
+      ansible.builtin.debug:
+        msg: >-
+          {{ az_name }} {{ app_wl.name }} -> db-vm RTT
+          {{ (t4_rtt.stdout.split('=')[-1].split('/')[1]) | default('?', true) }} ms avg
+          [{{ 'intra-AZ, local' if az_name == db_az else 'cross-AZ, over ts-mgmt + GENEVE' }}]
+
+    # =========================================================================
+    # T5 — NORTH-SOUTH: every plane SNATs independently
+    # =========================================================================
+    - name: "T5.1 Reach the internet from each workload"
+      become: true
+      ansible.builtin.command:
+        cmd: >
+          incus exec {{ item.name }} -- curl -s -o /dev/null -w "%{http_code}"
+          --max-time 10 https://example.org
+      loop: "{{ workloads }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: t5_net
+      changed_when: false
+      failed_when: false
+
+    - name: "T5.1 assert — every workload's plane SNATs to the internet"
+      ansible.builtin.assert:
+        that: item.stdout == "200"
+        fail_msg: "{{ item.item.name }} could not reach the internet (got '{{ item.stdout }}')"
+        success_msg: "{{ item.item.name }} -> internet HTTP 200"
+      loop: "{{ t5_net.results }}"
       loop_control:
         label: "{{ item.item.name }}"
+
+    # =========================================================================
+    # T6 — MTU: the GENEVE encap ceiling, on both planes
+    # =========================================================================
+    - name: "T6.1 Largest payload that fits the {{ overlay_mtu }} MTU, cross-AZ on mgmt"
+      become: true
+      ansible.builtin.command:
+        cmd: >
+          incus exec {{ app_wl.name }} -- ping -c2 -W3 -M do -s {{ overlay_mtu - 28 }}
+          -I {{ (app_wl.nics | selectattr('plane', 'equalto', 'mgmt') | first).ip }}
+          {{ db_host_ip }}
+      register: t6_fit
+      changed_when: false
+      failed_when: false
+
+    - name: "T6.2 One byte over the ceiling must be rejected"
+      become: true
+      ansible.builtin.command:
+        cmd: >
+          incus exec {{ app_wl.name }} -- ping -c2 -W3 -M do -s {{ overlay_mtu - 27 }}
+          -I {{ (app_wl.nics | selectattr('plane', 'equalto', 'mgmt') | first).ip }}
+          {{ db_host_ip }}
+      register: t6_over
+      changed_when: false
+      failed_when: false
+
+    - name: "T6 assert — the MTU boundary is exactly where GENEVE puts it"
+      ansible.builtin.assert:
+        that:
+          - t6_fit.rc == 0
+          - t6_over.rc != 0
+        fail_msg: >-
+          MTU boundary wrong: {{ overlay_mtu - 28 }}B rc={{ t6_fit.rc }} (want 0),
+          {{ overlay_mtu - 27 }}B rc={{ t6_over.rc }} (want non-zero).
+        success_msg: >-
+          MTU ceiling confirmed: {{ overlay_mtu - 28 }}B passes,
+          {{ overlay_mtu - 27 }}B is rejected (MTU {{ overlay_mtu }} = 1500 - 58 GENEVE)
+
+    # =========================================================================
+    # T7 — THE APPLICATION: React in AZ1, Java in AZ2, Postgres on the mgmt plane
+    #
+    # The tiers are split across the AZs on purpose, so proving the app works IS
+    # proving the interconnect carries real application traffic:
+    #
+    #   AZ1 VIP -> nginx + React -> service VIP -> ts-client -> Java -> Postgres
+    # =========================================================================
+    - name: "T7.1 Fetch the dashboard through this AZ's frontend VIP"
+      become: true
+      ansible.builtin.command:
+        cmd: curl -s --max-time 10 http://{{ client_plane.vip }}:{{ vip_port }}/
+      register: t7_html
+      changed_when: false
+      failed_when: false
+      when: has_frontend
+
+    - name: "T7.1 assert — the React bundle is served in AZ1"
+      ansible.builtin.assert:
+        that: "'OVN-IC Multi-AZ Lab' in t7_html.stdout"
+        fail_msg: "The frontend VIP did not serve the dashboard:\n{{ t7_html.stdout[:400] }}"
+        success_msg: "Frontend VIP {{ client_plane.vip }} serves the React dashboard"
+      when: has_frontend
+
+    # The single most important application test: this request is answered by the
+    # OTHER AZ, so a success proves the whole path end to end.
+    - name: "T7.2 Call /api/status through the frontend (crosses to the other AZ)"
+      become: true
+      ansible.builtin.command:
+        cmd: curl -s --max-time 20 http://{{ client_plane.vip }}:{{ vip_port }}/api/status
+      register: t7_api
+      changed_when: false
+      failed_when: false
+      when: has_frontend
+
+    - name: "T7.2 assert — answered by the backend in the OTHER AZ, with the DB reachable"
+      ansible.builtin.assert:
+        that:
+          - (t7_api.stdout | from_json).tier == 'backend'
+          - (t7_api.stdout | from_json).az == backend_az
+          - (t7_api.stdout | from_json).db_ok
+        fail_msg: >-
+          The cross-AZ application path is broken. Expected an answer from the
+          backend in {{ backend_az }} with a working database:\n{{ t7_api.stdout[:400] }}
+        success_msg: >-
+          Frontend in {{ az_name }} reached the backend in
+          {{ (t7_api.stdout | from_json).az }} ({{ (t7_api.stdout | from_json).served_by }}),
+          DB {{ (t7_api.stdout | from_json).db_latency_ms }} ms over the mgmt plane
+      when: has_frontend
+
+    - name: "T7.3 assert — the backend really is dual-homed at 1442 MTU"
+      ansible.builtin.assert:
+        that:
+          - (t7_api.stdout | from_json).nics | selectattr('plane', 'equalto', 'client') | list | length == 1
+          - (t7_api.stdout | from_json).nics | selectattr('plane', 'equalto', 'mgmt') | list | length == 1
+          - (t7_api.stdout | from_json).nics | selectattr('mtu', 'equalto', overlay_mtu) | list | length == 2
+        fail_msg: >-
+          The backend does not report one client NIC and one mgmt NIC at MTU
+          {{ overlay_mtu }}:\n{{ (t7_api.stdout | from_json).nics }}
+        success_msg: "Backend is dual-homed (client + mgmt) with MTU {{ overlay_mtu }} on both NICs"
+      when: has_frontend
+
+    # The infra rows are written by BOTH AZs into a database that only the mgmt
+    # plane can reach, then read back through the backend and across the AZs.
+    - name: "T7.4 Read the infrastructure state through the frontend"
+      become: true
+      ansible.builtin.command:
+        cmd: curl -s --max-time 20 http://{{ client_plane.vip }}:{{ vip_port }}/api/infra
+      register: t7_infra
+      changed_when: false
+      failed_when: false
+      when: has_frontend
+
+    - name: "T7.4 assert — both AZs published infrastructure state, none of it failing"
+      ansible.builtin.assert:
+        that:
+          - (t7_infra.stdout | from_json).ok
+          - (t7_infra.stdout | from_json).rows | map(attribute='az') | unique | sort == groups['azs'] | sort
+          - (t7_infra.stdout | from_json).rows | selectattr('status', 'equalto', 'error') | list | length == 0
+        fail_msg: >-
+          Infrastructure state is missing or reporting errors:
+          {{ (t7_infra.stdout | from_json).rows | selectattr('status', 'equalto', 'error') | list }}
+        success_msg: >-
+          Dashboard shows {{ (t7_infra.stdout | from_json).rows | length }} infrastructure
+          rows from {{ (t7_infra.stdout | from_json).rows | map(attribute='az') | unique | join(' + ') }},
+          none in error
+      when: has_frontend

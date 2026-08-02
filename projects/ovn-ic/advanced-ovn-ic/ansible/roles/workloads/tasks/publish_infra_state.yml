@@ -1,0 +1,152 @@
+---
+# =============================================================================
+# Collect the REAL state of this AZ's OVN control plane and publish it into the
+# database, where the Java backend can serve it to the React dashboard.
+#
+# This is what makes the dashboard an infrastructure view rather than a demo
+# page: every row here was read out of ovn-nbctl / ovn-ic-sbctl / ovs-vsctl /
+# ovs-appctl on the AZ host at deploy time.
+#
+# It also means the infra view travels the whole architecture to be displayed:
+#   AZ host -> db-vm (mgmt plane) -> Java backend (AZ2) -> React (AZ1, cross-AZ)
+# =============================================================================
+
+# The database sits on the management plane, so the publisher has to be a
+# workload that owns a mgmt NIC. The AZ host itself has no route to it — which is
+# the plane isolation working as intended, not an obstacle to work around.
+- name: "[infra] Choose a workload with a mgmt NIC to publish from"
+  ansible.builtin.set_fact:
+    infra_publisher: >-
+      {{ (workloads | rejectattr('role', 'equalto', 'db') | map(attribute='name') | first) }}
+
+- name: "[infra] Transit switches visible in this AZ's NB"
+  ansible.builtin.command:
+    cmd: ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} ls-list
+  register: infra_ls
+  changed_when: false
+
+- name: "[infra] Per-plane learned routes"
+  ansible.builtin.command:
+    cmd: ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} lr-route-list {{ item.lr }}
+  loop: "{{ planes }}"
+  loop_control:
+    label: "{{ item.lr }}"
+  register: infra_routes
+  changed_when: false
+
+- name: "[infra] GENEVE tunnels on this chassis"
+  become: true
+  ansible.builtin.shell:
+    cmd: ovs-vsctl show | grep -A2 geneve || true
+  register: infra_tun
+  changed_when: false
+
+- name: "[infra] Interconnect gateways registered in IC-SB"
+  ansible.builtin.command:
+    cmd: ovn-ic-sbctl --db={{ ic_sb_remote }} show
+  register: infra_icsb
+  changed_when: false
+
+- name: "[infra] Interconnect database cluster status"
+  become: true
+  ansible.builtin.command:
+    cmd: ovs-appctl -t {{ lab_dir }}/ic-nb.ctl cluster/status OVN_IC_Northbound
+  register: infra_raft
+  changed_when: false
+  failed_when: false
+
+- name: "[infra] Build the row set for this AZ"
+  ansible.builtin.set_fact:
+    infra_rows: >-
+      {{
+        [
+          {'category': 'interconnect', 'item': 'transit switches',
+           'value': transit_switches | join(', '),
+           'status': 'ok' if (transit_switches | select('in', infra_ls.stdout) | list | length
+                              == transit_switches | length) else 'error'},
+          {'category': 'interconnect', 'item': 'gateways in IC-SB',
+           'value': groups['azs'] | map('extract', hostvars, 'chassis_name') | join(', '),
+           'status': 'ok' if (groups['azs'] | map('extract', hostvars, 'chassis_name')
+                              | select('in', infra_icsb.stdout) | list | length == 2) else 'error'},
+          {'category': 'interconnect', 'item': 'IC database cluster',
+           'value': (infra_raft.stdout | regex_findall('at tcp:') | length | string)
+                    ~ ' of ' ~ (ic_cluster_size | string) ~ ' members · '
+                    ~ (infra_raft.stdout_lines | select('search', '^Role:') | first | default('unknown')),
+           'status': 'ok' if (infra_raft.stdout | regex_findall('at tcp:') | length
+                              == ic_cluster_size | int) else 'warn'},
+          {'category': 'underlay', 'item': 'GENEVE tunnel to peer',
+           'value': hostvars[(groups['azs'] | difference([inventory_hostname]))[0]].az_private_ip
+                    ~ ' (UDP 6081)',
+           'status': 'ok' if (hostvars[(groups['azs'] | difference([inventory_hostname]))[0]].az_private_ip
+                              in infra_tun.stdout) else 'error'},
+          {'category': 'underlay', 'item': 'chassis',
+           'value': chassis_name ~ ' · encap-ip ' ~ az_private_ip, 'status': 'info'},
+          {'category': 'underlay', 'item': 'overlay MTU',
+           'value': (overlay_mtu | string) ~ ' (1500 − 58 GENEVE)', 'status': 'info'}
+        ]
+      }}
+
+# One row per plane: its subnet, its transit switch, and the route it learned from
+# the peer AZ. `status` is ok only if the peer's subnet is actually present.
+- name: "[infra] Add a row per plane"
+  ansible.builtin.set_fact:
+    infra_rows: >-
+      {{ infra_rows + [
+           {'category': 'planes',
+            'item': item.0.name ~ ' plane',
+            'value': item.0.cidr ~ ' · ' ~ item.0.ts ~ ' · learned: '
+                     ~ (item.1.stdout_lines | select('search', 'learned')
+                        | map('regex_replace', '^\\s*(\\S+).*$', '\\1') | join(', ') | default('none', true)),
+            'status': 'ok' if 'learned' in item.1.stdout else 'warn'}
+         ] }}
+  loop: "{{ planes | zip(infra_routes.results) | list }}"
+  loop_control:
+    label: "{{ item.0.name }}"
+
+- name: "[infra] Add a row per workload"
+  ansible.builtin.set_fact:
+    infra_rows: >-
+      {{ infra_rows + [
+           {'category': 'workloads',
+            'item': item.name ~ ' (' ~ item.role ~ ')',
+            'value': item.nics | map(attribute='plane') | zip(item.nics | map(attribute='ip'))
+                     | map('join', ' ') | join(' · '),
+            'status': 'info'}
+         ] }}
+  loop: "{{ workloads }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: "[infra] Render the upsert script"
+  ansible.builtin.template:
+    src: publish_infra_state.sh.j2
+    dest: /tmp/publish-infra-{{ az_name }}.sh
+    mode: "0755"
+
+# Run it from a workload that HAS a management NIC, because the database is only
+# reachable on that plane — the AZ host itself has no route to it, which is the
+# isolation working as intended.
+- name: "[infra] Push the upsert script into {{ infra_publisher }}"
+  become: true
+  ansible.builtin.command:
+    cmd: incus file push /tmp/publish-infra-{{ az_name }}.sh {{ infra_publisher }}/root/publish-infra.sh --mode 0755
+  changed_when: false
+
+- name: "[infra] Install the psql client in {{ infra_publisher }}"
+  become: true
+  ansible.builtin.command:
+    cmd: >
+      incus exec {{ infra_publisher }} -- bash -lc
+      "command -v psql >/dev/null || (apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql-client)"
+  changed_when: false
+
+- name: "[infra] Publish this AZ's state into the database over the mgmt plane"
+  become: true
+  ansible.builtin.command:
+    cmd: incus exec {{ infra_publisher }} -- bash /root/publish-infra.sh
+  register: infra_pub
+  changed_when: false
+
+- name: "[infra] Report what was published"
+  ansible.builtin.debug:
+    msg: "{{ az_name }}: published {{ infra_rows | length }} infrastructure rows -> {{ infra_pub.stdout | trim }}"

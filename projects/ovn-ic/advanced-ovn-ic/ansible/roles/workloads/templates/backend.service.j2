@@ -1,0 +1,29 @@
+{% set client_nic = wl.nics | selectattr('plane', 'equalto', 'client') | first %}
+{% set mgmt_nic = wl.nics | selectattr('plane', 'equalto', 'mgmt') | first %}
+[Unit]
+Description=Java backend tier (advanced-ovn-ic lab)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Everything comes from the environment so the code carries no addresses.
+Environment=APP_AZ={{ az_name }}
+Environment=APP_HOST={{ wl.name }}
+# Dual-homed: served on the client plane, reads the database on the mgmt plane.
+Environment=APP_CLIENT_IP={{ client_nic.ip }}
+Environment=APP_MGMT_IP={{ mgmt_nic.ip }}
+Environment=BACKEND_PORT={{ backend_port }}
+Environment=DB_HOST={{ db_host_ip }}
+Environment=DB_PORT={{ db_port }}
+Environment=DB_NAME={{ db_name }}
+Environment=DB_USER={{ db_user }}
+Environment=DB_PASSWORD={{ db_password }}
+WorkingDirectory=/opt/app
+# The JDBC driver comes from the distro (libpostgresql-jdbc-java), so the
+# classpath is the app directory plus /usr/share/java.
+ExecStart=/usr/bin/java -cp /opt/app:/usr/share/java/* Backend
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,77 @@
+---
+# Install and run the Java backend tier inside a workload (loop_var `wl`).
+#
+# Plain JDK: javac + com.sun.net.httpserver + the apt-provided PostgreSQL JDBC
+# driver. No Maven or Spring — the workloads are 2 vCPU containers behind a double
+# NAT, and pulling a dependency tree through that is slow and fragile for no gain
+# here. See files/Backend.java for what the service actually does.
+
+- name: Install the JDK and the PostgreSQL JDBC driver in {{ wl.name }}
+  become: true
+  ansible.builtin.command:
+    cmd: >
+      incus exec {{ wl.name }} -- bash -lc
+      "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y
+      openjdk-21-jdk-headless libpostgresql-jdbc-java"
+  changed_when: false
+
+- name: Create the app directory in {{ wl.name }}
+  become: true
+  ansible.builtin.command:
+    cmd: incus exec {{ wl.name }} -- mkdir -p /opt/app
+  changed_when: false
+
+# `incus file push` runs ON the AZ host, so the source must exist there first
+# (role_path is a control-node path).
+- name: Stage Backend.java on the AZ host
+  ansible.builtin.copy:
+    src: Backend.java
+    dest: /tmp/Backend-{{ wl.name }}.java
+    mode: "0644"
+  register: staged_java
+
+- name: Push the backend source into {{ wl.name }}
+  become: true
+  ansible.builtin.command:
+    cmd: incus file push /tmp/Backend-{{ wl.name }}.java {{ wl.name }}/opt/app/Backend.java --mode 0644
+  changed_when: false
+
+- name: Compile the backend in {{ wl.name }}
+  become: true
+  ansible.builtin.command:
+    cmd: incus exec {{ wl.name }} -- bash -lc "cd /opt/app && javac Backend.java"
+  changed_when: false
+
+- name: Render the backend systemd unit
+  ansible.builtin.template:
+    src: backend.service.j2
+    dest: /tmp/backend-{{ wl.name }}.service
+    mode: "0644"
+
+- name: Push the systemd unit into {{ wl.name }}
+  become: true
+  ansible.builtin.command:
+    cmd: incus file push /tmp/backend-{{ wl.name }}.service {{ wl.name }}/etc/systemd/system/backend.service --mode 0644
+  changed_when: false
+
+- name: Enable and (re)start the backend in {{ wl.name }}
+  become: true
+  ansible.builtin.command:
+    cmd: >
+      incus exec {{ wl.name }} -- bash -lc
+      "systemctl daemon-reload && systemctl enable backend && systemctl restart backend"
+  changed_when: false
+
+# The service binds to its CLIENT-plane address only (it is offered to the
+# frontend, not on the management NIC), so health-check that address.
+- name: Wait for the backend to answer /api/health in {{ wl.name }}
+  become: true
+  ansible.builtin.command:
+    cmd: >
+      incus exec {{ wl.name }} -- bash -lc
+      "curl -fs http://{{ (wl.nics | selectattr('plane', 'equalto', 'client') | first).ip }}:{{ backend_port }}/api/health"
+  register: bhealth
+  retries: 20
+  delay: 3
+  until: bhealth.rc == 0
+  changed_when: false

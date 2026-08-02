@@ -1,0 +1,26 @@
+---
+# =============================================================================
+# Connect one plane's router to its own transit switch (loop_var `plane`).
+#
+# Runs only AFTER ovn-ic has copied the transit switch from IC-NB into this AZ's
+# local NB — the switch must already exist locally for lsp-add to land on it.
+# ovn-ic then advertises this plane's connected routes onto THIS transit switch
+# only, so the client and mgmt route tables never mix.
+# =============================================================================
+
+- name: "[{{ plane.name }}] Add this AZ's port on {{ plane.ts }}"
+  ansible.builtin.command:
+    cmd: >
+      ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} --may-exist
+      lsp-add {{ plane.ts }} lsp-{{ plane.ts }}-{{ az_name }}
+  changed_when: false
+
+- name: "[{{ plane.name }}] Make that transit port a router patch port"
+  ansible.builtin.command:
+    cmd: >
+      ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }}
+      -- lsp-set-type lsp-{{ plane.ts }}-{{ az_name }} router
+      -- lsp-set-addresses lsp-{{ plane.ts }}-{{ az_name }} router
+      -- lsp-set-options lsp-{{ plane.ts }}-{{ az_name }}
+         router-port=lrp-{{ plane.name }}-{{ az_name }}-ts
+  changed_when: false

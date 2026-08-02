@@ -1,0 +1,21 @@
+#!/bin/bash
+# Publish this AZ's infrastructure state into the lab database.
+# Rendered by Ansible from facts read on the AZ host, then run INSIDE a workload
+# container, because the database lives on the management plane and only the
+# workloads have a NIC there.
+set -euo pipefail
+
+export PGPASSWORD='{{ db_password }}'
+PSQL="psql -h {{ db_host_ip }} -p {{ db_port }} -U {{ db_user }} -d {{ db_name }} -v ON_ERROR_STOP=1 -qtA"
+
+# Replace this AZ's rows wholesale, so state that disappears does not linger.
+$PSQL -c "DELETE FROM infra_state WHERE az = '{{ az_name }}';"
+
+$PSQL <<'SQL'
+INSERT INTO infra_state (az, category, item, value, status, updated_at) VALUES
+{% for r in infra_rows %}
+  ('{{ az_name }}', '{{ r.category | replace("'", "''") }}', '{{ r.item | replace("'", "''") }}', '{{ r.value | replace("'", "''") }}', '{{ r.status }}', now()){{ "," if not loop.last else ";" }}
+{% endfor %}
+SQL
+
+$PSQL -c "SELECT count(*) || ' rows for {{ az_name }}' FROM infra_state WHERE az = '{{ az_name }}';"

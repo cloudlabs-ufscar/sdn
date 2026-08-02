@@ -192,6 +192,78 @@
       loop_control:
         label: "{{ item.item }}"
 
+# ---------------------------------------------------------------------------
+# Cap the lab's logs.
+#
+# The OVN daemons log to {{ lab_dir }} and never rotate on their own. A daemon in
+# a restart loop appends a few lines per restart forever: that is exactly how both
+# VMs filled a 38 GB disk with an 8 GB ovn-controller.log (plus 25 GB of the same
+# lines mirrored into /var/log/syslog), which took the whole lab down. Rotating
+# hourly on size makes a crash loop merely noisy instead of fatal.
+# ---------------------------------------------------------------------------
+- name: Ensure the lab working directory exists
+  become: true
+  ansible.builtin.file:
+    path: "{{ lab_dir }}"
+    state: directory
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0755"
+
+- name: Install a logrotate policy for the lab logs
+  become: true
+  ansible.builtin.copy:
+    dest: /etc/logrotate.d/advanced-ovn-ic
+    mode: "0644"
+    content: |
+      {{ lab_dir }}/*.log {
+          size 50M
+          rotate 3
+          missingok
+          notifempty
+          compress
+          delaycompress
+          copytruncate
+      }
+
+# logrotate's own timer is daily; a crash loop can produce gigabytes in an hour,
+# so check hourly instead.
+- name: Run logrotate hourly instead of daily
+  become: true
+  ansible.builtin.file:
+    src: /usr/lib/systemd/system/logrotate.service
+    dest: /etc/systemd/system/logrotate-hourly.service
+    state: link
+  failed_when: false
+
+- name: Install the hourly logrotate timer
+  become: true
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/logrotate-hourly.timer
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Hourly logrotate for the advanced-ovn-ic lab logs
+
+      [Timer]
+      OnCalendar=hourly
+      Persistent=true
+
+      [Install]
+      WantedBy=timers.target
+  notify: reload systemd
+
+- name: Apply pending systemd unit changes
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable the hourly logrotate timer
+  become: true
+  ansible.builtin.systemd_service:
+    name: logrotate-hourly.timer
+    enabled: true
+    state: started
+  failed_when: false
+
 - name: Confirm the interconnect tooling is present
   ansible.builtin.command: ovn-ic --version
   register: ovn_ic_version

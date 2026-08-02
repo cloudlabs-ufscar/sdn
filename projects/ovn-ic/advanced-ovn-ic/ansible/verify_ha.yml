@@ -1,0 +1,169 @@
+---
+# =============================================================================
+# verify_ha.yml — proves the interconnect databases actually survive losing a
+# member, which is the entire reason the quorum arbiter exists.
+#
+#   ansible-playbook verify_ha.yml
+#
+# DISRUPTIVE: it stops the current RAFT leader's IC databases for a few seconds,
+# then starts them again. It is kept out of verify.yml for that reason.
+#
+# What it asserts:
+#   H1  the cluster has all three members and one leader to begin with
+#   H2  with the leader stopped, a surviving member is elected and still serves
+#       BOTH reads and writes  (a 2-member cluster could not do this)
+#   H3  the data plane is unaffected — workloads keep talking while the whole
+#       interconnect control plane is down
+#   H4  the stopped member rejoins cleanly
+# =============================================================================
+- name: Verify interconnect database high availability
+  hosts: ic_cluster
+  gather_facts: false
+  vars:
+    probe_ts: ha-probe-ts
+  tasks:
+    # ---------------- H1: healthy baseline --------------------------------
+    - name: "H1 Read this member's cluster status"
+      become: true
+      ansible.builtin.command:
+        cmd: ovs-appctl -t {{ lab_dir }}/ic-nb.ctl cluster/status OVN_IC_Northbound
+      register: h1
+      changed_when: false
+
+    - name: "H1 assert — all {{ ic_cluster_size }} members present, no election in flight"
+      ansible.builtin.assert:
+        that:
+          - h1.stdout | regex_findall('at tcp:') | length == ic_cluster_size | int
+          - "'candidate' not in h1.stdout"
+        fail_msg: "Cluster is not healthy on {{ inventory_hostname }}:\n{{ h1.stdout }}"
+        success_msg: >-
+          {{ inventory_hostname }}: {{ h1.stdout_lines | select('search', '^Role:') | first }},
+          {{ ic_cluster_size }} members
+
+    - name: Identify the current leader
+      ansible.builtin.set_fact:
+        is_leader: "{{ 'Role: leader' in h1.stdout }}"
+
+    - name: Name the leader once, for the whole play
+      ansible.builtin.set_fact:
+        leader_host: "{{ (ansible_play_hosts | map('extract', hostvars) | selectattr('is_leader') | map(attribute='inventory_hostname') | list | first) }}"
+      run_once: true
+
+    - name: Report which member leads
+      ansible.builtin.debug:
+        msg: "Current RAFT leader: {{ leader_host }} — stopping its IC databases next"
+      run_once: true
+
+    # ---------------- H2: kill the leader ---------------------------------
+    - name: "H2 Stop the leader's IC databases"
+      become: true
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        state: stopped
+      loop:
+        - ovn-ic-nb-db
+        - ovn-ic-sb-db
+      when: inventory_hostname == leader_host
+
+    - name: "H2 Wait for a survivor to be elected leader"
+      become: true
+      ansible.builtin.command:
+        cmd: ovs-appctl -t {{ lab_dir }}/ic-nb.ctl cluster/status OVN_IC_Northbound
+      register: h2
+      retries: 20
+      delay: 3
+      until:
+        - h2.rc == 0
+        - "'Leader: unknown' not in h2.stdout"
+        - "'candidate' not in h2.stdout"
+      changed_when: false
+      when: inventory_hostname != leader_host
+
+    - name: "H2 assert — a new leader exists with the leader down"
+      ansible.builtin.assert:
+        that: "'Leader: unknown' not in h2.stdout"
+        fail_msg: "No leader elected after {{ leader_host }} went down:\n{{ h2.stdout }}"
+        success_msg: "{{ inventory_hostname }} still has a leader with {{ leader_host }} down"
+      when: inventory_hostname != leader_host
+
+    # A read AND a write, because a cluster without quorum can still serve stale
+    # reads from a follower while being unable to commit anything.
+    - name: "H2 Write to the degraded cluster (add then remove a probe transit switch)"
+      ansible.builtin.shell:
+        cmd: |
+          set -e
+          export PATH=/usr/local/bin:$PATH
+          D="{{ groups['ic_cluster'] | difference([leader_host]) | map('extract', hostvars, 'az_private_ip') | map('regex_replace', '^(.*)$', 'tcp:\1:' ~ ic_nb_port) | join(',') }}"
+          ovn-ic-nbctl --db=$D --timeout=15 ts-add {{ probe_ts }}
+          ovn-ic-nbctl --db=$D --timeout=15 show | grep -q {{ probe_ts }}
+          ovn-ic-nbctl --db=$D --timeout=15 ts-del {{ probe_ts }}
+          echo COMMITTED
+      register: h2w
+      changed_when: false
+      failed_when: false
+      run_once: true
+      delegate_to: "{{ groups['ic_cluster'] | difference([leader_host]) | first }}"
+
+    - name: "H2 assert — the degraded cluster still commits writes"
+      ansible.builtin.assert:
+        that: "'COMMITTED' in h2w.stdout"
+        fail_msg: >-
+          The cluster lost write availability with one member down — quorum is not
+          working:\n{{ h2w.stdout }}{{ h2w.stderr }}
+        success_msg: "Cluster still commits writes with {{ leader_host }} down (quorum holds)"
+      run_once: true
+
+    # ---------------- H3: the data plane does not care ---------------------
+    - name: "H3 Query the app while the interconnect control plane is degraded"
+      become: true
+      ansible.builtin.command:
+        cmd: >
+          incus exec {{ (workloads | selectattr('role', 'equalto', 'app') | first).name }}
+          -- curl -s --max-time 10
+          http://{{ (workloads | selectattr('role', 'equalto', 'app') | first).nics
+                    | selectattr('plane', 'equalto', 'client') | map(attribute='ip') | first }}:{{ backend_port }}/
+      register: h3
+      changed_when: false
+      failed_when: false
+      when: inventory_hostname in groups['azs']
+
+    - name: "H3 assert — workloads are unaffected by the IC outage"
+      ansible.builtin.assert:
+        that: "'db_message' in h3.stdout"
+        fail_msg: >-
+          The data plane broke when an IC database went down. Programmed flows should
+          be independent of the interconnect control plane:\n{{ h3.stdout }}
+        success_msg: "{{ inventory_hostname }}: data plane unaffected by the IC outage"
+      when: inventory_hostname in groups['azs']
+
+    # ---------------- H4: heal ---------------------------------------------
+    - name: "H4 Start the stopped member again"
+      become: true
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        state: started
+      loop:
+        - ovn-ic-nb-db
+        - ovn-ic-sb-db
+      when: inventory_hostname == leader_host
+
+    - name: "H4 Wait for every member to be back in the cluster"
+      become: true
+      ansible.builtin.command:
+        cmd: ovs-appctl -t {{ lab_dir }}/ic-nb.ctl cluster/status OVN_IC_Northbound
+      register: h4
+      retries: 20
+      delay: 3
+      until:
+        - h4.rc == 0
+        - h4.stdout | regex_findall('at tcp:') | length == ic_cluster_size | int
+        - "'candidate' not in h4.stdout"
+      changed_when: false
+
+    - name: "H4 assert — the cluster is whole again"
+      ansible.builtin.assert:
+        that: h4.stdout | regex_findall('at tcp:') | length == ic_cluster_size | int
+        fail_msg: "{{ inventory_hostname }} did not rejoin:\n{{ h4.stdout }}"
+        success_msg: >-
+          {{ inventory_hostname }} rejoined —
+          {{ h4.stdout_lines | select('search', '^Role:') | first }}

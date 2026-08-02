@@ -1,0 +1,15 @@
+---
+# =============================================================================
+# ic_cluster.yml — Stage 3a: the global interconnect databases as a 3-member
+# RAFT cluster across az1, az2 and the quorum arbiter.
+#
+#   ansible-playbook ic_cluster.yml
+#
+# Runs BEFORE ovn_central/ovn_topology, because every AZ's ovn-ic needs these
+# databases to exist before it can start.
+# =============================================================================
+- name: Clustered interconnect databases (IC-NB + IC-SB)
+  hosts: ic_cluster
+  gather_facts: false
+  roles:
+    - ic_cluster

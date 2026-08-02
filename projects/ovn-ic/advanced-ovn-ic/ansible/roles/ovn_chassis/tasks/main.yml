@@ -41,8 +41,9 @@
     cmd: ovs-vsctl --may-exist add-br {{ ext_bridge }}
   changed_when: false
 
-# The host owns .1 on br-ex; OVN's external router port will be .2 and ARP for
-# this. `ip addr replace` is idempotent (adds or updates). Not reboot-persistent:
+# The host owns .1 on br-ex; the cell's edge gateway router owns .2 (client SNAT)
+# and .3 (mgmt SNAT) and ARPs for this address as its next hop.
+# `ip addr replace` is idempotent (adds or updates). Not reboot-persistent:
 # re-running this playbook re-applies it, which is fine for a lab.
 - name: Bring up br-ex and give the host its gateway IP on it
   become: true
@@ -89,8 +90,8 @@
     state: present
     reload: true
 
-# OVN SNATs the VPC subnet to the router's external IP (192.168.24x.2); this rule
-# then MASQUERADEs that external subnet out the real uplink (ens3). Two NATs, but
+# The edge router SNATs each plane to its own address in ext_cidr; this rule then
+# MASQUERADEs that whole external subnet out the real uplink (ens3). Two NATs, but
 # it keeps ens3 untouched so SSH/Ansible never break.
 - name: MASQUERADE the external subnet out the uplink (host-level SNAT)
   become: true
@@ -136,16 +137,17 @@
     comment: "advanced-ovn-ic: GENEVE from peer"
   failed_when: false          # harmless if ufw is inactive/absent
 
-- name: Allow IC-NB/IC-SB from the peer AZ (ic_host only)
+# Every IC cluster member must reach every other one, on both the client ports
+# and the RAFT peer ports.
+- name: Allow the IC cluster ports from every other cluster member
   become: true
   community.general.ufw:
     rule: allow
     proto: tcp
-    port: "{{ item }}"
-    src: "{{ peer_private_ip }}"
-    comment: "advanced-ovn-ic: IC database from peer"
-  loop:
-    - "{{ ic_nb_port }}"
-    - "{{ ic_sb_port }}"
-  when: is_ic_host | bool
+    port: "{{ item.1 }}"
+    src: "{{ hostvars[item.0].az_private_ip }}"
+    comment: "advanced-ovn-ic: IC cluster from {{ item.0 }}"
+  loop: "{{ groups['ic_cluster'] | difference([inventory_hostname]) | product([ic_nb_port, ic_sb_port, ic_nb_raft_port, ic_sb_raft_port]) | list }}"
+  loop_control:
+    label: "{{ item.0 }}:{{ item.1 }}"
   failed_when: false

@@ -1,0 +1,40 @@
+{% set client_nic = wl.nics | selectattr('plane', 'equalto', 'client') | first %}
+# Frontend tier for the advanced-ovn-ic lab — app-vm-1, AZ1, client plane.
+#
+# Serves the built React bundle, and proxies every /api/* call to AZ2's OVN
+# load-balancer VIP. That proxy line is the cross-AZ hop: it leaves this AZ over
+# the client transit switch (ts-client) inside a GENEVE tunnel, is DNATed by the
+# load balancer in AZ2, and lands on the Java backend there.
+
+server {
+    # Bound to the client-plane address only: this is a tenant-facing service and
+    # must not be reachable on the management NIC.
+    listen {{ client_nic.ip }}:{{ frontend_port }} default_server;
+    server_name _;
+
+    root /opt/frontend/dist;
+    index index.html;
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # ---- the interconnect hop -----------------------------------------------
+    location /api/ {
+        proxy_pass http://{{ backend_vip }}:{{ vip_port }};
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Frontend-AZ     "{{ az_name }}";
+
+        # Cross-AZ over GENEVE: allow for the tunnel, but fail fast enough that a
+        # broken interconnect shows up as an error in the dashboard rather than a
+        # hung page.
+        proxy_connect_timeout 5s;
+        proxy_read_timeout    20s;
+
+        # The dashboard polls; never let a stale answer hide a real failure.
+        proxy_cache_bypass 1;
+        add_header Cache-Control "no-store" always;
+    }
+}

@@ -1,0 +1,26 @@
+[Unit]
+Description=OVN {{ item.name }} clustered ovsdb-server (advanced-ovn-ic lab)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# One member of the {{ item.name }} RAFT cluster.
+#
+# Two different ports are in play:
+#   :{{ item.raft_port }}  RAFT peer traffic (member <-> member). Its address is baked into
+#         the .db file by ovsdb-tool create-cluster / join-cluster, NOT set here.
+#   :{{ item.client_port }}  the client port the ovn-ic daemons connect to (--remote below).
+#
+# Bound to this node's private IP so the other members and both AZs' ovn-ic can
+# reach it. A clustered ovsdb accepts reads on any member and transparently
+# redirects writes to the current leader, so clients may list all three.
+ExecStart={{ bin['ovsdb-server'] }} {{ lab_dir }}/{{ item.db }} \
+  --remote=ptcp:{{ item.client_port }}:{{ az_private_ip }} \
+  --unixctl={{ lab_dir }}/{{ item.ctl }} \
+  --log-file={{ lab_dir }}/{{ item.log }}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

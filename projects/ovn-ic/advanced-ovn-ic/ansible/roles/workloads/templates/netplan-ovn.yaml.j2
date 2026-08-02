@@ -1,12 +1,32 @@
+{#
+  Static network config for a workload, one stanza per plane NIC.
+
+  - The NIC flagged default_route carries 0.0.0.0/0 (the client plane on the app
+    backends), so ordinary egress and the internet go out that plane's SNAT.
+  - Every NIC also gets an explicit route to its OWN plane's supernet, which is
+    what keeps the planes separated inside the container: traffic to 10.20.0.0/16
+    (the database) is pinned to the mgmt NIC and can never leave via the client
+    NIC, and vice versa.
+#}
 network:
   version: 2
   ethernets:
-    eth0:
+{% for nic in wl.nics %}
+{% set plane = plane_map[nic.plane] %}
+    {{ nic.iface }}:
       dhcp4: false
-      addresses: [{{ wl.ip }}/24]
+      addresses: [{{ nic.ip }}/24]
       mtu: {{ overlay_mtu }}
       routes:
+{% if nic.default_route %}
         - to: default
-          via: {{ vpc_gw }}
+          via: {{ plane.gw }}
+{% endif %}
+        # reach every AZ on the {{ nic.plane }} plane through this NIC
+        - to: {{ plane.supernet }}
+          via: {{ plane.gw }}
+{% if nic.default_route %}
       nameservers:
         addresses: [1.1.1.1]
+{% endif %}
+{% endfor %}

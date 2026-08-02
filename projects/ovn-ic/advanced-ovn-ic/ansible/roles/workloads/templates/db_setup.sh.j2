@@ -5,11 +5,13 @@ set -e
 # 1. Listen on all interfaces (ALTER SYSTEM is version-independent).
 sudo -u postgres psql -c "ALTER SYSTEM SET listen_addresses = '*';"
 
-# 2. Allow the whole VPC supernet (both AZ subnets) to authenticate.
+# 2. Allow the MANAGEMENT supernet (both AZs' mgmt subnets) to authenticate.
+#    Only the management plane may reach this database — the client plane has no
+#    route to it at all, and it is not listed here either.
 HBA=$(sudo -u postgres psql -tAc 'SHOW hba_file')
-if ! grep -q 'advanced-ovn-ic' "$HBA"; then
-  echo 'host all all 10.10.0.0/16 md5 # advanced-ovn-ic' >> "$HBA"
-fi
+HBA_LINE='host all all {{ mgmt_supernet }} md5 # advanced-ovn-ic'
+sed -i '/# advanced-ovn-ic$/d' "$HBA"
+echo "$HBA_LINE" >> "$HBA"
 
 # 3. Apply listen_addresses + pg_hba changes.
 systemctl restart postgresql
@@ -24,19 +26,37 @@ if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='{{ db_
   sudo -u postgres createdb -O {{ db_user }} {{ db_name }}
 fi
 
-# 6. Demo table + one row the FastAPI app reads back.
+# 6. Demo table + one row the backend reads back.
 sudo -u postgres psql -d {{ db_name }} -c \
   "CREATE TABLE IF NOT EXISTS lab_info(id serial primary key, message text);"
 if sudo -u postgres psql -d {{ db_name }} -tAc "SELECT count(*) FROM lab_info" | grep -q '^0$'; then
   sudo -u postgres psql -d {{ db_name }} -c \
-    "INSERT INTO lab_info(message) VALUES ('hello from db-vm in {{ az_name }}');"
+    "INSERT INTO lab_info(message) VALUES ('hello from db-vm on the {{ az_name }} management plane');"
 fi
 
-# 7. The table was created by the postgres superuser, so grant the app role access
-#    (otherwise the FastAPI app connects fine but gets "permission denied").
+# 6b. Infrastructure state, published by Ansible from each AZ host and rendered by
+#     the dashboard. Putting it here is what makes the infra view itself travel the
+#     architecture: AZ host -> this database (mgmt plane) -> Java backend (AZ2) ->
+#     React frontend (AZ1, cross-AZ) -> browser.
+sudo -u postgres psql -d {{ db_name }} -c \
+  "CREATE TABLE IF NOT EXISTS infra_state(
+     id serial primary key,
+     az text NOT NULL,
+     category text NOT NULL,
+     item text NOT NULL,
+     value text,
+     status text NOT NULL DEFAULT 'info',
+     updated_at timestamptz NOT NULL DEFAULT now(),
+     UNIQUE (az, category, item)
+   );"
+
+# 7. The tables are created by the postgres superuser, so grant the app role
+#    access (otherwise it connects fine but gets "permission denied for table").
+#    DELETE is needed too: publishing infrastructure state replaces an AZ's rows
+#    wholesale, so that state which disappears does not linger in the dashboard.
 sudo -u postgres psql -d {{ db_name }} -c \
   "GRANT USAGE ON SCHEMA public TO {{ db_user }};
-   GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA public TO {{ db_user }};
+   GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {{ db_user }};
    GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {{ db_user }};"
 
 echo "DB setup complete."

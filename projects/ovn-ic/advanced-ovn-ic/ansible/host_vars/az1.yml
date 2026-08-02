@@ -1,45 +1,118 @@
 ---
 # =============================================================================
 # host_vars/az1.yml — values specific to the VM "az1" (hostname ovn-ic-lab1).
-# AZ1 also hosts the two GLOBAL interconnect databases (IC-NB / IC-SB).
+#
+# AZ1 is a self-contained cell with TWO logical planes. Each plane gets its own
+# logical switch, its own gateway router, its own port on its own transit switch,
+# and its own external port + SNAT. AZ1 also hosts the global IC-NB/IC-SB.
 # =============================================================================
 az_name: az1                       # MUST equal NB_Global.name (gotcha #1)
 az_private_ip: 172.18.3.175        # interface IP -> used as the GENEVE encap-ip
 az_public_ip: 201.23.73.63         # provider 1:1 NAT, only relevant for north-south
 chassis_name: az1-chassis
-is_ic_host: true                   # this VM runs the IC-NB/IC-SB ovsdb servers
+# az1 is also the RAFT bootstrap member of the IC database cluster (see
+# ic_bootstrap in group_vars/all.yml); az2 and quorum join against it.
 
-# --- VPC (tenant) network in this AZ ----------------------------------------
-ls_name: ls-az1
-lr_name: lr-az1
-vpc_cidr: 10.10.1.0/24
-vpc_gw: 10.10.1.1                   # lrp-az1-ls = default gateway for workloads
-lrp_ls_mac: "00:00:00:10:00:01"
-
-# --- Transit (interconnect) router port -------------------------------------
-lrp_ts_ip: 169.254.100.1
-lrp_ts_mac: "00:00:00:10:00:02"
-
-# --- External / SNAT (north-south) ------------------------------------------
-# A dedicated host OVS bridge (br-ex) connects OVN's external router port to the
-# host, which then MASQUERADEs out ens3. We never touch ens3 itself, so SSH stays
-# up. Per-AZ external subnets keep the two VMs independent.
+# --- The cell's edge ("Gateway Nodes" in the design) -------------------------
+# Both plane routers hand their north-south traffic to ONE edge gateway router,
+# which owns the uplink and does the SNAT. Two reasons this tier exists:
+#
+#  1. It is what the design draws: a single Gateway Nodes block per cell that
+#     both the Client and the Server plane point their SNAT arrows at.
+#  2. OVN refuses to program a load balancer on a router that has more than one
+#     distributed gateway port. Keeping north-south on the edge router leaves the
+#     plane routers with exactly one DGP (their transit port), which is what makes
+#     the client-plane load balancer legal at all.
 ext_bridge: br-ex
 ext_cidr: 192.168.241.0/24
-ext_host_ip: 192.168.241.1         # host side of br-ex
-ext_router_ip: 192.168.241.2       # lr-az1 external port
-lrp_ext_mac: "00:00:00:10:00:03"
+ext_host_ip: 192.168.241.1         # the host's address on br-ex
 
-# --- The OVN load balancer lives on this AZ's gateway router -----------------
-has_lb: true
+edge_ls: ls-edge-az1               # internal switch joining the plane routers
+edge_lr: lr-edge-az1               # the edge gateway router itself
+edge_cidr: 192.168.251.0/24
+edge_int_ip: 192.168.251.254       # edge router's address on ls-edge
+edge_int_mac: "00:00:00:10:ee:01"
+edge_ext_mac: "00:00:00:10:ee:02"
+
+# --- The two planes ----------------------------------------------------------
+# Consumed by ovn_topology (LS/LR/LRP/transit) and ovn_services (external+SNAT+LB).
+planes:
+  # ---- Client plane: the tenant VPC. Carries the web traffic and the VIP. -----
+  - name: client
+    ls: ls-client-az1
+    lr: lr-client-az1
+    cidr: 10.10.1.0/24
+    gw: 10.10.1.1                  # lrp-client-az1-ls = default gw for workloads
+    supernet: "{{ client_supernet }}"
+    lrp_ls_mac: "00:00:00:10:00:01"
+
+    ts: ts-client                  # federated by the CLIENT transit switch
+    ts_ip: 169.254.100.1
+    ts_mac: "00:00:00:10:00:02"
+
+    edge_ip: 192.168.251.1         # this router's address on ls-edge
+    edge_mac: "00:00:00:10:00:03"
+    snat_ip: 192.168.241.2         # this plane's own external address on the edge
+
+    # This AZ's own load balancer: the entry point for the frontend tier.
+    lb_name: lb-web-az1
+    vip: 10.10.1.100
+
+    # A SECOND load balancer on the same plane, fronting the backend tier that
+    # lives in AZ2. The frontend calls this local VIP and OVN DNATs it to the
+    # remote backend, so the request leaves AZ1 over ts-client already balanced.
+    #
+    # It is deliberately AZ1's VIP and not AZ2's: a VIP is only usable from inside
+    # the AZ that owns it. OVN skips a switch-attached load balancer for packets
+    # that arrive from a router port, and does not program the router-attached one
+    # on this ingress path either, so AZ2's VIP is simply unreachable from AZ1.
+    service_lb_name: lb-backend-az1
+    service_vip: 10.10.1.200
+    service_tier: backend
+
+  # ---- Management plane: the "service management network" (DBaaS side). -------
+  - name: mgmt
+    ls: ls-mgmt-az1
+    lr: lr-mgmt-az1
+    cidr: 10.20.1.0/24
+    gw: 10.20.1.1
+    supernet: "{{ mgmt_supernet }}"
+    lrp_ls_mac: "00:00:00:10:10:01"
+
+    ts: ts-mgmt                    # federated by the MGMT transit switch
+    ts_ip: 169.254.200.1
+    ts_mac: "00:00:00:10:10:02"
+
+    edge_ip: 192.168.251.2
+    edge_mac: "00:00:00:10:10:03"
+    snat_ip: 192.168.241.3         # distinct from the client plane's, so the two
+                                   # planes remain distinguishable on the uplink
+
+    # No load balancer on the management plane (lb_name omitted).
 
 # --- Workloads (Incus containers) in this AZ --------------------------------
 # host_iface = the predictable host-side veth name we hand to Incus and then tag
 # in OVS with external_ids:iface-id=<lsp> so ovn-controller binds the port.
+# Each nic maps the container to one plane; `default_route` marks which nic
+# carries the container's default route (the client plane for app backends).
 workloads:
+  # The FRONTEND tier: React, built and served by nginx, which also proxies
+  # /api/* across the interconnect to the backend in AZ2.
   - name: app-vm-1
-    role: app
-    ip: 10.10.1.10
-    mac: "00:00:00:10:01:0a"
-    lsp: lsp-app-vm-1
-    host_iface: veth-app1
+    role: frontend
+    service_port: "{{ frontend_port }}"
+    nics:
+      - plane: client
+        iface: eth0
+        ip: 10.10.1.10
+        mac: "00:00:00:10:01:0a"
+        lsp: lsp-app-vm-1-client
+        host_iface: veth-app1c
+        default_route: true
+      - plane: mgmt
+        iface: eth1
+        ip: 10.20.1.10
+        mac: "00:00:00:10:11:0a"
+        lsp: lsp-app-vm-1-mgmt
+        host_iface: veth-app1m
+        default_route: false

@@ -1,0 +1,61 @@
+---
+# =============================================================================
+# One plane's logical stack inside this AZ (loop_var `plane`).
+#
+#   ls-<plane>-<az>  ── lr-<plane>-<az> ── (transit LRP, attached later)
+#
+# The transit LRP is created here but only CONNECTED to the transit switch in
+# plane_transit.yml, after ovn-ic has propagated the switch into the local NB.
+# =============================================================================
+
+- name: "[{{ plane.name }}] Create the logical switch"
+  ansible.builtin.command:
+    cmd: ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} --may-exist ls-add {{ plane.ls }}
+  changed_when: false
+
+- name: "[{{ plane.name }}] Create the logical router"
+  ansible.builtin.command:
+    cmd: ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} --may-exist lr-add {{ plane.lr }}
+  changed_when: false
+
+- name: "[{{ plane.name }}] Add the router port that is the workloads' default gateway"
+  ansible.builtin.command:
+    cmd: >
+      ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} --may-exist
+      lrp-add {{ plane.lr }} lrp-{{ plane.name }}-{{ az_name }}-ls
+      {{ plane.lrp_ls_mac }} {{ plane.gw }}/24
+  changed_when: false
+
+- name: "[{{ plane.name }}] Attach the switch to the router (switch side port)"
+  ansible.builtin.command:
+    cmd: >
+      ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} --may-exist
+      lsp-add {{ plane.ls }} lsp-{{ plane.name }}-{{ az_name }}-router
+  changed_when: false
+
+- name: "[{{ plane.name }}] Make that port a router patch port"
+  ansible.builtin.command:
+    cmd: >
+      ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }}
+      -- lsp-set-type lsp-{{ plane.name }}-{{ az_name }}-router router
+      -- lsp-set-addresses lsp-{{ plane.name }}-{{ az_name }}-router router
+      -- lsp-set-options lsp-{{ plane.name }}-{{ az_name }}-router
+         router-port=lrp-{{ plane.name }}-{{ az_name }}-ls
+  changed_when: false
+
+# -- Transit router port (must exist before we connect it to its ts) ----------
+- name: "[{{ plane.name }}] Add the transit router port"
+  ansible.builtin.command:
+    cmd: >
+      ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }} --may-exist
+      lrp-add {{ plane.lr }} lrp-{{ plane.name }}-{{ az_name }}-ts
+      {{ plane.ts_mac }} {{ plane.ts_ip }}/24
+  changed_when: false
+
+# -- Gotcha #5 ----------------------------------------------------------------
+- name: "[{{ plane.name }}] Pin a gateway chassis on the transit router port"
+  ansible.builtin.command:
+    cmd: >
+      ovn-nbctl --db=tcp:127.0.0.1:{{ nb_port }}
+      lrp-set-gateway-chassis lrp-{{ plane.name }}-{{ az_name }}-ts {{ chassis_name }} 1
+  changed_when: false

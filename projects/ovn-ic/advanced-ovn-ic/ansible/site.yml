@@ -14,7 +14,13 @@
   roles:
     - common
 
-- name: "Stage 3 - control-plane databases + northd"
+- name: "Stage 3a - clustered interconnect databases (RAFT across az1/az2/quorum)"
+  hosts: ic_cluster
+  gather_facts: false
+  roles:
+    - ic_cluster
+
+- name: "Stage 3b - per-AZ control-plane databases + northd"
   hosts: azs
   gather_facts: false
   roles:
@@ -44,7 +50,7 @@
   roles:
     - incus
 
-- name: "Stage 8 - workloads (containers + FastAPI + PostgreSQL)"
+- name: "Stage 8 - workloads (containers + Postgres + Java backend + React frontend)"
   hosts: azs
   gather_facts: false
   roles:
