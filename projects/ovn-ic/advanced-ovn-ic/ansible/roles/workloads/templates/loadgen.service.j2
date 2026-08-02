@@ -1,0 +1,28 @@
+[Unit]
+Description=Traffic generator (advanced-ovn-ic lab)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Environment=AZ_NAME={{ az_name }}
+# The frontend VIP: driving THAT rather than the backend directly is what makes
+# each request traverse nginx, the service VIP, ts-client and the database.
+Environment=LOADGEN_TARGET={{ loadgen_target }}
+Environment=LOADGEN_BASE_RPS={{ loadgen_base_rps }}
+Environment=LOADGEN_AMPLITUDE={{ loadgen_amplitude }}
+Environment=LOADGEN_PERIOD_S={{ loadgen_period_s }}
+# Cross-AZ probe on the MANAGEMENT plane. The application path never crosses
+# ts-mgmt (backend and database are both in AZ2), so without this the management
+# transit switch would carry no measurable traffic at all.
+Environment=DB_HOST={{ db_host_ip }}
+Environment=DB_PORT={{ db_port }}
+Environment=LOADGEN_DB_INTERVAL_S={{ loadgen_db_interval_s }}
+# Scraped on the management NIC, like every other workload here.
+Environment=LOADGEN_BIND={{ lg_mgmt_ip }}
+Environment=LOADGEN_METRICS_PORT={{ loadgen_metrics_port }}
+ExecStart=/usr/bin/python3 /opt/loadgen/loadgen.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

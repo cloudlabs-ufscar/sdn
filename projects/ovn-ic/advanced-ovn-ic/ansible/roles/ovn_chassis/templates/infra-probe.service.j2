@@ -1,0 +1,33 @@
+{% set mgmt = planes | selectattr('name', 'equalto', 'mgmt') | first %}
+{% set client = planes | selectattr('name', 'equalto', 'client') | first %}
+{% set peer = (groups['azs'] | difference([inventory_hostname]))[0] %}
+[Unit]
+Description=OVN infrastructure probe agent (advanced-ovn-ic lab)
+After=ovn-northd.service openvswitch-switch.service
+Wants=ovn-northd.service
+
+[Service]
+Type=simple
+# Read-only. Answers the dashboard's "Testar" buttons with LIVE state read from
+# this host's OVN databases and OVS — none of which a workload can see.
+Environment=AZ_NAME={{ az_name }}
+Environment=PROBE_BIND={{ az_private_ip }}
+Environment=PROBE_PORT={{ infra_probe_port }}
+Environment=NB_DB=tcp:127.0.0.1:{{ nb_port }}
+Environment=IC_SB_DB={{ ic_sb_remote }}
+Environment=LAB_DIR={{ lab_dir }}
+Environment=CHASSIS_NAME={{ chassis_name }}
+Environment=PEER_CHASSIS_NAME={{ hostvars[peer].chassis_name }}
+Environment=PEER_PRIVATE_IP={{ hostvars[peer].az_private_ip }}
+Environment=TRANSIT_SWITCHES={{ transit_switches | join(',') }}
+Environment=IC_CLUSTER_SIZE={{ ic_cluster_size }}
+Environment=PLANES_FILE={{ lab_dir }}/infra_probe_planes.json
+ExecStart=/usr/bin/python3 {{ lab_dir }}/infra_probe.py
+Restart=on-failure
+RestartSec=5
+# It only ever reads; give it nothing it does not need.
+NoNewPrivileges=true
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

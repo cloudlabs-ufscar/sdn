@@ -287,16 +287,24 @@
     # =========================================================================
     # T5 — NORTH-SOUTH: every plane SNATs independently
     # =========================================================================
+    # Retried on purpose: this leaves the fabric entirely (plane SNAT -> edge
+    # router -> host MASQUERADE -> the real internet), so a single timeout says
+    # more about the upstream link than about the lab. Without the retry the suite
+    # fails intermittently, which is worse than not testing it at all — a test
+    # that cries wolf trains you to ignore it.
     - name: "T5.1 Reach the internet from each workload"
       become: true
       ansible.builtin.command:
         cmd: >
           incus exec {{ item.name }} -- curl -s -o /dev/null -w "%{http_code}"
-          --max-time 10 https://example.org
+          --max-time 15 https://example.org
       loop: "{{ workloads }}"
       loop_control:
         label: "{{ item.name }}"
       register: t5_net
+      retries: 3
+      delay: 4
+      until: t5_net.stdout == "200"
       changed_when: false
       failed_when: false
 

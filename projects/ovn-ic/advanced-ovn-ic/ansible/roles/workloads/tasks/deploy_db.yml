@@ -26,3 +26,39 @@
   ansible.builtin.command:
     cmd: incus exec {{ wl.name }} -- bash /root/db_setup.sh
   changed_when: false
+
+# --- telemetry ---------------------------------------------------------------
+# postgres_exporter runs beside the database on the management plane, which is
+# the only plane that can reach it anyway.
+- name: Install postgres_exporter in {{ wl.name }}
+  become: true
+  ansible.builtin.command:
+    cmd: >
+      incus exec {{ wl.name }} -- bash -lc
+      "dpkg -s prometheus-postgres-exporter >/dev/null 2>&1 ||
+      (apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y prometheus-postgres-exporter)"
+  changed_when: false
+
+- name: Configure postgres_exporter in {{ wl.name }}
+  become: true
+  ansible.builtin.shell:
+    cmd: |
+      cat >/tmp/pge-{{ wl.name }} <<'CONF'
+      DATA_SOURCE_NAME="postgresql://{{ db_user }}:{{ db_password }}@127.0.0.1:{{ db_port }}/{{ db_name }}?sslmode=disable"
+      ARGS="--web.listen-address={{ (wl.nics | selectattr('plane','equalto','mgmt') | first).ip }}:{{ pg_exporter_port }}"
+      CONF
+      incus file push /tmp/pge-{{ wl.name }} {{ wl.name }}/etc/default/prometheus-postgres-exporter --mode 0600
+      incus exec {{ wl.name }} -- systemctl restart prometheus-postgres-exporter
+  changed_when: false
+
+- name: Wait for postgres_exporter in {{ wl.name }}
+  become: true
+  ansible.builtin.command:
+    cmd: >
+      incus exec {{ wl.name }} -- bash -lc
+      "curl -fs -o /dev/null http://{{ (wl.nics | selectattr('plane','equalto','mgmt') | first).ip }}:{{ pg_exporter_port }}/metrics"
+  register: pge
+  retries: 10
+  delay: 3
+  until: pge.rc == 0
+  changed_when: false

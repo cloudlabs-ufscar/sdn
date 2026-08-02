@@ -25,6 +25,14 @@ network:
         # reach every AZ on the {{ nic.plane }} plane through this NIC
         - to: {{ plane.supernet }}
           via: {{ plane.gw }}
+{% if nic.plane == 'mgmt' %}
+        # The AZ hosts' underlay addresses go out the MANAGEMENT NIC, so querying
+        # the infrastructure probe agent is management-plane traffic. On the host
+        # it therefore arrives from the mgmt plane's SNAT address, which is the
+        # only local source the agent's firewall rule accepts.
+        - to: {{ underlay_supernet }}
+          via: {{ plane.gw }}
+{% endif %}
 {% if nic.default_route %}
       nameservers:
         addresses: [1.1.1.1]

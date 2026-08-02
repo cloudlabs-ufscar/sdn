@@ -201,7 +201,7 @@
   ansible.builtin.set_fact:
     lb_backends: >-
       {{ workloads
-         | rejectattr('role', 'equalto', 'db')
+         | selectattr('role', 'in', service_tiers)
          | map('to_json') | map('from_json')
          | map(attribute='nics') | flatten
          | selectattr('plane', 'equalto', 'client')

@@ -18,6 +18,21 @@ Environment=DB_PORT={{ db_port }}
 Environment=DB_NAME={{ db_name }}
 Environment=DB_USER={{ db_user }}
 Environment=DB_PASSWORD={{ db_password }}
+# The frontend tier in the OTHER AZ, so the backend can prove the cross-AZ path
+# on both planes when the dashboard's "Testar" buttons are pressed.
+{% set fe_az = frontend_az %}
+{% set fe = hostvars[fe_az].workloads | selectattr('role', 'equalto', 'frontend') | first %}
+Environment=APP_FRONTEND_AZ={{ fe_az }}
+Environment=APP_FRONTEND_IP={{ (fe.nics | selectattr('plane','equalto','client') | first).ip }}
+Environment=APP_FRONTEND_PORT={{ frontend_port }}
+Environment=APP_FRONTEND_MGMT_IP={{ (fe.nics | selectattr('plane','equalto','mgmt') | first).ip }}
+# Read-only probe agents on the AZ hosts: only they can see OVN itself. Reached
+# over the management plane (the workload routes the underlay out its mgmt NIC).
+Environment=APP_PROBE_AGENTS={{ groups['azs'] | map('extract', hostvars) | map(attribute='az_name') | zip(groups['azs'] | map('extract', hostvars, 'az_private_ip')) | map('join', '=') | join(',') }}
+Environment=APP_PROBE_PORT={{ infra_probe_port }}
+# Prometheus scrapes this on the MANAGEMENT plane; the service itself stays on
+# the client plane. Same process, two planes, deliberately separated.
+Environment=APP_METRICS_PORT={{ backend_metrics_port }}
 WorkingDirectory=/opt/app
 # The JDBC driver comes from the distro (libpostgresql-jdbc-java), so the
 # classpath is the app directory plus /usr/share/java.

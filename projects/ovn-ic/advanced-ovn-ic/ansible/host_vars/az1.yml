@@ -116,3 +116,37 @@ workloads:
         lsp: lsp-app-vm-1-mgmt
         host_iface: veth-app1m
         default_route: false
+
+  # The observability stack: Prometheus + Grafana for THIS cell. Management plane
+  # only — it observes the infrastructure, it is not part of the tenant service.
+  - name: obs-vm
+    role: observability
+    nics:
+      - plane: mgmt
+        iface: eth0
+        ip: 10.20.1.30
+        mac: "00:00:00:10:11:1e"
+        lsp: lsp-obs-vm-1-mgmt
+        host_iface: veth-obs1m
+        default_route: true
+
+  # The traffic generator. Dual-homed exactly like the application tiers, and for
+  # the same reason: it drives the service on the CLIENT plane and is scraped (and
+  # queries the database) on the MANAGEMENT plane.
+  - name: load-vm
+    role: loadgen
+    nics:
+      - plane: client
+        iface: eth0
+        ip: 10.10.1.40
+        mac: "00:00:00:10:01:28"
+        lsp: lsp-load-vm-1-client
+        host_iface: veth-load1c
+        default_route: true
+      - plane: mgmt
+        iface: eth1
+        ip: 10.20.1.40
+        mac: "00:00:00:10:11:28"
+        lsp: lsp-load-vm-1-mgmt
+        host_iface: veth-load1m
+        default_route: false

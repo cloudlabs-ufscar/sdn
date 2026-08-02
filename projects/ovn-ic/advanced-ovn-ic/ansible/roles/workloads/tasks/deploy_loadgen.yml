@@ -1,0 +1,68 @@
+---
+# The traffic generator (loop_var `wl`). Drives the real application path so the
+# dashboards have something to show; see files/loadgen.py for what and why.
+
+- name: Resolve the generator's addresses
+  ansible.builtin.set_fact:
+    lg_client_ip: "{{ (wl.nics | selectattr('plane', 'equalto', 'client') | first).ip }}"
+    lg_mgmt_ip: "{{ (wl.nics | selectattr('plane', 'equalto', 'mgmt') | first).ip }}"
+
+- name: Stage the generator on the AZ host
+  ansible.builtin.copy:
+    src: loadgen.py
+    dest: /tmp/loadgen-{{ wl.name }}.py
+    mode: "0644"
+
+- name: Push the generator into {{ wl.name }}
+  become: true
+  ansible.builtin.shell:
+    cmd: |
+      incus exec {{ wl.name }} -- mkdir -p /opt/loadgen
+      incus file push /tmp/loadgen-{{ wl.name }}.py {{ wl.name }}/opt/loadgen/loadgen.py --mode 0755
+  changed_when: false
+
+- name: Render the generator systemd unit
+  ansible.builtin.template:
+    src: loadgen.service.j2
+    dest: /tmp/loadgen-{{ wl.name }}.service
+    mode: "0644"
+
+- name: Push the unit and start the generator in {{ wl.name }}
+  become: true
+  ansible.builtin.shell:
+    cmd: |
+      incus file push /tmp/loadgen-{{ wl.name }}.service {{ wl.name }}/etc/systemd/system/loadgen.service --mode 0644
+      incus exec {{ wl.name }} -- systemctl daemon-reload
+      incus exec {{ wl.name }} -- systemctl enable loadgen
+      incus exec {{ wl.name }} -- systemctl restart loadgen
+  changed_when: false
+
+- name: Wait for the generator to expose metrics in {{ wl.name }}
+  become: true
+  ansible.builtin.command:
+    cmd: >
+      incus exec {{ wl.name }} -- bash -lc
+      "curl -fs http://{{ lg_mgmt_ip }}:{{ loadgen_metrics_port }}/metrics | grep -q loadgen_target_rps"
+  register: lg
+  retries: 15
+  delay: 3
+  until: lg.rc == 0
+  changed_when: false
+
+# Proof that it is really driving the cross-AZ path, not just idling.
+- name: Confirm the generator is actually landing requests
+  become: true
+  ansible.builtin.command:
+    cmd: >
+      incus exec {{ wl.name }} -- bash -lc
+      "curl -fs http://{{ lg_mgmt_ip }}:{{ loadgen_metrics_port }}/metrics
+      | awk '/^loadgen_requests_total/ {s+=$2} END {print (s+0)}'"
+  register: lg_count
+  retries: 12
+  delay: 5
+  until: lg_count.stdout | int > 5
+  changed_when: false
+
+- name: Report the generator's progress
+  ansible.builtin.debug:
+    msg: "{{ wl.name }}: {{ lg_count.stdout }} requests issued through {{ loadgen_target }}"

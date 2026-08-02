@@ -99,3 +99,15 @@ workloads:
         lsp: lsp-db-vm-mgmt
         host_iface: veth-dbm
         default_route: true
+
+  # This cell's own observability stack. Scrapes only AZ2's targets.
+  - name: obs-vm
+    role: observability
+    nics:
+      - plane: mgmt
+        iface: eth0
+        ip: 10.20.2.30
+        mac: "00:00:00:20:11:1e"
+        lsp: lsp-obs-vm-2-mgmt
+        host_iface: veth-obs2m
+        default_route: true

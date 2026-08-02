@@ -50,6 +50,20 @@ sudo -u postgres psql -d {{ db_name }} -c \
      UNIQUE (az, category, item)
    );"
 
+# 6c. The table the traffic generator actually works against: writes from
+#     /api/orders, aggregated by /api/report. Having real rows accumulate is what
+#     gives the dashboards something that changes.
+sudo -u postgres psql -d {{ db_name }} -c \
+  "CREATE TABLE IF NOT EXISTS orders(
+     id bigserial primary key,
+     item text NOT NULL,
+     amount integer NOT NULL,
+     az text,
+     created_at timestamptz NOT NULL DEFAULT now()
+   );"
+sudo -u postgres psql -d {{ db_name }} -c \
+  "CREATE INDEX IF NOT EXISTS orders_created_at_idx ON orders(created_at);"
+
 # 7. The tables are created by the postgres superuser, so grant the app role
 #    access (otherwise it connects fine but gets "permission denied for table").
 #    DELETE is needed too: publishing infrastructure state replaces an AZ's rows

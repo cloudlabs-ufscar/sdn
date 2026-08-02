@@ -1,0 +1,167 @@
+---
+# Prometheus + Grafana for this cell (loop_var `wl`), on the management plane.
+
+- name: Set the observability bind address
+  ansible.builtin.set_fact:
+    obs_ip: "{{ (wl.nics | selectattr('plane', 'equalto', 'mgmt') | first).ip }}"
+
+- name: Install Prometheus in {{ wl.name }}
+  become: true
+  ansible.builtin.command:
+    cmd: >
+      incus exec {{ wl.name }} -- bash -lc
+      "dpkg -s prometheus >/dev/null 2>&1 ||
+      (apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y prometheus)"
+  changed_when: false
+
+- name: Render this cell's scrape configuration
+  ansible.builtin.template:
+    src: prometheus.yml.j2
+    dest: /tmp/prometheus-{{ az_name }}.yml
+    mode: "0644"
+
+- name: Push the scrape configuration into {{ wl.name }}
+  become: true
+  ansible.builtin.command:
+    cmd: incus file push /tmp/prometheus-{{ az_name }}.yml {{ wl.name }}/etc/prometheus/prometheus.yml --mode 0644
+  changed_when: false
+
+# Retention is bounded on BOTH time and size. Time alone does not bound bytes,
+# and an unbounded TSDB filling the disk is the exact failure mode that already
+# took this lab down once.
+- name: Configure Prometheus flags in {{ wl.name }}
+  become: true
+  ansible.builtin.shell:
+    cmd: |
+      cat >/tmp/prom-args-{{ wl.name }} <<'CONF'
+      ARGS="--web.listen-address={{ obs_ip }}:{{ prometheus_port }} \
+      --storage.tsdb.retention.time={{ prometheus_retention_time }} \
+      --storage.tsdb.retention.size={{ prometheus_retention_size }}"
+      CONF
+      incus file push /tmp/prom-args-{{ wl.name }} {{ wl.name }}/etc/default/prometheus --mode 0644
+      incus exec {{ wl.name }} -- systemctl restart prometheus
+  changed_when: false
+
+- name: Wait for Prometheus in {{ wl.name }}
+  become: true
+  ansible.builtin.command:
+    cmd: >
+      incus exec {{ wl.name }} -- bash -lc
+      "curl -fs -o /dev/null http://{{ obs_ip }}:{{ prometheus_port }}/-/ready"
+  register: prom
+  retries: 20
+  delay: 3
+  until: prom.rc == 0
+  changed_when: false
+
+# --- Grafana (not in Ubuntu's archive, so from the vendor's repository) -------
+# The vendor publishes an ASCII-armored key; apt's signed-by wants a binary
+# keyring, so it has to be dearmored or every update fails with NO_PUBKEY. The
+# rm is not redundant: gpg --dearmor refuses to overwrite an existing output
+# file, so a half-finished earlier attempt would otherwise wedge this forever.
+- name: Install Grafana in {{ wl.name }}
+  become: true
+  ansible.builtin.command:
+    cmd: >
+      incus exec {{ wl.name }} -- bash -lc
+      "dpkg -s grafana >/dev/null 2>&1 || (
+      apt-get update -qq &&
+      DEBIAN_FRONTEND=noninteractive apt-get install -y apt-transport-https wget gnupg &&
+      mkdir -p /etc/apt/keyrings &&
+      rm -f /etc/apt/keyrings/grafana.gpg &&
+      wget -q -O - https://apt.grafana.com/gpg.key | gpg --dearmor -o /etc/apt/keyrings/grafana.gpg &&
+      echo 'deb [signed-by=/etc/apt/keyrings/grafana.gpg] https://apt.grafana.com stable main' > /etc/apt/sources.list.d/grafana.list &&
+      apt-get update -qq &&
+      DEBIAN_FRONTEND=noninteractive apt-get install -y grafana )"
+  register: graf_install
+  retries: 2
+  delay: 10
+  until: graf_install.rc == 0
+  changed_when: false
+
+- name: Provision the Prometheus datasource in {{ wl.name }}
+  become: true
+  ansible.builtin.shell:
+    cmd: |
+      cat >/tmp/ds-{{ wl.name }}.yaml <<'CONF'
+      apiVersion: 1
+      datasources:
+        - name: Prometheus-{{ az_name }}
+          type: prometheus
+          access: proxy
+          url: http://{{ obs_ip }}:{{ prometheus_port }}
+          isDefault: true
+      CONF
+      incus exec {{ wl.name }} -- mkdir -p /etc/grafana/provisioning/datasources /etc/grafana/provisioning/dashboards /var/lib/grafana/dashboards
+      incus file push /tmp/ds-{{ wl.name }}.yaml {{ wl.name }}/etc/grafana/provisioning/datasources/prometheus.yaml --mode 0644
+  changed_when: false
+
+- name: Provision the dashboard loader in {{ wl.name }}
+  become: true
+  ansible.builtin.shell:
+    cmd: |
+      cat >/tmp/dp-{{ wl.name }}.yaml <<'CONF'
+      apiVersion: 1
+      providers:
+        - name: advanced-ovn-ic
+          folder: OVN-IC
+          type: file
+          options:
+            path: /var/lib/grafana/dashboards
+      CONF
+      incus file push /tmp/dp-{{ wl.name }}.yaml {{ wl.name }}/etc/grafana/provisioning/dashboards/lab.yaml --mode 0644
+  changed_when: false
+
+- name: Stage the lab dashboards on the AZ host
+  ansible.builtin.copy:
+    src: "dashboards/{{ item }}.json"
+    dest: /tmp/dash-{{ item }}-{{ az_name }}.json
+    mode: "0644"
+  loop: "{{ grafana_dashboards }}"
+
+- name: Push the lab dashboards into {{ wl.name }}
+  become: true
+  ansible.builtin.shell:
+    cmd: incus file push /tmp/dash-{{ item }}-{{ az_name }}.json {{ wl.name }}/var/lib/grafana/dashboards/{{ item }}.json --mode 0644
+  loop: "{{ grafana_dashboards }}"
+  changed_when: false
+
+- name: Bind Grafana to the management address and start it in {{ wl.name }}
+  become: true
+  ansible.builtin.shell:
+    cmd: |
+      incus exec {{ wl.name }} -- sed -i \
+        -e 's/^;\?http_addr =.*/http_addr = {{ obs_ip }}/' \
+        -e 's/^;\?http_port =.*/http_port = {{ grafana_port }}/' \
+        /etc/grafana/grafana.ini
+      incus exec {{ wl.name }} -- systemctl enable grafana-server
+      incus exec {{ wl.name }} -- systemctl restart grafana-server
+  changed_when: false
+
+- name: Wait for Grafana in {{ wl.name }}
+  become: true
+  ansible.builtin.command:
+    cmd: >
+      incus exec {{ wl.name }} -- bash -lc
+      "curl -fs -o /dev/null http://{{ obs_ip }}:{{ grafana_port }}/api/health"
+  register: graf
+  retries: 30
+  delay: 4
+  until: graf.rc == 0
+  changed_when: false
+
+# The operator opens Grafana from the AZ host over an SSH tunnel. An Incus proxy
+# device does the forwarding inside the container's namespace, so the HOST needs
+# no route into the management plane — the plane stays closed.
+- name: Expose Grafana and Prometheus to the host via Incus proxy devices
+  become: true
+  ansible.builtin.command:
+    cmd: >
+      incus config device add {{ wl.name }} {{ item.name }} proxy
+      listen=tcp:127.0.0.1:{{ item.port }} connect=tcp:{{ obs_ip }}:{{ item.port }} bind=host
+  loop:
+    - {name: graf-proxy, port: "{{ grafana_port }}"}
+    - {name: prom-proxy, port: "{{ prometheus_port }}"}
+  register: proxydev
+  changed_when: proxydev.rc == 0
+  failed_when: proxydev.rc != 0 and 'already exists' not in (proxydev.stderr | lower)

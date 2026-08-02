@@ -3,3 +3,9 @@
   become: true
   ansible.builtin.systemd_service:
     daemon_reload: true
+
+- name: restart node exporter
+  become: true
+  ansible.builtin.systemd_service:
+    name: prometheus-node-exporter
+    state: restarted

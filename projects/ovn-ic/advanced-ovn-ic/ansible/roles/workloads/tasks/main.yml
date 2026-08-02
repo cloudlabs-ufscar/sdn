@@ -75,6 +75,14 @@
     loop_var: wl
     label: "{{ wl.name }}"
 
+# ---------- 4b. Telemetry on every workload ----------------------------------
+- name: Install node_exporter on every workload
+  ansible.builtin.include_tasks: deploy_node_exporter.yml
+  loop: "{{ workloads }}"
+  loop_control:
+    loop_var: wl
+    label: "{{ wl.name }}"
+
 # ---------- 5a. Database first ------------------------------------------------
 - name: Deploy PostgreSQL on db workloads
   ansible.builtin.include_tasks: deploy_db.yml
@@ -97,12 +105,30 @@
 - name: Publish this AZ's OVN state into the database
   ansible.builtin.include_tasks: publish_infra_state.yml
 
+# ---------- 6b. The observability stack for this cell -------------------------
+- name: Deploy Prometheus + Grafana
+  ansible.builtin.include_tasks: deploy_observability.yml
+  loop: "{{ workloads | selectattr('role', 'equalto', 'observability') | list }}"
+  loop_control:
+    loop_var: wl
+    label: "{{ wl.name }}"
+
 # ---------- 7. Finally the React frontend tier (AZ1) --------------------------
 # Last, because its deploy ends by calling straight through to the backend in the
 # other AZ — which only works once that backend is serving.
 - name: Deploy the React frontend
   ansible.builtin.include_tasks: deploy_frontend.yml
   loop: "{{ workloads | selectattr('role', 'equalto', 'frontend') | list }}"
+  loop_control:
+    loop_var: wl
+    label: "{{ wl.name }}"
+
+# ---------- 8. The traffic generator, last -----------------------------------
+# It drives the full application path, so everything it depends on must already
+# be serving before it starts.
+- name: Deploy the traffic generator
+  ansible.builtin.include_tasks: deploy_loadgen.yml
+  loop: "{{ workloads | selectattr('role', 'equalto', 'loadgen') | list }}"
   loop_control:
     loop_var: wl
     label: "{{ wl.name }}"

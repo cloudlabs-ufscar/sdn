@@ -1,0 +1,71 @@
+{% set mgmt_of = {} %}
+# Prometheus for {{ az_name }} — advanced-ovn-ic lab.
+#
+# This cell scrapes only its OWN targets. Two reasons:
+#   * a failure in one AZ must not blind the other's monitoring;
+#   * scrape traffic stays local instead of loading the interconnect.
+# Everything here is reached over the MANAGEMENT plane.
+global:
+  scrape_interval: {{ prometheus_scrape_interval }}
+  external_labels:
+    az: {{ az_name }}
+
+scrape_configs:
+  # Its own address, not 127.0.0.1: Prometheus binds to the management NIC only,
+  # so a loopback self-scrape would be the one permanently failing target.
+  - job_name: prometheus
+    static_configs:
+      - targets: ["{{ obs_ip }}:{{ prometheus_port }}"]
+        labels: {az: "{{ az_name }}", instance_name: "{{ wl.name }}"}
+
+  # The AZ host itself. Its per-interface counters include genev_sys_6081 —
+  # literally the number of bytes crossing the interconnect.
+  - job_name: az-host
+    static_configs:
+      - targets: ["{{ az_private_ip }}:{{ node_exporter_port }}"]
+        labels: {az: "{{ az_name }}", role: "host", instance_name: "{{ inventory_hostname }}"}
+
+  # Every workload in this cell. For the dual-homed ones, node_network_* comes
+  # back per interface, so client-plane and management-plane traffic show up as
+  # separate series for the same container.
+  - job_name: workloads
+    static_configs:
+{% for w in workloads %}
+      - targets: ["{{ (w.nics | selectattr('plane','equalto','mgmt') | first).ip }}:{{ node_exporter_port }}"]
+        labels: {az: "{{ az_name }}", role: "{{ w.role }}", instance_name: "{{ w.name }}"}
+{% endfor %}
+
+  # OVN/interconnect state, from the read-only probe agent on the host. This is
+  # the only source for transit switches, gateways, tunnels and RAFT health.
+  - job_name: ovn-interconnect
+    static_configs:
+      - targets: ["{{ az_private_ip }}:{{ infra_probe_port }}"]
+        labels: {az: "{{ az_name }}"}
+
+{% if workloads | selectattr('role','equalto','backend') | list | length > 0 %}
+  # The application's own instrumentation, served on its management NIC.
+  - job_name: backend
+    static_configs:
+{% for w in workloads | selectattr('role','equalto','backend') %}
+      - targets: ["{{ (w.nics | selectattr('plane','equalto','mgmt') | first).ip }}:{{ backend_metrics_port }}"]
+        labels: {az: "{{ az_name }}", instance_name: "{{ w.name }}"}
+{% endfor %}
+{% endif %}
+
+{% if workloads | selectattr('role','equalto','db') | list | length > 0 %}
+  - job_name: postgres
+    static_configs:
+{% for w in workloads | selectattr('role','equalto','db') %}
+      - targets: ["{{ (w.nics | selectattr('plane','equalto','mgmt') | first).ip }}:{{ pg_exporter_port }}"]
+        labels: {az: "{{ az_name }}", instance_name: "{{ w.name }}"}
+{% endfor %}
+{% endif %}
+
+{% if workloads | selectattr('role','equalto','loadgen') | list | length > 0 %}
+  - job_name: loadgen
+    static_configs:
+{% for w in workloads | selectattr('role','equalto','loadgen') %}
+      - targets: ["{{ (w.nics | selectattr('plane','equalto','mgmt') | first).ip }}:{{ loadgen_metrics_port }}"]
+        labels: {az: "{{ az_name }}", instance_name: "{{ w.name }}"}
+{% endfor %}
+{% endif %}

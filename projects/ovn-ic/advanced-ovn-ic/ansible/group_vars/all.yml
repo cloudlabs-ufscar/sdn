@@ -97,6 +97,14 @@ mgmt_supernet: 10.20.0.0/16        # 10.20.1.0/24 (AZ1) + 10.20.2.0/24 (AZ2)
 # only reply if its AZ has learned a route back to that address.
 ic_route_blacklist: "{{ groups['azs'] | map('extract', hostvars, 'ext_cidr') | join(',') }}"
 
+# --- Infrastructure probe agent ----------------------------------------------
+# A read-only agent on each AZ host that answers the dashboard's "Testar" buttons
+# with live OVN state. Workloads reach it over the UNDERLAY, routed out their
+# management NIC (see underlay_supernet in the workload netplan), because asking
+# the infrastructure about itself is a management-plane concern, not a tenant one.
+infra_probe_port: 9101
+underlay_supernet: 172.18.0.0/16    # covers both AZ hosts' private addresses
+
 # --- MTU --------------------------------------------------------------------
 # Host NIC (ens3) MTU is 1500. OVN GENEVE adds ~58 bytes of encapsulation, so the
 # inner workload MTU must be <= 1442 or cross-AZ TCP (app -> db over the tunnel)
@@ -121,6 +129,10 @@ vip_port: 80                       # both VIPs listen here
 frontend_port: 80                  # nginx on app-vm-1
 backend_port: 8080                 # Java backend on app-vm-2
 
+# Only these roles sit behind a load-balancer VIP. The database, the monitoring
+# stack and the traffic generator are workloads too, but nothing fronts them.
+service_tiers: [frontend, backend]
+
 frontend_az: az1                   # which AZ serves the dashboard
 backend_az: az2                    # which AZ answers /api/* (with the database)
 
@@ -129,6 +141,43 @@ backend_az: az2                    # which AZ answers /api/* (with the database)
 # (A VIP can only be used from inside the AZ that owns it — see service_lb_name
 # in host_vars/az1.yml.)
 backend_vip: "{{ hostvars['az1'].planes | selectattr('name', 'equalto', 'client') | map(attribute='service_vip') | first }}"
+
+# --- Observability ------------------------------------------------------------
+# Prometheus and Grafana live on the MANAGEMENT plane, one stack per AZ. That is
+# what a "service management network" is for, and it means monitoring traffic is
+# never mixed with tenant traffic.
+#
+# Each AZ scrapes only its OWN targets: a failure in one cell must not blind the
+# other, and it keeps scrape traffic off the interconnect.
+prometheus_port: 9090
+grafana_port: 3000
+node_exporter_port: 9100        # AZ hosts and every container
+pg_exporter_port: 9187          # db-vm
+backend_metrics_port: 9102      # the Java backend, exposed on its MGMT nic only
+loadgen_metrics_port: 9103      # the traffic generator
+
+# Retention is bounded on BOTH axes on purpose. An unbounded TSDB filling the
+# disk is exactly the failure mode that already took this lab down once (see
+# gotcha #9), and time-based retention alone does not bound bytes.
+prometheus_retention_time: 6h
+prometheus_retention_size: 1GB
+prometheus_scrape_interval: 15s
+grafana_dashboards: [interconnect, planes, application]
+
+# --- Traffic generation -------------------------------------------------------
+# Without load there is nothing to see on a dashboard. The generator drives the
+# real application path (browser -> AZ1 VIP -> nginx -> cross-AZ -> Java -> DB)
+# with a weighted endpoint mix, and varies its rate on a slow sine so the graphs
+# have shape instead of a flat line.
+loadgen_base_rps: 6             # average requests/second
+loadgen_amplitude: 0.7          # 0..1 — how deep the diurnal swing goes
+loadgen_period_s: 600           # one full cycle, in seconds
+# It also runs a periodic query straight to the database over the MANAGEMENT
+# plane, which is what puts traffic on ts-mgmt (the app path only uses ts-client).
+loadgen_db_interval_s: 5
+# Drive the FRONTEND VIP, not the backend: that is what makes each request
+# traverse nginx, the service VIP, ts-client and finally the database.
+loadgen_target: "http://{{ hostvars[frontend_az].planes | selectattr('name','equalto','client') | map(attribute='vip') | first }}:{{ vip_port }}"
 
 # --- Managed database (db-vm) ------------------------------------------------
 # The database lives on the MANAGEMENT plane only. It has no client-plane NIC, so

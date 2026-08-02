@@ -150,6 +150,41 @@ renders it. Re-run `workloads.yml` to refresh it.
 
 ---
 
+## 6b. Observability and traffic generation
+
+One Prometheus + Grafana per AZ, on the **management plane**, in `obs-vm`. Each cell
+scrapes only its own targets.
+
+| Exporter | Where | Port |
+|---|---|---|
+| node_exporter | both AZ hosts | `9100` (private IP) |
+| infra probe (OVN state as metrics) | both AZ hosts | `9101` |
+| node_exporter | every container | `9100` (mgmt IP) |
+| Java backend metrics | `app-vm-2` | `9102` (**mgmt NIC only**) |
+| postgres_exporter | `db-vm` | `9187` |
+| load generator | `load-vm` | `9103` |
+
+`load-vm` (AZ1, dual-homed) drives the frontend VIP with a weighted endpoint mix at a
+rate that follows a slow sine, plus a periodic database probe over `ts-mgmt` — otherwise
+the management transit switch would carry no measurable cross-AZ load.
+
+```bash
+ssh -L 3000:localhost:3000 az1     # Grafana    → http://localhost:3000 (admin/admin)
+ssh -L 9090:localhost:9090 az1     # Prometheus → http://localhost:9090
+
+# scrape health
+ansible azs -b -m shell -a 'incus exec obs-vm -- curl -s http://$(incus exec obs-vm -- hostname -I | cut -d" " -f1):9090/api/v1/targets?state=active' | grep -o '"health":"[a-z]*"' | sort | uniq -c
+```
+
+Grafana is reached through an **Incus proxy device**, so the AZ host needs no route into
+the management plane. Retention is capped at `6h` AND `1GB` — time alone does not bound
+bytes, and that is how this lab filled a disk once already.
+
+Tuning knobs live in `group_vars/all.yml`: `loadgen_base_rps`, `loadgen_amplitude`,
+`loadgen_period_s`, `prometheus_retention_*`.
+
+---
+
 ## 7. How the OVN databases are arranged
 
 | Database  | Port(s) | Scope | Runs on | Who connects |

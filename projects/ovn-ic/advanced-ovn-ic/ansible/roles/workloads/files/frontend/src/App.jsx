@@ -12,6 +12,31 @@ import { useCallback, useEffect, useState } from "react";
 
 const POLL_MS = 5000;
 
+/*
+ * The "Testar" groups. Each button asks the backend to run those checks FOR REAL
+ * at that moment — nothing is cached, so the ok/warn/error you get back is the
+ * state of the fabric right now.
+ */
+/* The backend labels every check with a category; this maps it back to the
+   button that owns it, so one "Testar tudo" fills every group. */
+const CATEGORY_TO_GROUP = {
+  "control plane": "control",
+  "cross-AZ": "crossaz",
+  database: "database",
+  isolation: "isolation",
+  "north-south": "northsouth",
+  mtu: "mtu",
+};
+
+const TEST_GROUPS = [
+  { id: "control",    label: "Plano de controle", hint: "transit switches, gateways, RAFT, túneis e rotas aprendidas (lido nos hosts das AZs)" },
+  { id: "crossaz",    label: "Cross-AZ",          hint: "os dois planos atravessando o interconnect" },
+  { id: "database",   label: "Banco de dados",    hint: "TCP e consulta real pelo plano de gerência" },
+  { id: "isolation",  label: "Isolamento",        hint: "o plano client NÃO pode alcançar o banco — falhar é o resultado correto" },
+  { id: "northsouth", label: "Saída externa",     hint: "internet via SNAT do plano" },
+  { id: "mtu",        label: "MTU / GENEVE",      hint: "1414B passa, 1415B é rejeitado" },
+];
+
 async function timedFetch(path) {
   const t0 = performance.now();
   const res = await fetch(path, { cache: "no-store" });
@@ -83,6 +108,85 @@ function FlowDiagram({ rtt, status }) {
   );
 }
 
+/*
+ * On-demand test panel. Results replace the previous ones per group, so pressing
+ * a button twice shows whether something changed in between.
+ */
+function TestPanel({ results, running, onRun }) {
+  const groups = TEST_GROUPS;
+  const counts = (id) => {
+    const rows = results[id] || [];
+    return {
+      ok: rows.filter((r) => r.status === "ok").length,
+      bad: rows.filter((r) => r.status === "error").length,
+      warn: rows.filter((r) => r.status === "warn").length,
+      total: rows.length,
+    };
+  };
+
+  return (
+    <section className="card">
+      <h2>
+        Testes ao vivo <span className="muted">— cada botão executa as verificações no momento do clique</span>
+      </h2>
+      <p className="hint">
+        Nada aqui é cache. O grupo <b>Isolamento</b> é o único em que <i>falhar é o
+        resultado esperado</i>: se o banco responder ao plano client, isso é um defeito
+        e aparece em vermelho.
+      </p>
+
+      <div className="test-actions">
+        <button className="btn btn-primary" disabled={!!running} onClick={() => onRun("all")}>
+          {running === "all" ? "Testando…" : "Testar tudo"}
+        </button>
+      </div>
+
+      {groups.map((g) => {
+        const c = counts(g.id);
+        const rows = results[g.id] || [];
+        const state = c.total === 0 ? "none" : c.bad ? "error" : c.warn ? "warn" : "ok";
+        return (
+          <div key={g.id} className="test-group">
+            <div className="test-head">
+              <div>
+                <div className="test-title">
+                  {g.label}{" "}
+                  {c.total > 0 && (
+                    <span className={`pill pill-${state}`}>
+                      {c.bad ? `${c.bad} com erro` : c.warn ? `${c.warn} atenção` : `${c.ok} ok`}
+                    </span>
+                  )}
+                </div>
+                <div className="test-hint">{g.hint}</div>
+              </div>
+              <button className="btn" disabled={!!running} onClick={() => onRun(g.id)}>
+                {running === g.id ? "Testando…" : "Testar"}
+              </button>
+            </div>
+            {rows.length > 0 && (
+              <table>
+                <tbody>
+                  {rows.map((r, i) => (
+                    <tr key={i}>
+                      <td className="mono az">{r.az}</td>
+                      <td>{r.item}</td>
+                      <td className="mono">{r.value}</td>
+                      <td className="mono num">{r.ms != null ? `${r.ms} ms` : ""}</td>
+                      <td>
+                        <span className={`pill pill-${r.status}`}>{r.status}</span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        );
+      })}
+    </section>
+  );
+}
+
 function InfraTable({ rows }) {
   if (!rows?.length) {
     return (
@@ -147,6 +251,33 @@ export default function App() {
   const [rtt, setRtt] = useState(null);
   const [error, setError] = useState(null);
   const [updated, setUpdated] = useState(null);
+  const [testResults, setTestResults] = useState({});
+  const [running, setRunning] = useState(null);
+
+  /* Runs one group, or every group when id === "all". */
+  const runTests = useCallback(async (id) => {
+    setRunning(id);
+    try {
+      const res = await fetch(`/api/test?group=${encodeURIComponent(id)}`, { cache: "no-store" });
+      const body = await res.json();
+      const byGroup = {};
+      // Start every requested group empty, so a group that returns nothing is
+      // shown as "0 ok" rather than silently keeping its previous results.
+      for (const g of TEST_GROUPS) if (id === "all" || id === g.id) byGroup[g.id] = [];
+      for (const c of body.checks || []) {
+        const key = CATEGORY_TO_GROUP[c.category] || id;
+        (byGroup[key] = byGroup[key] || []).push(c);
+      }
+      setTestResults((prev) => ({ ...prev, ...byGroup }));
+    } catch (e) {
+      setTestResults((prev) => ({
+        ...prev,
+        [id]: [{ az: "-", item: "chamada ao backend", value: String(e), status: "error" }],
+      }));
+    } finally {
+      setRunning(null);
+    }
+  }, []);
 
   const load = useCallback(async () => {
     try {
@@ -236,6 +367,8 @@ export default function App() {
           </table>
         </section>
       )}
+
+      <TestPanel results={testResults} running={running} onRun={runTests} />
 
       <InfraTable rows={infra?.rows} />
 

@@ -151,3 +151,138 @@
   loop_control:
     label: "{{ item.0 }}:{{ item.1 }}"
   failed_when: false
+
+# --- Host telemetry ----------------------------------------------------------
+# node_exporter on the AZ host is where the interconnect becomes measurable: its
+# per-interface counters include genev_sys_6081, so tunnel bytes/s is a real
+# metric rather than an inference.
+- name: Install node_exporter on the AZ host
+  become: true
+  ansible.builtin.apt:
+    name: prometheus-node-exporter
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+    install_recommends: false
+
+- name: Bind node_exporter to this AZ's private address
+  become: true
+  ansible.builtin.copy:
+    dest: /etc/default/prometheus-node-exporter
+    mode: "0644"
+    content: |
+      ARGS="--web.listen-address={{ az_private_ip }}:{{ node_exporter_port }}"
+  notify: restart node exporter
+
+- name: Enable node_exporter on the AZ host
+  become: true
+  ansible.builtin.systemd_service:
+    name: prometheus-node-exporter
+    enabled: true
+    state: started
+
+# --- Infrastructure probe agent ----------------------------------------------
+# Answers the dashboard's "Testar" buttons with live OVN state. It has to run on
+# the HOST: transit switches, learned routes, GENEVE tunnels and the RAFT cluster
+# exist only in the local OVN databases and OVS, which no workload can reach.
+- name: Install the infrastructure probe agent
+  become: true
+  ansible.builtin.copy:
+    src: infra_probe.py
+    dest: "{{ lab_dir }}/infra_probe.py"
+    mode: "0755"
+
+- name: Render the probe agent's per-plane expectations
+  become: true
+  ansible.builtin.copy:
+    dest: "{{ lab_dir }}/infra_probe_planes.json"
+    mode: "0644"
+    content: "{{ probe_planes | to_nice_json }}"
+  vars:
+    probe_planes: "{{ [
+      {'name': 'client',
+       'lr': (planes | selectattr('name','equalto','client') | map(attribute='lr') | first),
+       'ts': (planes | selectattr('name','equalto','client') | map(attribute='ts') | first),
+       'peer_cidr': (hostvars[(groups['azs'] | difference([inventory_hostname]))[0]].planes
+                     | selectattr('name','equalto','client') | map(attribute='cidr') | first),
+       'other_prefix': '10.20.'},
+      {'name': 'mgmt',
+       'lr': (planes | selectattr('name','equalto','mgmt') | map(attribute='lr') | first),
+       'ts': (planes | selectattr('name','equalto','mgmt') | map(attribute='ts') | first),
+       'peer_cidr': (hostvars[(groups['azs'] | difference([inventory_hostname]))[0]].planes
+                     | selectattr('name','equalto','mgmt') | map(attribute='cidr') | first),
+       'other_prefix': '10.10.'}
+    ] }}"
+
+- name: Install the probe agent systemd unit
+  become: true
+  ansible.builtin.template:
+    src: infra-probe.service.j2
+    dest: /etc/systemd/system/infra-probe.service
+    mode: "0644"
+  notify: reload systemd
+
+- name: Apply pending systemd unit changes
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start the probe agent
+  become: true
+  ansible.builtin.systemd_service:
+    name: infra-probe
+    enabled: true
+    state: restarted
+
+# Only the MANAGEMENT plane may ask the infrastructure about itself: workloads
+# route to the underlay through their mgmt NIC, so locally the agent sees the
+# mgmt plane's SNAT address and nothing else gets in.
+#
+# Honest caveat: traffic from the PEER AZ arrives after that host's MASQUERADE,
+# so it carries the peer's underlay address and the client/mgmt distinction is
+# lost for it. The rule below is therefore exact locally and coarse remotely.
+- name: Allow the probe port only from the mgmt plane and the peer AZ
+  become: true
+  ansible.builtin.iptables:
+    chain: INPUT
+    protocol: tcp
+    destination_port: "{{ infra_probe_port }}"
+    source: "{{ item }}"
+    jump: ACCEPT
+    action: insert
+    comment: "advanced-ovn-ic: infra probe from {{ item }}"
+  loop:
+    - "{{ (planes | selectattr('name', 'equalto', 'mgmt') | first).snat_ip }}"
+    - "{{ hostvars[(groups['azs'] | difference([inventory_hostname]))[0]].az_private_ip }}"
+
+- name: Allow node_exporter only from the mgmt plane and the peer AZ
+  become: true
+  ansible.builtin.iptables:
+    chain: INPUT
+    protocol: tcp
+    destination_port: "{{ node_exporter_port }}"
+    source: "{{ item }}"
+    jump: ACCEPT
+    action: insert
+    comment: "advanced-ovn-ic: node exporter from {{ item }}"
+  loop:
+    - "{{ (planes | selectattr('name', 'equalto', 'mgmt') | first).snat_ip }}"
+    - "{{ hostvars[(groups['azs'] | difference([inventory_hostname]))[0]].az_private_ip }}"
+
+- name: Drop any other access to the node exporter port
+  become: true
+  ansible.builtin.iptables:
+    chain: INPUT
+    protocol: tcp
+    destination_port: "{{ node_exporter_port }}"
+    jump: DROP
+    action: append
+    comment: "advanced-ovn-ic: node exporter default deny"
+
+- name: Drop any other access to the probe port
+  become: true
+  ansible.builtin.iptables:
+    chain: INPUT
+    protocol: tcp
+    destination_port: "{{ infra_probe_port }}"
+    jump: DROP
+    action: append
+    comment: "advanced-ovn-ic: infra probe default deny"

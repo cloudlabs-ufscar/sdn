@@ -1,0 +1,175 @@
+{
+  "title": "OVN-IC \u00b7 Two planes",
+  "uid": "ovnic-planes",
+  "tags": [
+    "ovn-ic"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "CLIENT plane traffic per workload (eth0)",
+      "description": "Tenant traffic. The database never appears here \u2014 it has no client-plane NIC.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "rate(node_network_receive_bytes_total{device=\"eth0\",role=~\"frontend|backend|loadgen\"}[1m])",
+          "legendFormat": "{{instance_name}} rx",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(node_network_transmit_bytes_total{device=\"eth0\",role=~\"frontend|backend|loadgen\"}[1m])",
+          "legendFormat": "{{instance_name}} tx",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "MANAGEMENT plane traffic per workload (eth1 / db eth0)",
+      "description": "Database, monitoring and infrastructure traffic \u2014 separated from tenant traffic by construction, not by a firewall rule.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "rate(node_network_receive_bytes_total{device=~\"eth0|eth1\",role=~\"db|observability\"}[1m])",
+          "legendFormat": "{{instance_name}} rx",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(node_network_transmit_bytes_total{device=\"eth1\"}[1m])",
+          "legendFormat": "{{instance_name}} tx",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Database reachable from the backend (mgmt plane)",
+      "description": "",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 0,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "DOWN",
+                  "color": "red"
+                },
+                "1": {
+                  "text": "UP",
+                  "color": "green"
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "backend_db_up",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "PostgreSQL activity",
+      "description": "Driven by the traffic generator through the full cross-AZ path.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 16,
+        "x": 8,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "rate(pg_stat_database_xact_commit{datname=\"appdb\"}[1m])",
+          "legendFormat": "commits/s",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(pg_stat_database_tup_inserted{datname=\"appdb\"}[1m])",
+          "legendFormat": "rows inserted/s",
+          "refId": "B"
+        },
+        {
+          "expr": "pg_stat_database_numbackends{datname=\"appdb\"}",
+          "legendFormat": "connections",
+          "refId": "C"
+        }
+      ]
+    }
+  ]
+}

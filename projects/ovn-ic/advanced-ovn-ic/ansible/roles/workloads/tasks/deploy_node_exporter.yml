@@ -1,0 +1,44 @@
+---
+# node_exporter inside a workload (loop_var `wl`).
+#
+# Bound to the workload's MANAGEMENT address, because Prometheus lives on the
+# management plane and machine-level telemetry is an operations concern. For the
+# dual-homed tiers this is the interesting one: its per-interface counters give
+# client-plane and management-plane traffic as two separate series for the same
+# container, which is what makes the plane split visible on a graph.
+
+- name: Set the exporter bind address for {{ wl.name }}
+  ansible.builtin.set_fact:
+    wl_mgmt_ip: "{{ (wl.nics | selectattr('plane', 'equalto', 'mgmt') | first).ip }}"
+
+- name: Install node_exporter in {{ wl.name }}
+  become: true
+  ansible.builtin.command:
+    cmd: >
+      incus exec {{ wl.name }} -- bash -lc
+      "dpkg -s prometheus-node-exporter >/dev/null 2>&1 ||
+      (apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y prometheus-node-exporter)"
+  changed_when: false
+
+- name: Bind node_exporter to the management address in {{ wl.name }}
+  become: true
+  ansible.builtin.shell:
+    cmd: |
+      cat >/tmp/ne-{{ wl.name }} <<'CONF'
+      ARGS="--web.listen-address={{ wl_mgmt_ip }}:{{ node_exporter_port }}"
+      CONF
+      incus file push /tmp/ne-{{ wl.name }} {{ wl.name }}/etc/default/prometheus-node-exporter --mode 0644
+      incus exec {{ wl.name }} -- systemctl restart prometheus-node-exporter
+  changed_when: false
+
+- name: Wait for node_exporter in {{ wl.name }}
+  become: true
+  ansible.builtin.command:
+    cmd: >
+      incus exec {{ wl.name }} -- bash -lc
+      "curl -fs -o /dev/null http://{{ wl_mgmt_ip }}:{{ node_exporter_port }}/metrics"
+  register: ne
+  retries: 10
+  delay: 3
+  until: ne.rc == 0
+  changed_when: false

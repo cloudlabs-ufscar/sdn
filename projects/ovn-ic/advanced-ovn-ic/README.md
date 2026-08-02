@@ -21,6 +21,7 @@ against the previous single-plane version.
 - [Traffic paths this lab exercises](#traffic-paths-this-lab-exercises)
 - [How it is implemented — Ansible](#how-it-is-implemented--ansible)
 - [Running it from zero](#running-it-from-zero)
+- [Observability and traffic generation](#observability-and-traffic-generation)
 - [Testing — every check](#testing--every-check)
 - [OVN-IC gotchas](#ovn-ic-gotchas)
 - [Results](#results)
@@ -349,6 +350,74 @@ ansible-playbook reset.yml && ansible-playbook site.yml
 
 ---
 
+## Observability and traffic generation
+
+Each cell runs its **own** Prometheus + Grafana, on the **management plane** — which is
+what a "service management network" is for, and it keeps monitoring traffic out of the
+tenant network entirely. A cell scrapes only its own targets, so a failure in one AZ
+cannot blind the other's monitoring, and scrape traffic never loads the interconnect.
+
+```
+obs-vm (mgmt only)          scrapes, all over the management plane
+  ├── az host node_exporter      :9100   ← per-interface counters, incl. genev_sys_6081
+  ├── infra probe agent          :9101   ← OVN state as metrics (transit, RAFT, routes)
+  ├── every workload             :9100   ← per-NIC bytes: client vs mgmt, side by side
+  ├── Java backend               :9102   ← RPS, latency histogram, DB latency
+  ├── postgres_exporter          :9187   ← commits, rows, connections
+  └── load generator             :9103   ← offered load and client-side latency
+```
+
+Two details worth noting, because both express the architecture rather than fighting it:
+
+- **The backend serves its API on the client plane and its `/metrics` on the management
+  plane** — same process, two listeners, two planes. Scraping it from the tenant network
+  is impossible by construction, not by policy.
+- **Grafana is reached through an Incus proxy device**, not a host route into the
+  management plane. The forwarding happens inside the container's namespace, so the AZ
+  host never needs a route to `10.20.x` and the plane stays closed.
+
+### What generates the traffic
+
+An empty dashboard proves nothing, so `load-vm` (AZ1, dual-homed like the app tiers)
+continuously drives the **real** application path:
+
+| | |
+|---|---|
+| Target | the AZ1 frontend VIP — so each request traverses nginx, the service VIP, `ts-client` over GENEVE, the Java backend and PostgreSQL |
+| Mix | `/api/status` 5 · `/api/report` 3 · `/api/orders` 2 (a real `INSERT`) · `/api/health` 2 |
+| Rate | a slow sine around `loadgen_base_rps`, one cycle per 10 min — graphs get *shape*, and a flat line becomes a signal rather than the norm |
+| Mgmt-plane load | a periodic probe straight to the database in AZ2 over `ts-mgmt`. The application path never crosses `ts-mgmt` (backend and database are both in AZ2), so without this the management transit switch would carry nothing measurable |
+
+`/api/orders` and `/api/report` exist for this: one writes, one aggregates the whole
+table, so the database sees a realistic read/write mix instead of one trivial `SELECT`.
+
+### The dashboards
+
+Provisioned automatically into the `OVN-IC` folder:
+
+1. **Interconnect** — `genev_sys_6081` bytes/s (literally the interconnect's load),
+   transit switches, gateways, GENEVE tunnel and RAFT members as UP/DOWN stats.
+2. **Two planes** — client-plane vs management-plane traffic per workload, side by side.
+   `db-vm` never appears in the client-plane panel: it has no NIC there.
+3. **Application** — request rate by endpoint, offered vs served, backend and database
+   latency percentiles, and end-to-end cross-AZ latency as the client measures it.
+
+```bash
+ssh -L 3000:localhost:3000 az1     # Grafana  → http://localhost:3000  (admin/admin)
+ssh -L 9090:localhost:9090 az1     # Prometheus → http://localhost:9090
+```
+
+**Retention is bounded on both axes** (`6h` *and* `1GB`): time-based retention alone does
+not bound bytes, and a TSDB quietly filling the disk is the exact failure mode that
+already took this lab down once (gotcha #9).
+
+Because each cell scrapes only itself, panels fed by a component that exists in one AZ
+only — the generator lives in AZ1 — are empty in the other cell's Grafana. That is the
+isolation working as designed; cross-AZ Prometheus federation over `ts-mgmt` is the
+natural next step and is listed under [improvements](#improving-toward-a-more-real-scenario).
+
+---
+
 ## Testing — every check
 
 `verify.yml` is **assert-based**: a broken path fails the run instead of printing something
@@ -642,14 +711,22 @@ Viable from what we already have, roughly by effort/value:
    valuable than before, since the IC cluster gossips over the network on 6647/6648.
 6. **Real ACLs on the plane switches.** The planes are separated by routing today; OVN
    port groups + ACLs would enforce it at L2/L4 as well.
-7. **More than two AZs** — the transit switches federate N zones; add `host_vars/az3.yml`
+7. **Cross-AZ Prometheus federation over `ts-mgmt`** so either Grafana can show both
+   cells. It would also put real, continuous operational traffic on the management
+   transit switch — monitoring exercising the fabric it monitors.
+8. **`blackbox_exporter` probes, including ones that must FAIL** — alerting if the client
+   plane ever reaches the database turns a security invariant into a metric.
+9. **Fault injection as a demo**: `tc netem delay 50ms dev genev_sys_6081` makes cross-AZ
+   latency climb in Grafana while intra-AZ stays flat, which is the clearest way to make
+   the interconnect visible.
+10. **More than two AZs** — the transit switches federate N zones; add `host_vars/az3.yml`
    and add it to `[azs]`. The Ansible is already variable-driven for this, and the IC
    cluster already tolerates a member joining.
-8. **Workloads as Incus VMs** (nested KVM) for true isolation and a real virtio NIC.
-9. **Multiple app replicas per AZ** behind each VIP.
-10. **Observability**: `ovn-trace`/`ovs-appctl` for flow debugging (both were essential in
+11. **Workloads as Incus VMs** (nested KVM) for true isolation and a real virtio NIC.
+12. **Multiple app replicas per AZ** behind each VIP.
+13. **Deeper observability**: `ovn-trace`/`ovs-appctl` for flow debugging (both were essential in
     this revision), OVS metrics, centralized logs from `/opt/ovn-lab/*.log`.
-11. **Ansible quality**: `molecule` to test roles and `ansible-lint` in CI. `verify.yml` is
+14. **Ansible quality**: `molecule` to test roles and `ansible-lint` in CI. `verify.yml` is
     already `assert:`-based and fails the build when a path breaks.
 
 ---
@@ -675,13 +752,17 @@ advanced-ovn-ic/
     ├── verify_ha.yml         # H1-H4, interconnect HA (disruptive)
     └── roles/
         ├── common/ ic_cluster/ ovn_central/ ovn_chassis/
+        ├── ovn_chassis/      # incl. files/infra_probe.py — the read-only probe agent
         ├── ovn_topology/     # plane.yml + plane_transit.yml, looped per plane
         ├── ovn_services/     # plane_edge.yml, looped per plane
         ├── incus/
         └── workloads/
-            ├── files/Backend.java      # the Java backend tier
+            ├── files/Backend.java      # the Java backend tier (+ /metrics, /api/test)
             ├── files/frontend/         # the React + Vite dashboard
-            ├── tasks/deploy_db.yml deploy_backend.yml deploy_frontend.yml
+            ├── files/loadgen.py        # the traffic generator
+            ├── files/dashboards/       # the three provisioned Grafana dashboards
+            ├── tasks/deploy_{db,backend,frontend,observability,loadgen}.yml
+            ├── tasks/deploy_node_exporter.yml
             ├── tasks/publish_infra_state.yml   # OVN state -> Postgres
-            └── templates/              # netplan, systemd units, nginx, db_setup.sh
+            └── templates/              # netplan, systemd units, nginx, prometheus.yml
 ```
