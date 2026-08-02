@@ -21,4 +21,4 @@
         msg: >-
           {{ inventory_hostname }} = {{ az_name }}
           private={{ az_private_ip }} public={{ az_public_ip }}
-          vpc={{ vpc_cidr }}
+          planes: {{ planes | map(attribute='name') | zip(planes | map(attribute='cidr')) | map('join', '=') | join(' ') }}
