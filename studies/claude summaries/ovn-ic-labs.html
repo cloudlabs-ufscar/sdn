@@ -1,0 +1,1902 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light dark; padding-top:env(safe-area-inset-top,0px); padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0; font:14px system-ui,-apple-system,"Segoe UI",sans-serif; background:#f7f7f5}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>Labs OVN-IC</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=JetBrains+Mono:wght@400;500&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap">
+<style>
+:root{
+  --paper:#f5f7f9; --surface:#ffffff; --surface-2:#eef1f5; --surface-3:#e4e9ef;
+  --line:#d5dce4; --line-soft:#e6ebf1;
+  --ink:#141a20; --muted:#59636f;
+  --az1:#1a8a4b; --az2:#22689f; --transit:#a4560a; --warn:#b0241f;
+  --az1-wash:#e7f4ec; --az2-wash:#e6eef7; --transit-wash:#f8eee1; --warn-wash:#fbeceb;
+  --code-bg:#eef1f5; --code-ink:#1d242c; --ext:#6b4aa2; --ext-wash:#efeaf7;
+  --shadow:0 1px 2px rgba(18,28,40,.05), 0 6px 20px -12px rgba(18,28,40,.22);
+  --f-display:"Archivo","Helvetica Neue",Arial,sans-serif;
+  --f-body:"Source Serif 4",Georgia,"Times New Roman",serif;
+  --f-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141a; --surface:#171c23; --surface-2:#1e242c; --surface-3:#262e38;
+    --line:#2d3641; --line-soft:#222a33;
+    --ink:#e5eaf0; --muted:#98a3b0;
+    --az1:#42c07a; --az2:#63aae0; --transit:#e29a42; --warn:#ea7b73;
+    --az1-wash:#15291f; --az2-wash:#152431; --transit-wash:#2b2216; --warn-wash:#2d1a19;
+    --code-bg:#141920; --code-ink:#d9e0e8; --ext:#a98ede; --ext-wash:#221b2f;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px -14px rgba(0,0,0,.7);
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141a; --surface:#171c23; --surface-2:#1e242c; --surface-3:#262e38;
+  --line:#2d3641; --line-soft:#222a33;
+  --ink:#e5eaf0; --muted:#98a3b0;
+  --az1:#42c07a; --az2:#63aae0; --transit:#e29a42; --warn:#ea7b73;
+  --az1-wash:#15291f; --az2-wash:#152431; --transit-wash:#2b2216; --warn-wash:#2d1a19;
+  --code-bg:#141920; --code-ink:#d9e0e8; --ext:#a98ede; --ext-wash:#221b2f;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px -14px rgba(0,0,0,.7);
+}
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--f-body); font-size:16.5px; line-height:1.62;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1290px; margin:0 auto; padding-inline:20px; padding-block:0}
+
+/* ---------- header ---------- */
+.masthead{border-bottom:1px solid var(--line); background:var(--surface)}
+.masthead .wrap{padding-block:34px 28px}
+.eyebrow{
+  font-family:var(--f-mono); font-size:11.5px; letter-spacing:.14em; text-transform:uppercase;
+  color:var(--muted); margin:0 0 12px;
+}
+h1{
+  font-family:var(--f-display); font-weight:700; font-size:clamp(28px,5.2vw,44px);
+  line-height:1.08; letter-spacing:-.02em; margin:0 0 10px; text-wrap:balance;
+}
+.dek{margin:0; max-width:62ch; color:var(--muted); font-size:17px}
+.facts{
+  display:flex; flex-wrap:wrap; gap:8px; margin-top:22px; padding:0; list-style:none;
+}
+.facts li{
+  font-family:var(--f-mono); font-size:11.5px; letter-spacing:.02em;
+  border:1px solid var(--line); border-radius:3px; padding:5px 9px;
+  color:var(--muted); background:var(--surface-2);
+}
+.facts b{color:var(--ink); font-weight:500}
+
+/* ---------- shell ---------- */
+.shell{display:grid; grid-template-columns:200px minmax(0,1fr); gap:40px; align-items:start}
+.rail{
+  position:sticky; top:calc(env(safe-area-inset-top, 0px) + 18px);
+  padding-block:34px; font-family:var(--f-display); font-size:13.5px;
+}
+.rail ol{list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:1px}
+.rail a{
+  display:grid; grid-template-columns:22px 1fr; gap:8px; align-items:baseline;
+  text-decoration:none; color:var(--muted); padding:6px 9px; border-radius:4px;
+  border-left:2px solid transparent; transition:color .14s, background .14s;
+}
+.rail a:hover{color:var(--ink); background:var(--surface-2)}
+.rail a.on{color:var(--ink); background:var(--surface-2); border-left-color:var(--transit); font-weight:600}
+.rail .n{font-family:var(--f-mono); font-size:11px; color:var(--transit)}
+.rail .toggle{
+  margin-top:18px; width:100%; font:inherit; font-size:12px; cursor:pointer;
+  background:none; border:1px solid var(--line); border-radius:4px; color:var(--muted);
+  padding:7px 9px;
+}
+.rail .toggle:hover{color:var(--ink); border-color:var(--muted)}
+main{padding-block:34px 72px; min-width:0}
+
+/* ---------- sections ---------- */
+section{scroll-margin-top:80px; margin-bottom:56px}
+h2{
+  font-family:var(--f-display); font-weight:700; font-size:26px; letter-spacing:-.015em;
+  margin:0 0 6px; text-wrap:balance;
+  display:grid; grid-template-columns:auto 1fr; gap:12px; align-items:baseline;
+}
+h2 .n{font-family:var(--f-mono); font-size:13px; font-weight:500; color:var(--transit)}
+h3{
+  font-family:var(--f-display); font-weight:600; font-size:18.5px; letter-spacing:-.01em;
+  margin:34px 0 8px; text-wrap:balance;
+}
+h4{font-family:var(--f-display); font-weight:600; font-size:15px; margin:22px 0 6px}
+.lede{color:var(--muted); font-size:17px; margin:0 0 4px; max-width:66ch}
+p{margin:0 0 14px; max-width:68ch}
+ul,ol{max-width:68ch; padding-left:22px; margin:0 0 14px}
+li{margin-bottom:6px}
+a{color:var(--az2)}
+strong{font-weight:600}
+hr.rule{border:0; border-top:1px solid var(--line-soft); margin:40px 0}
+
+/* ---------- code ---------- */
+code{
+  font-family:var(--f-mono); font-size:.855em; background:var(--code-bg);
+  padding:1.5px 5px; border-radius:3px; color:var(--code-ink);
+  overflow-wrap:break-word;
+}
+pre{
+  font-family:var(--f-mono); font-size:12.6px; line-height:1.62;
+  background:var(--code-bg); color:var(--code-ink);
+  border:1px solid var(--line-soft); border-radius:5px;
+  padding:14px 16px; margin:0 0 16px; overflow-x:auto;
+}
+pre code{background:none; padding:0; font-size:inherit}
+.cmt{color:var(--muted)}
+
+/* ---------- tables ---------- */
+.tw{overflow-x:auto; margin:0 0 18px; border:1px solid var(--line); border-radius:6px; background:var(--surface)}
+table{border-collapse:collapse; width:100%; font-size:14.5px; min-width:480px}
+th,td{text-align:left; padding:9px 13px; border-bottom:1px solid var(--line-soft); vertical-align:top}
+thead th{
+  font-family:var(--f-display); font-size:11.5px; letter-spacing:.07em; text-transform:uppercase;
+  color:var(--muted); font-weight:600; background:var(--surface-2); border-bottom:1px solid var(--line);
+  white-space:nowrap;
+}
+tbody tr:last-child td{border-bottom:0}
+td code{font-size:12.4px}
+
+/* ---------- chips ---------- */
+.chip{
+  font-family:var(--f-mono); font-size:11px; letter-spacing:.03em; padding:2px 7px;
+  border-radius:3px; white-space:nowrap; border:1px solid transparent;
+}
+.chip.az1{color:var(--az1); background:var(--az1-wash); border-color:var(--az1)}
+.chip.az2{color:var(--az2); background:var(--az2-wash); border-color:var(--az2)}
+.chip.ts{color:var(--transit); background:var(--transit-wash); border-color:var(--transit)}
+
+/* ---------- gotchas ---------- */
+.gotcha{
+  border:1px solid var(--line); border-left:3px solid var(--warn); border-radius:5px;
+  background:var(--surface); padding:16px 18px; margin-bottom:14px;
+}
+.gotcha.fixed{border-left-color:var(--transit)}
+.gotcha h4{
+  margin:0 0 10px; font-size:16px;
+  display:grid; grid-template-columns:auto 1fr; gap:10px; align-items:baseline;
+}
+.gotcha h4 .num{font-family:var(--f-mono); font-size:12px; color:var(--warn); font-weight:500}
+.gotcha.fixed h4 .num{color:var(--transit)}
+.gx{display:grid; grid-template-columns:88px 1fr; gap:4px 14px; font-size:15px}
+.gx dt{
+  font-family:var(--f-display); font-size:11px; letter-spacing:.08em; text-transform:uppercase;
+  color:var(--muted); font-weight:600; padding-top:4px;
+}
+.gx dd{margin:0; min-width:0}
+.gx dd > pre:last-child, .gx dd > p:last-child{margin-bottom:6px}
+
+/* ---------- path steps ---------- */
+.steps{list-style:none; padding:0; margin:0 0 18px; counter-reset:s}
+.steps li{
+  counter-increment:s; position:relative; padding-left:38px; margin-bottom:9px; font-size:15.5px;
+}
+.steps li::before{
+  content:counter(s,decimal-leading-zero); position:absolute; left:0; top:2px;
+  font-family:var(--f-mono); font-size:11px; color:var(--muted);
+  border:1px solid var(--line); border-radius:3px; padding:1px 5px; background:var(--surface-2);
+}
+.steps li.hot::before{color:var(--transit); border-color:var(--transit); background:var(--transit-wash)}
+
+/* ---------- callout ---------- */
+.note{
+  border:1px solid var(--line); border-radius:5px; background:var(--surface-2);
+  padding:13px 16px; margin:0 0 18px; font-size:15px;
+}
+.note p:last-child{margin-bottom:0}
+.note .tag{
+  font-family:var(--f-display); font-size:11px; letter-spacing:.08em; text-transform:uppercase;
+  color:var(--transit); font-weight:600; display:block; margin-bottom:4px;
+}
+
+/* ---------- figure / svg ---------- */
+figure{margin:0 0 20px}
+.fw{overflow-x:auto; border:1px solid var(--line); border-radius:6px; background:var(--surface); padding:16px}
+figure svg{display:block; min-width:620px; max-width:100%; height:auto}
+svg .box{fill:var(--surface); stroke:var(--line); stroke-width:1}
+svg .mono{font-family:var(--f-mono); font-size:10.5px; fill:var(--ink)}
+svg .tag{font-family:var(--f-display); font-size:9px; letter-spacing:.09em; fill:var(--muted); font-weight:700}
+svg .edge{stroke:var(--muted); stroke-width:1.3; fill:none}
+svg .dash{stroke:var(--muted); stroke-width:1.1; fill:none; stroke-dasharray:4 3}
+svg .hot{stroke:var(--transit); stroke-width:2; fill:none}
+svg .elbl{font-family:var(--f-mono); font-size:8.6px; fill:var(--muted)}
+figcaption{font-size:13.5px; color:var(--muted); margin-top:8px}
+svg text{font-family:var(--f-mono); fill:var(--ink)}
+svg .lbl{font-size:9.5px; fill:var(--muted)}
+svg .ttl{font-family:var(--f-display); font-size:12px; font-weight:600}
+
+/* ---------- Q&A ---------- */
+.qa{border:1px solid var(--line); border-radius:6px; background:var(--surface); overflow:hidden; margin-bottom:12px}
+.qa details{border-bottom:1px solid var(--line-soft)}
+.qa details:last-child{border-bottom:0}
+.qa summary{
+  cursor:pointer; list-style:none; padding:11px 16px 11px 38px; position:relative;
+  font-family:var(--f-display); font-weight:600; font-size:15px; line-height:1.45;
+}
+.qa summary::-webkit-details-marker{display:none}
+.qa summary::before{
+  content:"?"; position:absolute; left:15px; top:11px;
+  font-family:var(--f-mono); font-size:12px; color:var(--transit); font-weight:500;
+}
+.qa summary:hover{background:var(--surface-2)}
+.qa summary:focus-visible{outline:2px solid var(--az2); outline-offset:-2px}
+.qa .ans{padding:0 16px 14px 38px; font-size:15.5px}
+.qa .ans p{margin:0 0 10px}
+.qa .ans p:last-child{margin-bottom:0}
+.qa-head{
+  display:flex; align-items:baseline; justify-content:space-between; gap:12px; flex-wrap:wrap;
+  margin:30px 0 10px;
+}
+.qa-head h3{margin:0}
+.expand{
+  font:inherit; font-family:var(--f-display); font-size:12.5px; cursor:pointer;
+  background:none; border:1px solid var(--line); border-radius:4px; color:var(--muted); padding:5px 10px;
+}
+.expand:hover{color:var(--ink); border-color:var(--muted)}
+
+/* ---------- misc ---------- */
+.cols2{display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:16px; margin-bottom:18px}
+.cols2 > div{border:1px solid var(--line); border-radius:6px; padding:14px 16px; background:var(--surface); min-width:0}
+.cols2 h4{margin-top:0}
+.cols2 p:last-child, .cols2 ul:last-child{margin-bottom:0}
+footer{border-top:1px solid var(--line); color:var(--muted); font-size:13.5px}
+footer .wrap{padding-block:22px 34px}
+:focus-visible{outline:2px solid var(--az2); outline-offset:2px}
+@media (prefers-reduced-motion:reduce){*{transition:none!important; animation:none!important}}
+@media (max-width:620px){
+  .gx{grid-template-columns:1fr; gap:2px}
+  .gx dt{padding-top:8px}
+}
+@media (max-width:900px){
+  .shell{grid-template-columns:1fr; gap:0}
+  .rail{position:static; padding-block:22px 0}
+  .rail ol{flex-direction:row; flex-wrap:wrap; gap:4px}
+  .rail a{border-left:0; border-bottom:2px solid transparent; padding:5px 8px}
+  .rail a.on{border-left:0; border-bottom-color:var(--transit)}
+  .rail .toggle{width:auto; margin-top:12px}
+  main{padding-block:22px 56px}
+  body{font-size:16px}
+}
+</style>
+</head>
+<body>
+
+<header class="masthead">
+  <div class="wrap">
+    <p class="eyebrow">Magalu Cloud &middot; UFSCar &middot; projects/ovn-ic</p>
+    <h1>OVN Interconnect: os dois laboratórios</h1>
+    <p class="dek">Guia de estudo completo de <code>pratice-ovn-ic</code> (CLO-77) e da revisão <b>dual-plane</b> do <code>advanced-ovn-ic</code> (CLO-73) — fundamentos, anatomia de cada role, os dezesseis <em>gotchas</em> e um banco de perguntas.</p>
+    <ul class="facts">
+      <li>OVN <b>v24.03.6</b> (do fonte)</li>
+      <li>OVS <b>v3.3.0</b> (pinado)</li>
+      <li><b>3</b> VMs · 2 AZs + 1 árbitro</li>
+      <li><b>2</b> planes · <b>2</b> transit switches</li>
+      <li>IC-NB/IC-SB em <b>cluster RAFT</b></li>
+      <li>GENEVE <b>UDP 6081</b> · MTU <b>1442</b></li>
+      <li>React + Java + PostgreSQL</li>
+    </ul>
+  </div>
+</header>
+
+<div class="wrap shell">
+<nav class="rail" aria-label="Seções">
+  <ol>
+    <li><a href="#f1" class="on"><span class="n">01</span><span>OVN em uma AZ</span></a></li>
+    <li><a href="#f2"><span class="n">02</span><span>O que o IC acrescenta</span></a></li>
+    <li><a href="#lab1"><span class="n">03</span><span>Lab 1 &mdash; pratice</span></a></li>
+    <li><a href="#lab2"><span class="n">04</span><span>Lab 2 &mdash; dual-plane</span></a></li>
+    <li><a href="#gotchas"><span class="n">05</span><span>Os 16 gotchas</span></a></li>
+    <li><a href="#comp"><span class="n">06</span><span>As 3 gerações</span></a></li>
+    <li><a href="#cheat"><span class="n">07</span><span>Cheat-sheet</span></a></li>
+    <li><a href="#qa"><span class="n">08</span><span>Perguntas</span></a></li>
+    <li><a href="#incons"><span class="n">09</span><span>Inconsistências</span></a></li>
+  </ol>
+  <button class="toggle" id="themeBtn" type="button">Alternar tema</button>
+</nav>
+<main>
+<section id="f1">
+  <h2><span class="n">01</span><span>OVN em uma AZ — o modelo de base</span></h2>
+  <p class="lede">Antes de falar de federação, é preciso ter na ponta da língua o modelo de uma AZ isolada. Toda depuração de OVN é descobrir <em>em qual camada a informação parou de descer</em>.</p>
+
+  <h3>Os componentes</h3>
+  <div class="tw"><table>
+    <thead><tr><th>Componente</th><th>Papel</th><th>Onde roda</th></tr></thead>
+    <tbody>
+      <tr><td><b>NB-DB</b><br><code>6641</code></td><td>Banco OVSDB com a <b>intenção</b>: logical switches, logical routers, portas, ACLs, NAT, load balancers. É o que o operador/CMS escreve.</td><td>central</td></tr>
+      <tr><td><b><code>ovn-northd</code></b></td><td>Compilador. Lê o NB e <b>traduz</b> para <em>logical flows</em> no SB. Não fala com hipervisor nenhum.</td><td>central</td></tr>
+      <tr><td><b>SB-DB</b><br><code>6642</code></td><td>Banco OVSDB com o <b>resultado compilado</b>: <code>Logical_Flow</code>, <code>Port_Binding</code>, <code>Chassis</code>, <code>Encap</code>, <code>Datapath_Binding</code>.</td><td>central</td></tr>
+      <tr><td><b><code>ovn-controller</code></b></td><td>Agente em cada <em>chassis</em>. Lê o SB, traduz logical flows em <b>OpenFlow</b> e programa o <code>br-int</code>. Registra o chassis e cria os túneis.</td><td>cada chassis</td></tr>
+      <tr><td><b><code>ovs-vswitchd</code> / <code>br-int</code></b></td><td>O datapath de verdade. <code>br-int</code> é a bridge onde ficam as portas dos workloads e as portas de túnel.</td><td>cada chassis</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>O pipeline mental</h3>
+  <figure><div class="fw"><svg viewBox="0 0 906 168" style="min-width:720px" role="img" aria-label="Pipeline do OVN: o operador escreve no NB-DB, ovn-northd compila para o SB-DB, e o ovn-controller de cada chassis traduz para OpenFlow no br-int">
+<defs><marker id="arA" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><polygon points="0 0, 7 3, 0 6" fill="var(--muted)"/></marker></defs>
+<path d="M164 34 L164 26 L586 26 L586 34" class="edge"/>
+<text x="375" y="20" text-anchor="middle" class="tag">CONTROL PLANE — CENTRAL, POR AZ</text>
+<path d="M632 34 L632 26 L898 26 L898 34" class="edge"/>
+<text x="765" y="20" text-anchor="middle" class="tag">CADA CHASSIS (HIPERVISOR)</text>
+<rect x="8" y="46" width="110" height="46" rx="5" class="box" stroke="var(--line)"/>
+<text x="63" y="63" text-anchor="middle" class="lbl">operador</text>
+<text x="63" y="78" text-anchor="middle" class="mono">ovn-nbctl</text>
+<text x="63" y="112" text-anchor="middle" class="elbl">escreve a intenção</text>
+<text x="63" y="124" text-anchor="middle" class="elbl">(ls-add, lr-add, lb-add…)</text>
+<rect x="164" y="46" width="110" height="46" rx="5" class="box" stroke="var(--transit)"/>
+<text x="219" y="73" text-anchor="middle" class="mono">NB-DB :6641</text>
+<text x="219" y="112" text-anchor="middle" class="elbl">Logical_Switch, Logical_Router,</text>
+<text x="219" y="124" text-anchor="middle" class="elbl">NAT, Load_Balancer, ACL</text>
+<rect x="320" y="46" width="110" height="46" rx="5" class="box" stroke="var(--line)"/>
+<text x="375" y="73" text-anchor="middle" class="mono">ovn-northd</text>
+<text x="375" y="112" text-anchor="middle" class="elbl">compilador:</text>
+<text x="375" y="124" text-anchor="middle" class="elbl">NB → flows lógicos</text>
+<rect x="476" y="46" width="110" height="46" rx="5" class="box" stroke="var(--transit)"/>
+<text x="531" y="73" text-anchor="middle" class="mono">SB-DB :6642</text>
+<text x="531" y="112" text-anchor="middle" class="elbl">Logical_Flow, Port_Binding,</text>
+<text x="531" y="124" text-anchor="middle" class="elbl">Chassis, Encap, Datapath_Binding</text>
+<rect x="632" y="46" width="110" height="46" rx="5" class="box" stroke="var(--line)"/>
+<text x="687" y="73" text-anchor="middle" class="mono">ovn-controller</text>
+<text x="687" y="112" text-anchor="middle" class="elbl">traduz p/ OpenFlow</text>
+<text x="687" y="124" text-anchor="middle" class="elbl">e faz o binding das portas</text>
+<rect x="788" y="46" width="110" height="46" rx="5" class="box" stroke="var(--line)"/>
+<text x="843" y="73" text-anchor="middle" class="mono">br-int (OVS)</text>
+<text x="843" y="112" text-anchor="middle" class="elbl">o datapath real:</text>
+<text x="843" y="124" text-anchor="middle" class="elbl">portas dos workloads + túneis</text>
+<path d="M118 69 L158 69" class="edge" marker-end="url(#arA)"/>
+<text x="138" y="60" text-anchor="middle" class="elbl">escreve</text>
+<path d="M274 69 L314 69" class="edge" marker-end="url(#arA)"/>
+<text x="294" y="60" text-anchor="middle" class="elbl">lê</text>
+<path d="M430 69 L470 69" class="edge" marker-end="url(#arA)"/>
+<text x="450" y="60" text-anchor="middle" class="elbl">grava</text>
+<path d="M586 69 L626 69" class="edge" marker-end="url(#arA)"/>
+<text x="606" y="60" text-anchor="middle" class="elbl">lê</text>
+<path d="M742 69 L782 69" class="edge" marker-end="url(#arA)"/>
+<text x="762" y="60" text-anchor="middle" class="elbl">OpenFlow</text>
+<text x="453" y="150" text-anchor="middle" class="lbl">depurar OVN = descobrir em qual desses saltos a informação parou de descer</text>
+</svg></div><figcaption>Cada caixa guarda um artefato diferente. O <code>ovn-northd</code> nunca fala com um hipervisor; o <code>ovn-controller</code> nunca lê o NB.</figcaption></figure>
+
+  <h3>Como um chassis é configurado</h3>
+  <p>Tudo vive em <code>external_ids</code> da tabela <code>Open_vSwitch</code> do OVS local:</p>
+<pre><code>ovs-vsctl set open_vswitch . \
+  external_ids:system-id=az1-chassis          <span class="cmt"># nome do chassis na tabela Chassis do SB</span>
+  external_ids:ovn-remote=tcp:127.0.0.1:6642  <span class="cmt"># onde está o SB</span>
+  external_ids:ovn-encap-type=geneve          <span class="cmt"># tipo de encapsulamento</span>
+  external_ids:ovn-encap-ip=172.18.3.175      <span class="cmt"># IP de origem do túnel (underlay)</span>
+  external_ids:ovn-is-interconn=true          <span class="cmt"># habilita participação no OVN-IC</span></code></pre>
+  <p>O <code>ovn-controller</code> lê isso, cria a linha em <code>Chassis</code>/<code>Encap</code> no SB e <b>automaticamente</b> sobe uma porta de túnel GENEVE para cada outro chassis que enxerga no SB.</p>
+
+  <h3>Como uma porta é &ldquo;ligada&rdquo;</h3>
+  <p>Um <em>logical switch port</em> (LSP) no NB é só um objeto. Ele vira tráfego real quando uma interface do OVS carrega o <code>iface-id</code> correspondente:</p>
+<pre><code>ovs-vsctl add-port br-int veth-app1 \
+  -- set interface veth-app1 external_ids:iface-id=lsp-app-vm-1</code></pre>
+  <p>O <code>ovn-controller</code> vê o <code>iface-id</code>, encontra o LSP homônimo e preenche <code>Port_Binding.chassis</code> no SB. <b>É esse binding que diz ao resto da malha em qual chassis aquele IP/MAC está</b> — e, portanto, para onde encapsular.</p>
+</section>
+
+<section id="f2">
+  <h2><span class="n">02</span><span>O que o OVN-IC acrescenta</span></h2>
+  <p class="lede">Uma instalação OVN = uma <em>Availability Zone</em>. Esticar um único control plane por várias regiões é ruim (escala, latência de OVSDB, blast radius). O OVN-IC mantém cada AZ com seu próprio NB/SB/northd/chassis e adiciona uma camada <b>aditiva</b> de federação.</p>
+
+  <figure>
+    <div class="fw">
+      <svg viewBox="0 0 880 392" role="img" aria-label="Diagrama: dois bancos globais IC-NB e IC-SB no topo, dois daemons ovn-ic, duas AZs com control plane próprio ligadas por um transit switch e um túnel GENEVE no underlay">
+        <!-- IC databases -->
+        <rect x="260" y="6" width="360" height="50" rx="5" fill="var(--transit-wash)" stroke="var(--transit)" stroke-width="1.5"/>
+        <text x="440" y="26" text-anchor="middle" class="ttl" fill="var(--transit)">IC-NB :6645 &#183; IC-SB :6646</text>
+        <text x="440" y="43" text-anchor="middle" class="lbl">bancos GLOBAIS, compartilhados (hospedados no host az1)</text>
+        <path d="M330 56 L190 104" fill="none" stroke="var(--transit)" stroke-width="1.4" stroke-dasharray="4 3"/>
+        <path d="M550 56 L690 104" fill="none" stroke="var(--transit)" stroke-width="1.4" stroke-dasharray="4 3"/>
+
+        <!-- AZ panels -->
+        <rect x="14" y="104" width="352" height="212" rx="6" fill="var(--az1-wash)" stroke="var(--az1)" stroke-width="1.2" stroke-dasharray="5 4"/>
+        <text x="28" y="122" class="ttl" fill="var(--az1)">AZ 1</text>
+        <rect x="514" y="104" width="352" height="212" rx="6" fill="var(--az2-wash)" stroke="var(--az2)" stroke-width="1.2" stroke-dasharray="5 4"/>
+        <text x="528" y="122" class="ttl" fill="var(--az2)">AZ 2</text>
+
+        <!-- ovn-ic + local dbs -->
+        <rect x="76" y="108" width="110" height="26" rx="4" fill="var(--surface)" stroke="var(--transit)"/>
+        <text x="131" y="125" text-anchor="middle" font-size="11" fill="var(--ink)">ovn-ic</text>
+        <rect x="196" y="108" width="160" height="26" rx="4" fill="var(--surface)" stroke="var(--line)"/>
+        <text x="276" y="125" text-anchor="middle" font-size="10.5" fill="var(--ink)">NB :6641 &#183; SB :6642</text>
+
+        <rect x="694" y="108" width="110" height="26" rx="4" fill="var(--surface)" stroke="var(--transit)"/>
+        <text x="749" y="125" text-anchor="middle" font-size="11" fill="var(--ink)">ovn-ic</text>
+        <rect x="524" y="108" width="160" height="26" rx="4" fill="var(--surface)" stroke="var(--line)"/>
+        <text x="604" y="125" text-anchor="middle" font-size="10.5" fill="var(--ink)">NB :6641 &#183; SB :6642</text>
+
+        <!-- northd note -->
+        <text x="28" y="152" class="lbl">ovn-northd + ovn-controller locais</text>
+        <text x="528" y="152" class="lbl">ovn-northd + ovn-controller locais</text>
+
+        <!-- Logical routers -->
+        <rect x="28" y="160" width="324" height="56" rx="5" fill="var(--surface)" stroke="var(--az1)" stroke-width="1.4"/>
+        <text x="40" y="177" font-size="11" fill="var(--ink)">lr-az1</text>
+        <text x="40" y="192" class="lbl">lrp-&lt;az&gt;-ls (gw dos workloads)  &#183;  lrp-&lt;az&gt;-ts</text>
+        <text x="40" y="206" class="lbl">gateway chassis: az1-chassis</text>
+
+        <rect x="528" y="160" width="324" height="56" rx="5" fill="var(--surface)" stroke="var(--az2)" stroke-width="1.4"/>
+        <text x="540" y="177" font-size="11" fill="var(--ink)">lr-az2</text>
+        <text x="540" y="192" class="lbl">lrp-&lt;az&gt;-ls (gw dos workloads)  &#183;  lrp-&lt;az&gt;-ts</text>
+        <text x="540" y="206" class="lbl">gateway chassis: az2-chassis</text>
+
+        <!-- transit switch -->
+        <rect x="378" y="166" width="124" height="44" rx="5" fill="var(--transit-wash)" stroke="var(--transit)" stroke-width="1.6"/>
+        <text x="440" y="185" text-anchor="middle" font-size="12" fill="var(--transit)">ts</text>
+        <text x="440" y="200" text-anchor="middle" class="lbl">transit switch</text>
+        <path d="M352 188 L378 188" fill="none" stroke="var(--transit)" stroke-width="2"/>
+        <path d="M502 188 L528 188" fill="none" stroke="var(--transit)" stroke-width="2"/>
+
+        <!-- logical switches -->
+        <rect x="28" y="228" width="324" height="44" rx="5" fill="var(--surface)" stroke="var(--line)"/>
+        <text x="40" y="246" font-size="11" fill="var(--ink)">ls-az1  (subrede da AZ1)</text>
+        <text x="40" y="262" class="lbl">workloads da AZ1</text>
+
+        <rect x="528" y="228" width="324" height="44" rx="5" fill="var(--surface)" stroke="var(--line)"/>
+        <text x="540" y="246" font-size="11" fill="var(--ink)">ls-az2  (subrede da AZ2)</text>
+        <text x="540" y="262" class="lbl">workloads da AZ2</text>
+
+        <!-- chassis bars -->
+        <rect x="28" y="284" width="324" height="24" rx="4" fill="var(--surface-2)" stroke="var(--line)"/>
+        <text x="40" y="300" class="lbl">br-int &#183; az1-chassis &#183; encap-ip 172.18.3.175</text>
+        <rect x="528" y="284" width="324" height="24" rx="4" fill="var(--surface-2)" stroke="var(--line)"/>
+        <text x="540" y="300" class="lbl">br-int &#183; az2-chassis &#183; encap-ip 172.18.33.126</text>
+
+        <!-- geneve tunnel -->
+        <path d="M190 308 L190 348 L690 348 L690 308" fill="none" stroke="var(--transit)" stroke-width="2"/>
+        <rect x="330" y="334" width="220" height="28" rx="4" fill="var(--paper)" stroke="var(--transit)"/>
+        <text x="440" y="352" text-anchor="middle" font-size="11" fill="var(--transit)">GENEVE &#183; UDP 6081</text>
+        <text x="440" y="380" text-anchor="middle" class="lbl">underlay f&#237;sico &#8212; os IPs p&#250;blicos nunca carregam o t&#250;nel</text>
+      </svg>
+    </div>
+    <figcaption>O modelo básico: dois bancos globais no topo, um <code>ovn-ic</code> por AZ, um transit switch compartilhado e o túnel GENEVE no underlay. Cada AZ mantém NB/SB/northd/controller próprios. A revisão atual do lab generaliza dois pontos disso &mdash; logo abaixo.</figcaption>
+  </figure>
+
+  <h3>Os componentes novos</h3>
+  <div class="tw"><table>
+    <thead><tr><th>Componente</th><th>Papel</th></tr></thead>
+    <tbody>
+      <tr><td><b>IC-NB</b> <code>6645</code></td><td>Banco <b>global</b> com a <em>intenção da federação</em>: quais <b>transit switches</b> existem, quais AZs participam. Tabelas: <code>Transit_Switch</code>, <code>Availability_Zone</code>.</td></tr>
+      <tr><td><b>IC-SB</b> <code>6646</code></td><td>Banco <b>global</b> com o <em>estado de runtime</em>: <code>Gateway</code> (chassis registrados por AZ), <code>Route</code> (rotas anunciadas/aprendidas), <code>Port_Binding</code>, <code>Encap</code>.</td></tr>
+      <tr><td><b><code>ovn-ic</code></b><br>1 por AZ</td><td>A ponte. Conecta <b>quatro</b> bancos ao mesmo tempo (IC-NB + IC-SB globais, NB + SB locais). Propaga o transit switch, registra o gateway da AZ, anuncia rotas locais e injeta as aprendidas.</td></tr>
+      <tr><td><b>Transit switch</b></td><td>Logical switch declarado <b>só</b> no IC-NB. O <code>ovn-ic</code> o materializa em cada NB local com a anotação <code>interconn-ts</code>. É o <em>backbone</em> L2 entre os routers das AZs.</td></tr>
+      <tr><td><b>Gateway chassis</b></td><td>Chassis que termina os túneis GENEVE vindos das outras AZs. Precisa de <code>ovn-is-interconn=true</code> no OVS <b>e</b> de <code>lrp-set-gateway-chassis</code> na LRP de trânsito.</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>O fluxo de federação, passo a passo</h3>
+  <ol class="steps">
+    <li><code>ovn-ic</code> lê <code>NB_Global.name</code> → descobre que esta AZ se chama <span class="chip az1">az1</span></li>
+    <li>registra <code>Availability_Zone</code> &ldquo;az1&rdquo; no IC-SB</li>
+    <li>vê chassis com <code>ovn-is-interconn=true</code> → cria a linha <code>Gateway</code> no IC-SB</li>
+    <li>lê <code>Transit_Switch</code> &ldquo;ts&rdquo; no IC-NB → <b>cria o LS &ldquo;ts&rdquo; no NB local</b></li>
+    <li>operador conecta <code>lr-az1</code> ao &ldquo;ts&rdquo; (<code>lsp-ts-az1</code> ↔ <code>lrp-az1-ts</code>)</li>
+    <li>vê <code>lrp-az1-ts</code> com gateway chassis → publica o <code>Port_Binding</code> no IC-SB</li>
+    <li><code>ic-route-adv</code>: publica <code>10.10.1.0/24</code> no IC-SB como rota de az1</li>
+    <li><code>ic-route-learn</code> da az2 lê essa rota → injeta em <code>lr-az2</code> como <code>(learned)</code></li>
+    <li class="hot"><code>ovn-controller</code> da az2 vê o Port_Binding remoto → <b>sobe o túnel GENEVE</b> para o encap-ip de az1</li>
+  </ol>
+
+  <div class="note">
+    <span class="tag">Resiliência</span>
+    <p>Se IC-NB/IC-SB caírem, <b>o tráfego intra-AZ continua</b> — e o inter-AZ também, enquanto nada mudar (as rotas já estão programadas no SB e no OpenFlow). O que para são as <b>mudanças de topologia</b>.</p>
+  </div>
+
+  <h3>O caminho de um pacote inter-AZ</h3>
+  <p><code>app-vm-1</code> <span class="chip az1">10.20.1.10 · AZ1 · NIC de gerência</span> → <code>db-vm</code> <span class="chip az2">10.20.2.10 · AZ2</span>, sobre o <code>ts-mgmt</code></p>
+  <ol class="steps">
+    <li>container escreve o pacote em <code>eth1</code>, a NIC de gerência (MTU 1442)</li>
+    <li>veth → <code>br-int</code> (AZ1); <code>ovn-controller</code> aplica o pipeline de <code>ls-mgmt-az1</code></li>
+    <li>destino não é local → sai pelo patch port para <code>lr-mgmt-az1</code></li>
+    <li><code>lr-mgmt-az1</code> consulta rotas: <code>10.20.2.0/24 via 169.254.200.2 (learned)</code></li>
+    <li>pacote entra no datapath do transit switch <code>ts-mgmt</code></li>
+    <li>o <code>Port_Binding</code> de <code>lsp-ts-mgmt-az2</code> aponta para <code>az2-chassis</code></li>
+    <li class="hot"><code>br-int</code> encapsula em <b>GENEVE</b> (UDP 6081): <code>172.18.3.175 → 172.18.33.126</code></li>
+    <li>underlay entrega; <code>br-int</code> da AZ2 desencapsula</li>
+    <li><code>lr-mgmt-az2</code> roteia para <code>ls-mgmt-az2</code> → <code>Port_Binding</code> local de <code>lsp-db-vm-mgmt</code></li>
+    <li>veth → <code>eth0</code> do <code>db-vm</code> (a única NIC dele)</li>
+  </ol>
+
+  <figure><div class="fw"><svg viewBox="0 0 920 306" style="min-width:860px" role="img" aria-label="Os dez saltos de um pacote de app-vm-1 na AZ1 até db-vm na AZ2, com o ponto exato em que o quadro é encapsulado em GENEVE">
+<defs><marker id="arC" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><polygon points="0 0, 7 3, 0 6" fill="var(--muted)"/></marker>
+<marker id="arCh" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><polygon points="0 0, 7 3, 0 6" fill="var(--transit)"/></marker></defs>
+<rect x="30" y="62" width="150" height="48" rx="5" fill="var(--az1-wash)" stroke="var(--az1)" stroke-width="1.4"/>
+<rect x="38" y="69" width="22" height="14" rx="3" fill="var(--az1)"/>
+<text x="49" y="79" text-anchor="middle" style="font-size:9px;font-weight:700" fill="var(--surface)">01</text>
+<text x="66" y="80" class="mono" style="font-size:11px">app-vm-1</text>
+<text x="40" y="98" class="lbl">10.10.1.10 · eth0</text>
+<text x="105" y="126" text-anchor="middle" class="elbl">MTU 1442 · default via 10.10.1.1</text>
+<rect x="208" y="62" width="150" height="48" rx="5" fill="var(--az1-wash)" stroke="var(--az1)" stroke-width="1.4"/>
+<rect x="216" y="69" width="22" height="14" rx="3" fill="var(--az1)"/>
+<text x="227" y="79" text-anchor="middle" style="font-size:9px;font-weight:700" fill="var(--surface)">02</text>
+<text x="244" y="80" class="mono" style="font-size:11px">br-int (AZ1)</text>
+<text x="218" y="98" class="lbl">veth → iface-id</text>
+<text x="283" y="126" text-anchor="middle" class="elbl">ovn-controller aplica o pipeline</text>
+<rect x="386" y="62" width="150" height="48" rx="5" fill="var(--az1-wash)" stroke="var(--az1)" stroke-width="1.4"/>
+<rect x="394" y="69" width="22" height="14" rx="3" fill="var(--az1)"/>
+<text x="405" y="79" text-anchor="middle" style="font-size:9px;font-weight:700" fill="var(--surface)">03</text>
+<text x="422" y="80" class="mono" style="font-size:11px">ls-az1</text>
+<text x="396" y="98" class="lbl">switch lógico</text>
+<text x="461" y="126" text-anchor="middle" class="elbl">destino não é local → sobe ao router</text>
+<rect x="564" y="62" width="150" height="48" rx="5" fill="var(--az1-wash)" stroke="var(--az1)" stroke-width="1.4"/>
+<rect x="572" y="69" width="22" height="14" rx="3" fill="var(--az1)"/>
+<text x="583" y="79" text-anchor="middle" style="font-size:9px;font-weight:700" fill="var(--surface)">04</text>
+<text x="600" y="80" class="mono" style="font-size:11px">lr-az1</text>
+<text x="574" y="98" class="lbl">router lógico</text>
+<text x="639" y="126" text-anchor="middle" class="elbl">10.10.2.0/24 via 169.254.100.2 (learned)</text>
+<rect x="742" y="62" width="150" height="48" rx="5" fill="var(--transit-wash)" stroke="var(--transit)" stroke-width="1.4"/>
+<rect x="750" y="69" width="22" height="14" rx="3" fill="var(--transit)"/>
+<text x="761" y="79" text-anchor="middle" style="font-size:9px;font-weight:700" fill="var(--surface)">05</text>
+<text x="778" y="80" class="mono" style="font-size:11px">ts</text>
+<text x="752" y="98" class="lbl">transit switch</text>
+<text x="817" y="126" text-anchor="middle" class="elbl">datapath compartilhado entre as AZs</text>
+<rect x="742" y="186" width="150" height="48" rx="5" fill="var(--transit-wash)" stroke="var(--transit)" stroke-width="1.4"/>
+<rect x="750" y="193" width="22" height="14" rx="3" fill="var(--transit)"/>
+<text x="761" y="203" text-anchor="middle" style="font-size:9px;font-weight:700" fill="var(--surface)">06</text>
+<text x="778" y="204" class="mono" style="font-size:11px">encapsula</text>
+<text x="752" y="222" class="lbl">GENEVE · +58 B</text>
+<text x="817" y="250" text-anchor="middle" class="elbl">Port_Binding de lsp-ts-az2 → az2-chassis</text>
+<rect x="564" y="186" width="150" height="48" rx="5" fill="var(--transit-wash)" stroke="var(--transit)" stroke-width="1.4"/>
+<rect x="572" y="193" width="22" height="14" rx="3" fill="var(--transit)"/>
+<text x="583" y="203" text-anchor="middle" style="font-size:9px;font-weight:700" fill="var(--surface)">07</text>
+<text x="600" y="204" class="mono" style="font-size:11px">underlay</text>
+<text x="574" y="222" class="lbl">172.18.3.175 → .33.126</text>
+<text x="639" y="250" text-anchor="middle" class="elbl">UDP 6081 · quadro de 1500 B</text>
+<rect x="386" y="186" width="150" height="48" rx="5" fill="var(--az2-wash)" stroke="var(--az2)" stroke-width="1.4"/>
+<rect x="394" y="193" width="22" height="14" rx="3" fill="var(--az2)"/>
+<text x="405" y="203" text-anchor="middle" style="font-size:9px;font-weight:700" fill="var(--surface)">08</text>
+<text x="422" y="204" class="mono" style="font-size:11px">br-int (AZ2)</text>
+<text x="396" y="222" class="lbl">desencapsula</text>
+<text x="461" y="250" text-anchor="middle" class="elbl">entrega ao datapath do ts</text>
+<rect x="208" y="186" width="150" height="48" rx="5" fill="var(--az2-wash)" stroke="var(--az2)" stroke-width="1.4"/>
+<rect x="216" y="193" width="22" height="14" rx="3" fill="var(--az2)"/>
+<text x="227" y="203" text-anchor="middle" style="font-size:9px;font-weight:700" fill="var(--surface)">09</text>
+<text x="244" y="204" class="mono" style="font-size:11px">lr-az2</text>
+<text x="218" y="222" class="lbl">router lógico</text>
+<text x="283" y="250" text-anchor="middle" class="elbl">roteia 10.10.2.10 para ls-az2</text>
+<rect x="30" y="186" width="150" height="48" rx="5" fill="var(--az2-wash)" stroke="var(--az2)" stroke-width="1.4"/>
+<rect x="38" y="193" width="22" height="14" rx="3" fill="var(--az2)"/>
+<text x="49" y="203" text-anchor="middle" style="font-size:9px;font-weight:700" fill="var(--surface)">10</text>
+<text x="66" y="204" class="mono" style="font-size:11px">db-vm</text>
+<text x="40" y="222" class="lbl">10.10.2.10:5432</text>
+<text x="105" y="250" text-anchor="middle" class="elbl">Port_Binding local → veth → eth0</text>
+<path d="M182 86 L204 86" class="edge" marker-end="url(#arC)"/>
+<path d="M360 86 L382 86" class="edge" marker-end="url(#arC)"/>
+<path d="M538 86 L560 86" class="edge" marker-end="url(#arC)"/>
+<path d="M716 86 L738 86" class="hot" marker-end="url(#arCh)"/>
+<path d="M892 86 C 914 86, 914 210, 896 210" class="hot" marker-end="url(#arCh)"/>
+<path d="M740 210 L718 210" class="hot" marker-end="url(#arCh)"/>
+<path d="M562 210 L540 210" class="edge" marker-end="url(#arC)"/>
+<path d="M384 210 L362 210" class="edge" marker-end="url(#arC)"/>
+<path d="M206 210 L184 210" class="edge" marker-end="url(#arC)"/>
+<path d="M736 172 L736 262" stroke="var(--transit)" stroke-width="1.2" stroke-dasharray="4 3" fill="none"/>
+<text x="730" y="168" text-anchor="end" class="tag" fill="var(--transit)">FRONTEIRA DO ENCAPSULAMENTO</text>
+<text x="30" y="286" class="elbl">Saltos 01–05 e 08–10 são pipeline lógico do OVN; só os saltos 06–07 existem como quadro no underlay físico.</text>
+</svg></div><figcaption>O pacote atravessa dez saltos, mas só dois deles saem do host. Repare que a decisão de encapsular vem do <code>Port_Binding</code> de <code>lsp-ts-az2</code> — é exatamente esse campo que o <b>gotcha #5</b> deixava vazio.</figcaption></figure>
+
+  <div class="note">
+    <span class="tag">A conta do MTU</span>
+    <p><b>Overhead GENEVE = 58 bytes</b> — IP externo (20) + UDP (8) + cabeçalho GENEVE (8) + opções (8) + Ethernet interna (14). Daí <code>1500 − 58 = <b>1442</b></code> de MTU no workload. E o maior payload de ping sem fragmentar é <code>1442 − 28 = <b>1414</b></code> (IP 20 + ICMP 8).</p>
+  </div>
+
+  <figure><div class="fw"><svg viewBox="0 0 900 250" style="min-width:820px" role="img" aria-label="Barra em escala do quadro de 1500 bytes no underlay, com os 58 bytes de encapsulamento GENEVE ampliados em uma segunda barra">
+<text x="30" y="20" class="tag">QUADRO NO UNDERLAY — 1500 BYTES, EM ESCALA</text>
+<rect x="30.0" y="30" width="32.5" height="34" rx="3" fill="var(--transit-wash)" stroke="var(--transit)" stroke-width="1.4"/>
+<rect x="62.5" y="30" width="807.5" height="34" rx="3" fill="var(--surface-2)" stroke="var(--line)"/>
+<text x="466.2" y="51" text-anchor="middle" class="mono">1442 bytes úteis — MTU do workload</text>
+<text x="46.2" y="80" text-anchor="middle" class="elbl" fill="var(--transit)">58 B</text>
+<path d="M30.0 64 L30.0 116 L870.0 116 L62.5 64 Z" fill="var(--transit-wash)" stroke="none" opacity="0.55"/>
+<path d="M30.0 64 L30.0 116" class="dash" stroke="var(--transit)"/>
+<path d="M62.5 64 L870.0 116" class="dash" stroke="var(--transit)"/>
+<text x="30" y="108" class="tag" fill="var(--transit)">OS 58 BYTES, AMPLIADOS</text>
+<rect x="30.0" y="118" width="289.7" height="40" rx="3" fill="var(--transit-wash)" stroke="var(--transit)" stroke-width="1.2"/>
+<text x="174.8" y="136" text-anchor="middle" class="mono" style="font-size:10px">IP externo</text>
+<text x="174.8" y="150" text-anchor="middle" class="elbl">20 B</text>
+<rect x="319.7" y="118" width="115.9" height="40" rx="3" fill="var(--transit-wash)" stroke="var(--transit)" stroke-width="1.2"/>
+<text x="377.6" y="136" text-anchor="middle" class="mono" style="font-size:10px">UDP</text>
+<text x="377.6" y="150" text-anchor="middle" class="elbl">8 B</text>
+<rect x="435.5" y="118" width="115.9" height="40" rx="3" fill="var(--transit-wash)" stroke="var(--transit)" stroke-width="1.2"/>
+<text x="493.4" y="136" text-anchor="middle" class="mono" style="font-size:10px">GENEVE</text>
+<text x="493.4" y="150" text-anchor="middle" class="elbl">8 B</text>
+<rect x="551.4" y="118" width="115.9" height="40" rx="3" fill="var(--transit-wash)" stroke="var(--transit)" stroke-width="1.2"/>
+<text x="609.3" y="136" text-anchor="middle" class="mono" style="font-size:10px">opções</text>
+<text x="609.3" y="150" text-anchor="middle" class="elbl">8 B</text>
+<rect x="667.2" y="118" width="202.8" height="40" rx="3" fill="var(--transit-wash)" stroke="var(--transit)" stroke-width="1.2"/>
+<text x="768.6" y="136" text-anchor="middle" class="mono" style="font-size:10px">Eth interna</text>
+<text x="768.6" y="150" text-anchor="middle" class="elbl">14 B</text>
+<path d="M30.0 166 L870.0 166" class="edge" stroke="var(--transit)"/>
+<path d="M30.0 162 L30.0 170 M870.0 162 L870.0 170" class="edge" stroke="var(--transit)"/>
+<text x="450.0" y="182" text-anchor="middle" class="lbl" fill="var(--transit)">20 + 8 + 8 + 8 + 14 = 58 bytes de encapsulamento</text>
+<rect x="30" y="196" width="405" height="42" rx="5" class="box"/>
+<text x="46" y="214" class="mono" style="font-size:11px">1500 − 58 = 1442</text>
+<text x="46" y="230" class="elbl">MTU que o netplan configura em cada container (mtu: 1442)</text>
+<rect x="465" y="196" width="405" height="42" rx="5" class="box"/>
+<text x="481" y="214" class="mono" style="font-size:11px">1442 − 20 (IP) − 8 (ICMP) = 1414</text>
+<text x="481" y="230" class="elbl">maior payload de ping -M do que ainda passa; 1500 falha</text>
+</svg></div><figcaption>A barra de cima está em escala: o overhead é pequeno, mas é o bastante para estourar 1500 e fazer o TCP full-size travar em silêncio. O Ethernet <em>externo</em> (14 B) não entra na conta — ele é o enquadramento da NIC física, não carga útil.</figcaption></figure>
+  <h3>2.5 Duas generalizações que o lab 2 usa</h3>
+  <p>O modelo acima descreve <b>um</b> transit switch e <b>um</b> banco IC. A revisão atual do <code>advanced-ovn-ic</code> generaliza os dois pontos.</p>
+  <div class="cols2">
+    <div><h4>N transit switches</h4><p>Nada no OVN-IC limita a federação a um transit switch. Cada <code>Transit_Switch</code> declarado no IC-NB vira um <b>datapath lógico independente</b>, propagado para o NB de cada AZ. Um router só aprende rotas do transit switch em que ele tem porta &mdash; é assim que dois <em>planes</em> ficam isolados usando o <b>mesmo</b> túnel GENEVE.</p></div>
+    <div><h4>IC-NB/IC-SB em cluster RAFT</h4><p>Um <code>ovsdb-server</code> pode rodar em cluster. Cada banco passa a usar <b>duas portas</b>: a de cliente e a de <b>peer RAFT</b>. O cluster serve leitura em qualquer membro e <b>redireciona escrita para o líder</b>, então os clientes listam todos os membros.</p></div>
+  </div>
+  <figure><div class="fw"><svg viewBox="0 0 920 392" style="min-width:860px" role="img" aria-label="Cluster RAFT de três membros dos bancos de interconexão, com as portas de cliente e de peer, e a comparação entre um cluster de dois e de três membros">
+<defs><marker id="arR" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><polygon points="0 0, 7 3, 0 6" fill="var(--muted)"/></marker></defs>
+<text x="20" y="18" class="tag">OS BANCOS IC COMO CLUSTER DE TRÊS MEMBROS</text>
+<rect x="150" y="28" width="180" height="30" rx="5" class="box" stroke="var(--transit)"/>
+<text x="240" y="48" text-anchor="middle" class="mono" style="font-size:10.5px">ovn-ic (az1)</text>
+<path d="M240 58 L240 84" class="edge" stroke="var(--transit)" marker-end="url(#arR)"/>
+<rect x="590" y="28" width="180" height="30" rx="5" class="box" stroke="var(--transit)"/>
+<text x="680" y="48" text-anchor="middle" class="mono" style="font-size:10.5px">ovn-ic (az2)</text>
+<path d="M680 58 L680 84" class="edge" stroke="var(--transit)" marker-end="url(#arR)"/>
+<rect x="40" y="86" width="840" height="26" rx="4" fill="var(--transit-wash)" stroke="var(--transit)"/>
+<text x="460" y="103" text-anchor="middle" class="mono" style="font-size:9.6px" fill="var(--transit)">porta de CLIENTE  6645 / 6646  —  cada ovn-ic lista os três membros</text>
+<path d="M150 112 L150 140" class="edge" stroke="var(--transit)" marker-end="url(#arR)"/>
+<rect x="40" y="142" width="220" height="70" rx="6" fill="var(--az1-wash)" stroke="var(--az1)" stroke-width="1.6"/>
+<text x="52" y="162" class="mono" style="font-size:12px" fill="var(--az1)">az1</text>
+<text x="52" y="178" class="elbl">bootstrap · create-cluster</text>
+<text x="52" y="191" class="elbl">chassis + workloads</text>
+<text x="52" y="205" class="elbl">ic-nb.db · ic-sb.db</text>
+<path d="M460 112 L460 140" class="edge" stroke="var(--transit)" marker-end="url(#arR)"/>
+<rect x="350" y="142" width="220" height="70" rx="6" fill="var(--az2-wash)" stroke="var(--az2)" stroke-width="1.6"/>
+<text x="362" y="162" class="mono" style="font-size:12px" fill="var(--az2)">az2</text>
+<text x="362" y="178" class="elbl">join-cluster</text>
+<text x="362" y="191" class="elbl">chassis + workloads</text>
+<text x="362" y="205" class="elbl">ic-nb.db · ic-sb.db</text>
+<path d="M770 112 L770 140" class="edge" stroke="var(--transit)" marker-end="url(#arR)"/>
+<rect x="660" y="142" width="220" height="70" rx="6" fill="var(--transit-wash)" stroke="var(--transit)" stroke-width="1.6"/>
+<text x="672" y="162" class="mono" style="font-size:12px" fill="var(--transit)">quorum</text>
+<text x="672" y="178" class="elbl">join-cluster</text>
+<text x="672" y="191" class="elbl">ÁRBITRO — só vota</text>
+<text x="672" y="205" class="elbl">ic-nb.db · ic-sb.db</text>
+<path d="M260 177 L348 177" class="hot"/>
+<path d="M570 177 L658 177" class="hot"/>
+<path d="M150 214 C 150 250, 770 250, 770 214" class="hot"/>
+<text x="304" y="171" text-anchor="middle" class="elbl" fill="var(--transit)">RAFT 6647/6648</text>
+<text x="614" y="171" text-anchor="middle" class="elbl" fill="var(--transit)">RAFT 6647/6648</text>
+<text x="460" y="268" text-anchor="middle" class="elbl" fill="var(--transit)">a porta de peer é gravada DENTRO do .db por create-cluster / join-cluster, nunca no ExecStart</text>
+<text x="20" y="282" class="tag">POR QUE TRÊS E NÃO DOIS</text>
+<rect x="20" y="292" width="430" height="66" rx="6" fill="var(--warn-wash)" stroke="var(--warn)" stroke-width="1.4"/>
+<text x="34" y="312" class="mono" style="font-size:11px" fill="var(--warn)">2 membros</text>
+<text x="436" y="312" text-anchor="end" class="mono" style="font-size:10px">maioria = 2</text>
+<text x="34" y="332" class="elbl">perder 1 → o banco CONGELA — nada melhor que um nó só</text>
+<circle cx="42" cy="346" r="6" fill="var(--surface)" stroke="var(--warn)"/>
+<circle cx="62" cy="346" r="6" fill="var(--surface)" stroke="var(--warn)"/>
+<line x1="36" y1="340" x2="48" y2="352" stroke="var(--warn)" stroke-width="1.6"/>
+<rect x="470" y="292" width="430" height="66" rx="6" fill="var(--az1-wash)" stroke="var(--az1)" stroke-width="1.4"/>
+<text x="484" y="312" class="mono" style="font-size:11px" fill="var(--az1)">3 membros</text>
+<text x="886" y="312" text-anchor="end" class="mono" style="font-size:10px">maioria = 2</text>
+<text x="484" y="332" class="elbl">perder 1 → os outros 2 ainda são maioria: SEGUE COMMITANDO</text>
+<circle cx="492" cy="346" r="6" fill="var(--surface)" stroke="var(--az1)"/>
+<circle cx="512" cy="346" r="6" fill="var(--surface)" stroke="var(--az1)"/>
+<circle cx="532" cy="346" r="6" fill="var(--surface)" stroke="var(--az1)"/>
+<line x1="486" y1="340" x2="498" y2="352" stroke="var(--warn)" stroke-width="1.6"/>
+<text x="20" y="380" class="elbl">RAFT exige maioria estrita para eleger líder e confirmar escrita. O árbitro existe só para ser o terceiro voto — sem chassis, sem br-int, sem GENEVE.</text>
+</svg></div><figcaption>O árbitro não é uma AZ: ele não tem chassis nem workloads, e recebe apenas <code>openvswitch-common</code> (não <code>openvswitch-switch</code>) para que não possa virar um nó de datapath por acidente.</figcaption></figure>
+</section>
+<section id="lab1">
+  <h2><span class="n">03</span><span>Lab 1 &mdash; <code>pratice-ovn-ic</code> (CLO-77)</span></h2>
+  <p class="lede"><b>Pergunta que ele responde:</b> &ldquo;OVN-IC funciona de verdade entre duas instalações OVN independentes?&rdquo; — provado com <b>ICMP</b>.</p>
+
+  <h3>As duas fases</h3>
+  <div class="tw"><table>
+    <thead><tr><th>Fase</th><th>Como</th><th>Por que foi abandonada / mantida</th></tr></thead>
+    <tbody>
+      <tr><td><b>Fase 1</b><br>VM única</td><td>Duas AZs simuladas só com <em>network namespaces</em>; cada namespace com seu <code>ovs-vswitchd</code> + <code>ovn-controller</code>.</td><td>Validou a topologia lógica de graça, mas <b>mascara o datapath</b>: o túnel GENEVE se resolve dentro do mesmo kernel, não há firewall entre chassis, MTU/encap não são exercitados e bugs de sincronização entre instâncias separadas de <code>ovn-controller</code> ficam escondidos.</td></tr>
+      <tr><td><b>Fase 2</b><br>duas VMs</td><td>Ubuntu 24.04. <span class="chip az1">AZ1 172.18.3.181</span> <span class="chip az2">AZ2 172.18.17.9</span>. IC-NB/IC-SB na VM1, acessados por TCP da VM2.</td><td>Arquitetura equivalente à de produção. É esta que os scripts implementam.</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Topologia lógica</h3>
+  <figure><div class="fw"><svg viewBox="0 0 920 440" style="min-width:880px" role="img" aria-label="Topologia do lab 1: bancos IC globais no topo, plano lógico com dois routers ligados por um transit switch, e plano físico com namespaces ligados ao br-int de cada VM por pares veth">
+<defs><marker id="arE" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><polygon points="0 0, 7 3, 0 6" fill="var(--muted)"/></marker></defs>
+<rect x="350" y="16" width="220" height="42" rx="5" fill="var(--transit-wash)" stroke="var(--transit)" stroke-width="1.5"/>
+<text x="460" y="34" text-anchor="middle" class="mono" style="font-size:11px" fill="var(--transit)">IC-NB :6645 · IC-SB :6646</text>
+<text x="460" y="49" text-anchor="middle" class="elbl">bancos globais — rodam na VM1</text>
+<path d="M350 42 C 240 42, 200 58, 185 78" class="dash" stroke="var(--transit)" marker-end="url(#arE)"/>
+<path d="M570 42 C 680 42, 720 58, 735 78" class="dash" stroke="var(--transit)" marker-end="url(#arE)"/>
+<text x="318" y="62" text-anchor="middle" class="elbl" fill="var(--transit)">ovn-ic (az1)</text>
+<text x="700" y="62" text-anchor="middle" class="elbl" fill="var(--transit)">ovn-ic (az2) — disca 172.18.3.181</text>
+<text x="20" y="76" class="tag">PLANO LÓGICO — NB DE CADA AZ (127.0.0.1:6641)</text>
+<rect x="30" y="86" width="310" height="76" rx="6" fill="var(--surface)" stroke="var(--az1)" stroke-width="1.5"/>
+<text x="42" y="104" class="mono" style="font-size:11px" fill="var(--az1)">lr-az1</text>
+<text x="328" y="104" text-anchor="end" class="elbl">gateway chassis: az1-chassis</text>
+<rect x="40" y="112" width="142" height="38" rx="4" fill="var(--az1-wash)" stroke="var(--az1)" stroke-width="1"/>
+<text x="49" y="127" class="mono" style="font-size:9.5px">lrp-az1-ls</text>
+<text x="49" y="141" class="elbl">10.0.1.1/24</text>
+<rect x="192" y="112" width="142" height="38" rx="4" fill="var(--az1-wash)" stroke="var(--az1)" stroke-width="1"/>
+<text x="201" y="127" class="mono" style="font-size:9.5px">lrp-az1-ts</text>
+<text x="201" y="141" class="elbl">169.254.100.1</text>
+<rect x="30" y="190" width="310" height="76" rx="6" fill="var(--surface)" stroke="var(--az1)" stroke-width="1.5"/>
+<text x="42" y="208" class="mono" style="font-size:11px" fill="var(--az1)">ls-az1</text>
+<text x="328" y="208" text-anchor="end" class="elbl">10.0.1.0/24</text>
+<rect x="39" y="216" width="94" height="38" rx="4" fill="var(--surface-2)" stroke="var(--line)"/>
+<text x="46" y="231" class="mono" style="font-size:8.6px">lsp-vm1-az1</text>
+<text x="46" y="245" class="elbl">10.0.1.10</text>
+<rect x="139" y="216" width="94" height="38" rx="4" fill="var(--surface-2)" stroke="var(--line)"/>
+<text x="146" y="231" class="mono" style="font-size:8.6px">lsp-vm2-az1</text>
+<text x="146" y="245" class="elbl">10.0.1.20</text>
+<rect x="239" y="216" width="94" height="38" rx="4" fill="var(--surface-2)" stroke="var(--line)"/>
+<text x="246" y="231" class="mono" style="font-size:8.6px">lsp-az1-router</text>
+<text x="246" y="245" class="elbl">type: router</text>
+<path d="M286 216 L286 164" class="edge" marker-end="url(#arE)"/>
+<text x="332" y="182" text-anchor="middle" class="elbl">router-port</text>
+<rect x="580" y="86" width="310" height="76" rx="6" fill="var(--surface)" stroke="var(--az2)" stroke-width="1.5"/>
+<text x="592" y="104" class="mono" style="font-size:11px" fill="var(--az2)">lr-az2</text>
+<text x="878" y="104" text-anchor="end" class="elbl">gateway chassis: az2-chassis</text>
+<rect x="590" y="112" width="142" height="38" rx="4" fill="var(--az2-wash)" stroke="var(--az2)" stroke-width="1"/>
+<text x="599" y="127" class="mono" style="font-size:9.5px">lrp-az2-ls</text>
+<text x="599" y="141" class="elbl">10.0.2.1/24</text>
+<rect x="742" y="112" width="142" height="38" rx="4" fill="var(--az2-wash)" stroke="var(--az2)" stroke-width="1"/>
+<text x="751" y="127" class="mono" style="font-size:9.5px">lrp-az2-ts</text>
+<text x="751" y="141" class="elbl">169.254.100.2</text>
+<rect x="580" y="190" width="310" height="76" rx="6" fill="var(--surface)" stroke="var(--az2)" stroke-width="1.5"/>
+<text x="592" y="208" class="mono" style="font-size:11px" fill="var(--az2)">ls-az2</text>
+<text x="878" y="208" text-anchor="end" class="elbl">10.0.2.0/24</text>
+<rect x="589" y="216" width="94" height="38" rx="4" fill="var(--surface-2)" stroke="var(--line)"/>
+<text x="596" y="231" class="mono" style="font-size:8.6px">lsp-vm1-az2</text>
+<text x="596" y="245" class="elbl">10.0.2.10</text>
+<rect x="689" y="216" width="94" height="38" rx="4" fill="var(--surface-2)" stroke="var(--line)"/>
+<text x="696" y="231" class="mono" style="font-size:8.6px">lsp-vm2-az2</text>
+<text x="696" y="245" class="elbl">10.0.2.20</text>
+<rect x="789" y="216" width="94" height="38" rx="4" fill="var(--surface-2)" stroke="var(--line)"/>
+<text x="796" y="231" class="mono" style="font-size:8.6px">lsp-az2-router</text>
+<text x="796" y="245" class="elbl">type: router</text>
+<path d="M836 216 L836 164" class="edge" marker-end="url(#arE)"/>
+<text x="790" y="182" text-anchor="middle" class="elbl">router-port</text>
+<rect x="396" y="104" width="128" height="52" rx="6" fill="var(--transit-wash)" stroke="var(--transit)" stroke-width="1.8"/>
+<text x="460" y="124" text-anchor="middle" class="mono" style="font-size:12px" fill="var(--transit)">ts</text>
+<text x="460" y="139" text-anchor="middle" class="elbl">transit switch</text>
+<text x="460" y="151" text-anchor="middle" class="elbl">criado no IC-NB</text>
+<path d="M340 130 L394 130" class="hot"/>
+<path d="M526 130 L578 130" class="hot"/>
+<text x="367" y="124" text-anchor="middle" class="elbl" fill="var(--transit)">lsp-ts-az1</text>
+<text x="552" y="124" text-anchor="middle" class="elbl" fill="var(--transit)">lsp-ts-az2</text>
+<text x="20" y="288" class="tag">PLANO FÍSICO — DUAS VMs UBUNTU 24.04</text>
+<rect x="20" y="296" width="330" height="132" rx="6" fill="var(--az1-wash)" stroke="var(--az1)" stroke-width="1.2" stroke-dasharray="5 4"/>
+<text x="32" y="313" class="tag" fill="var(--az1)">VM1  ·  172.18.3.181</text>
+<rect x="30" y="320" width="310" height="28" rx="4" fill="var(--surface)" stroke="var(--line)"/>
+<text x="40" y="338" class="mono" style="font-size:10px">br-int</text>
+<text x="330" y="338" text-anchor="end" class="elbl">ovn-encap-ip · ovn-is-interconn=true</text>
+<rect x="30" y="378" width="148" height="42" rx="4" fill="var(--surface)" stroke="var(--line)"/>
+<text x="39" y="393" class="mono" style="font-size:9.5px">vm1-az1</text>
+<text x="39" y="406" class="elbl">netns · 10.0.1.10</text>
+<text x="39" y="416" class="elbl">veth-vm1-az1</text>
+<path d="M104 348 L104 376" class="edge" marker-end="url(#arE)"/>
+<rect x="192" y="378" width="148" height="42" rx="4" fill="var(--surface)" stroke="var(--line)"/>
+<text x="201" y="393" class="mono" style="font-size:9.5px">vm2-az1</text>
+<text x="201" y="406" class="elbl">netns · 10.0.1.20</text>
+<text x="201" y="416" class="elbl">veth-vm2-az1</text>
+<path d="M266 348 L266 376" class="edge" marker-end="url(#arE)"/>
+<path d="M86 256 L86 318" class="dash"/>
+<path d="M186 256 L186 318" class="dash"/>
+<rect x="570" y="296" width="330" height="132" rx="6" fill="var(--az2-wash)" stroke="var(--az2)" stroke-width="1.2" stroke-dasharray="5 4"/>
+<text x="582" y="313" class="tag" fill="var(--az2)">VM2  ·  172.18.17.9</text>
+<rect x="580" y="320" width="310" height="28" rx="4" fill="var(--surface)" stroke="var(--line)"/>
+<text x="590" y="338" class="mono" style="font-size:10px">br-int</text>
+<text x="880" y="338" text-anchor="end" class="elbl">ovn-encap-ip · ovn-is-interconn=true</text>
+<rect x="580" y="378" width="148" height="42" rx="4" fill="var(--surface)" stroke="var(--line)"/>
+<text x="589" y="393" class="mono" style="font-size:9.5px">vm1-az2</text>
+<text x="589" y="406" class="elbl">netns · 10.0.2.10</text>
+<text x="589" y="416" class="elbl">veth-vm1-az2</text>
+<path d="M654 348 L654 376" class="edge" marker-end="url(#arE)"/>
+<rect x="742" y="378" width="148" height="42" rx="4" fill="var(--surface)" stroke="var(--line)"/>
+<text x="751" y="393" class="mono" style="font-size:9.5px">vm2-az2</text>
+<text x="751" y="406" class="elbl">netns · 10.0.2.20</text>
+<text x="751" y="416" class="elbl">veth-vm2-az2</text>
+<path d="M816 348 L816 376" class="edge" marker-end="url(#arE)"/>
+<path d="M636 256 L636 318" class="dash"/>
+<path d="M736 256 L736 318" class="dash"/>
+<text x="460" y="278" text-anchor="middle" class="elbl">external_ids:iface-id  ⇒  Port_Binding.chassis   (o que liga a porta lógica à interface real)</text>
+<path d="M340 334 L578 334" class="hot"/>
+<rect x="378" y="320" width="164" height="28" rx="4" fill="var(--paper)" stroke="var(--transit)"/>
+<text x="460" y="338" text-anchor="middle" class="mono" style="font-size:9.5px" fill="var(--transit)">GENEVE · UDP 6081</text>
+</svg></div><figcaption>As duas bandas são o mesmo lab visto de dois ângulos: em cima o que existe no NB de cada AZ, embaixo o que existe nas VMs. As linhas tracejadas são o <code>iface-id</code> — o único ponto onde os dois mundos se encontram.</figcaption></figure>
+
+  <h3>Endereçamento</h3>
+  <div class="tw"><table>
+    <thead><tr><th>Plano</th><th>AZ1</th><th>AZ2</th><th>Compartilhado</th></tr></thead>
+    <tbody>
+      <tr><td>Underlay (VM)</td><td><code>172.18.3.181</code></td><td><code>172.18.17.9</code></td><td>GENEVE UDP 6081</td></tr>
+      <tr><td>Subrede lógica</td><td><code>10.0.1.0/24</code> (gw .1)</td><td><code>10.0.2.0/24</code> (gw .1)</td><td><code>ts</code> → <code>169.254.100.0/24</code></td></tr>
+      <tr><td>Workloads</td><td><code>.10</code> e <code>.20</code></td><td><code>.10</code> e <code>.20</code></td><td>LRP-ts: az1 <code>.1</code> / az2 <code>.2</code></td></tr>
+      <tr><td>MACs</td><td><code>00:00:00:01:xx:xx</code></td><td><code>00:00:00:02:xx:xx</code></td><td>—</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3><code>setup-az1.sh</code> — anatomia (322 linhas)</h3>
+  <p>O script é <b>idempotente por força bruta</b>: limpa tudo antes de recriar.</p>
+
+  <h4>Bloco 1 — CLEANUP <span class="lbl">(linhas 11-57)</span></h4>
+  <p>Em ordem, e <b>a ordem importa</b>:</p>
+  <ol>
+    <li>Mata <code>ovn-ic</code> pelo pidfile do <em>rundir</em> padrão do build de fonte (<code>/usr/local/var/run/ovn/</code>).</li>
+    <li>Mata processos pelos pidfiles do lab (<code>$AZ1_DIR/*.pid</code>, <code>$IC_DIR/*.pid</code>).</li>
+    <li><code>pkill</code> por nome: <code>ovn-northd</code>, <code>ovn-controller</code>, os quatro <code>ovsdb-server</code>, <code>ovn-ic</code>.</li>
+    <li><code>fuser -k</code> nas portas 6641/6642/6645/6646 — garante que nada segurou o socket.</li>
+    <li><b>Remove as portas do OVS ANTES de destruir os namespaces.</b> Apagar o namespace primeiro faz a veth sumir e deixa o OVS com uma porta órfã.</li>
+    <li><code>ip netns del</code> (destrói o par veth junto) e depois <code>ip link del</code> para sobras.</li>
+    <li><code>rm -rf</code> dos diretórios do lab.</li>
+  </ol>
+
+  <h4>Bloco 2 — DEPENDÊNCIAS <span class="lbl">(59-74)</span></h4>
+  <p>Instala <code>openvswitch-switch</code>, <code>ovn-central</code>, <code>ovn-host</code> e a toolchain de compilação. Depois <b>para e desabilita</b> as units do apt (<code>ovn-central</code>, <code>ovn-host</code>, <code>ovn-ovsdb-server-nb/sb</code>) — elas disputariam as mesmas portas e sockets com os daemons que o script sobe à mão. Só o <code>openvswitch-switch</code> fica ativo.</p>
+
+  <h4>Bloco 3 — COMPILAÇÃO <span class="lbl">(76-116)</span></h4>
+<pre><code>git clone --depth=1 --branch v3.3.0 https://github.com/openvswitch/ovs.git
+./boot.sh &amp;&amp; ./configure &amp;&amp; make -j$(nproc)
+
+git clone --depth=1 --branch v24.03.6 https://github.com/ovn-org/ovn.git
+./boot.sh &amp;&amp; ./configure --with-ovs-source=../ovs --with-ovs-build=../ovs &amp;&amp; make -j$(nproc)</code></pre>
+  <div class="cols2">
+    <div><h4>Por que compilar</h4><p>O pacote <code>ovn-central</code> do Ubuntu 24.04 <b>não entrega</b> o binário <code>ovn-ic</code> nem os schemas <code>ovn-ic-nb.ovsschema</code> / <code>ovn-ic-sb.ovsschema</code>.</p></div>
+    <div><h4>Por que OVS v3.3.0</h4><p>A branch <code>main</code> do OVS renomeou <code>obs_domain_id</code> → <code>obs_domain_imm</code>, o que <b>quebra o build</b> do OVN 24.03.</p></div>
+  </div>
+  <p>Depois localiza os artefatos com <code>find</code> e copia <code>ovn-ic</code>, <code>ovn-ic-nbctl</code>, <code>ovn-ic-sbctl</code> para <code>/usr/local/bin</code>. Aborta se não achar binário ou schema.</p>
+
+  <h4>Bloco 4 — BANCOS <span class="lbl">(122-158)</span></h4>
+  <p>Quatro <code>ovsdb-server</code> independentes, cada um com seu <code>.db</code>, <code>.ctl</code>, <code>.pid</code> e <code>.log</code>:</p>
+  <div class="tw"><table>
+    <thead><tr><th>Banco</th><th>Schema</th><th><code>--remote</code></th><th>Observação</th></tr></thead>
+    <tbody>
+      <tr><td>IC-NB</td><td><code>ovn-ic-nb.ovsschema</code> (build)</td><td><code>ptcp:6645</code></td><td><b>sem restrição de IP</b> → az2 alcança</td></tr>
+      <tr><td>IC-SB</td><td><code>ovn-ic-sb.ovsschema</code> (build)</td><td><code>ptcp:6646</code></td><td>idem</td></tr>
+      <tr><td>NB az1</td><td><code>/usr/share/ovn/ovn-nb.ovsschema</code> (apt)</td><td><code>ptcp:6641:127.0.0.1</code></td><td><b>privado da AZ</b></td></tr>
+      <tr><td>SB az1</td><td><code>/usr/share/ovn/ovn-sb.ovsschema</code> (apt)</td><td><code>ptcp:6642:127.0.0.1</code></td><td><b>privado da AZ</b></td></tr>
+    </tbody>
+  </table></div>
+  <p>Repare no contraste: <b>os bancos locais são localhost-only; os IC são expostos.</b> É exatamente isso que faz a AZ ser autônoma.</p>
+
+  <h4>Bloco 5 — <code>ovn-northd</code> + chassis + <code>ovn-controller</code> <span class="lbl">(160-186)</span></h4>
+  <p><code>ovn-northd</code> apontando para <code>tcp:127.0.0.1:6641</code> e <code>:6642</code>. Depois o <code>ovs-vsctl set open_vswitch .</code> com <code>system-id=az1-chassis</code>, <code>ovn-encap-ip=172.18.3.181</code> e <code>ovn-is-interconn=true</code>. Então <code>ovn-controller --detach</code>, que descobre tudo pelo OVS local.</p>
+
+  <h4>Bloco 6 — IDENTIDADE DA AZ <span class="lbl">(188-195)</span> &middot; <b>gotchas #1 e #4</b></h4>
+<pre><code>ovn-nbctl set NB_Global . name=az1 options:ic-route-adv=true options:ic-route-learn=true</code></pre>
+
+  <h4>Bloco 7 — <code>ovn-ic</code> <span class="lbl">(197-206)</span></h4>
+  <p>Quatro conexões ao mesmo tempo: <code>--ic-nb-db</code>, <code>--ic-sb-db</code> (globais, aqui em localhost porque az1 é o host dos bancos IC) e <code>--ovnnb-db</code>, <code>--ovnsb-db</code> (locais).</p>
+
+  <h4>Bloco 8 — TOPOLOGIA <span class="lbl">(210-261)</span></h4>
+  <ol class="steps">
+    <li><code>ls-add ls-az1</code> + dois LSPs com <code>lsp-set-addresses</code> e <code>lsp-set-port-security</code></li>
+    <li><code>lr-add lr-az1</code> + <code>lrp-add lrp-az1-ls 00:00:00:01:ff:01 10.0.1.1/24</code> (o gateway)</li>
+    <li>porta de patch <code>lsp-az1-router</code>: type <code>router</code>, addresses <code>router</code>, <code>options:router-port=lrp-az1-ls</code></li>
+    <li><b><code>lrp-add lrp-az1-ts … 169.254.100.1/24</code> antes do <code>ts-add</code></b> — a LRP precisa existir para o <code>ovn-ic</code> conseguir linkar <code>lsp-ts-az1</code></li>
+    <li class="hot"><code>lrp-set-gateway-chassis lrp-az1-ts az1-chassis 1</code> &mdash; <b>gotcha #5</b></li>
+    <li><code>ovn-ic-nbctl ts-add ts</code> → cria o transit switch <b>no IC-NB</b>, nunca no NB local</li>
+    <li><b>loop de espera</b> (30 × 2s) até <code>ts</code> aparecer no <code>ls-list</code> local; se não aparecer em 60s, aborta e manda olhar o <code>ovn-ic.log</code></li>
+    <li><code>lsp-add ts lsp-ts-az1</code> + type/addresses/<code>router-port=lrp-az1-ts</code></li>
+  </ol>
+
+  <h4>Bloco 9 — RESTART do <code>ovn-ic</code> <span class="lbl">(263-277)</span> &middot; <b>gotcha #3</b></h4>
+  <p>Mata e sobe de novo o <code>ovn-ic</code>, para ele reler a topologia completa de um estado limpo.</p>
+
+  <h4>Bloco 10 — NAMESPACES <span class="lbl">(279-303)</span></h4>
+<pre><code>ip netns add vm1-az1
+ip link add veth-vm1-az1 type veth peer name veth-vm1-az1-ns
+ip link set veth-vm1-az1-ns netns vm1-az1
+ip netns exec vm1-az1 ip link set veth-vm1-az1-ns address 00:00:00:01:00:01  <span class="cmt"># MAC = o do LSP</span>
+ip netns exec vm1-az1 ip addr add 10.0.1.10/24 dev veth-vm1-az1-ns
+ip netns exec vm1-az1 ip route add default via 10.0.1.1                      <span class="cmt"># gw = a LRP</span>
+ovs-vsctl add-port br-int veth-vm1-az1 \
+  -- set interface veth-vm1-az1 external_ids:iface-id=lsp-vm1-az1            <span class="cmt"># o binding</span></code></pre>
+  <p>O <b>MAC tem que bater</b> com o <code>lsp-set-addresses</code>, senão o <em>port security</em> derruba o tráfego.</p>
+
+  <h4>Bloco 11 — FIREWALL <span class="lbl">(305-308)</span></h4>
+  <p><code>ufw allow from 172.18.17.9</code> para <b>6645/tcp</b> (IC-NB), <b>6646/tcp</b> (IC-SB) e <b>6081/udp</b> (GENEVE).</p>
+
+  <h4>Bloco 12 — VERIFICAÇÃO <span class="lbl">(310-322)</span></h4>
+  <p>Dorme 15s e imprime <code>ovn-ic-nbctl show</code>, <code>ovn-ic-sbctl list Gateway</code> e <code>ovs-vsctl show</code>.</p>
+
+  <h3><code>setup-az2.sh</code> — o que muda</h3>
+  <div class="tw"><table>
+    <thead><tr><th>Aspecto</th><th>az1</th><th>az2</th></tr></thead>
+    <tbody>
+      <tr><td>Bancos IC</td><td><b>cria e hospeda</b> IC-NB/IC-SB</td><td><b>não cria</b>; disca <code>tcp:172.18.3.181:6645/6646</code></td></tr>
+      <tr><td>Portas no cleanup</td><td>6641, 6642, 6645, 6646</td><td>só 6641, 6642</td></tr>
+      <tr><td><code>ts-add</code></td><td><b>sim</b> (cria o transit switch)</td><td><b>não</b> (o <code>ts</code> já existe globalmente)</td></tr>
+      <tr><td>Ordem <code>ovn-ic</code> × topologia</td><td>sobe <code>ovn-ic</code> → topologia → <code>ts-add</code> → espera → conecta → <b>restart</b></td><td>topologia (incl. <code>lrp-az2-ts</code> + gw chassis) → <b>depois</b> sobe <code>ovn-ic</code> → espera <code>ts</code> → conecta → <b>restart</b></td></tr>
+      <tr><td>Firewall</td><td>6645, 6646 e 6081</td><td>só 6081</td></tr>
+      <tr><td><code>NB_Global.name</code></td><td><code>az1</code></td><td><code>az2</code></td></tr>
+    </tbody>
+  </table></div>
+  <p><b>A razão da ordem diferente:</b> em az2 a LRP de trânsito já pode existir <em>antes</em> do <code>ovn-ic</code> subir, o que elimina metade da corrida do gotcha #3. O restart no fim cobre o resto.</p>
+
+  <h3><code>verify.sh</code></h3>
+  <p>Detecta em qual AZ está (<code>ip netns list | grep vm1-az1</code>) e imprime, sempre apontando os bancos IC para <code>172.18.3.181</code>: <code>ovn-ic-nbctl show</code>, <code>ovn-ic-sbctl list Gateway</code>, <code>list Route</code>, <code>lr-list</code>, <code>lr-route-list</code> (onde aparecem as rotas <code>(learned)</code>), <code>ovs-vsctl show | grep -A3 geneve</code>, os <code>Port_Binding</code>, e por fim 1 ping intra-AZ e 2 inter-AZ com <code>-c3 -W2</code>.</p>
+
+  <h3>Resultado</h3>
+  <ul>
+    <li>Gateways <code>az1-chassis</code> e <code>az2-chassis</code> registrados no IC-SB.</li>
+    <li>Túneis GENEVE estabelecidos entre as duas VMs.</li>
+    <li><code>10.0.1.0/24</code> e <code>10.0.2.0/24</code> aparecem como <b><code>(learned)</code></b> na AZ oposta.</li>
+    <li>Pings intra-AZ e inter-AZ (5 pares testados) com <b>0% de perda</b>.</li>
+  </ul>
+</section>
+<section id="lab2">
+  <h2><span class="n">04</span><span>Lab 2 &mdash; <code>advanced-ovn-ic</code> (CLO-73), revisão dual-plane</span></h2>
+  <p class="lede"><b>Pergunta que ele responde:</b> &ldquo;workloads em nuvens Incus diferentes, federadas por OVN-IC, rodando uma carga útil de verdade&rdquo; &mdash; provado com uma <b>aplicação de três camadas partida entre as AZs</b>, de modo que <em>usar o sistema já é o teste da interconexão</em>. Implementa a especificação desenhada em <code>advanced-ovn-ic.pdf</code>.</p>
+  <h3>As três propriedades estruturais</h3>
+  <div class="cols2">
+    <div><h4>1 &middot; Dois planes isolados</h4><p>Um <em>client</em> (tenant) e um <em>mgmt</em> (operador), cada um federado pelo <b>seu próprio</b> transit switch, sobre um único fabric GENEVE. O banco vive só no mgmt e é <b>inalcançável</b> do tenant por construção.</p></div>
+    <div><h4>2 &middot; Um edge por célula</h4><p>Os dois plane routers entregam o norte-sul a <b>um</b> router de gateway por AZ, que faz SNAT de cada plane para um endereço externo próprio.</p></div>
+    <div><h4>3 &middot; Interconexão em HA</h4><p>IC-NB/IC-SB como <b>cluster RAFT de 3 membros</b>, então nenhuma VM sozinha derruba os bancos compartilhados da federação.</p></div>
+  </div>
+
+  <h3>Três VMs, duas delas AZs</h3>
+  <div class="tw"><table>
+    <thead><tr><th>VM</th><th>Papel</th><th>O que roda</th></tr></thead>
+    <tbody>
+      <tr><td><span class="chip az1">az1</span><br><code>172.18.3.175</code></td><td>célula completa</td><td>Incus, NB/SB/northd/<code>ovn-controller</code>, <code>ovn-ic</code>, chassis, edge, <b>membro RAFT + bootstrap</b></td></tr>
+      <tr><td><span class="chip az2">az2</span><br><code>172.18.33.126</code></td><td>célula completa</td><td>idem, <b>membro RAFT</b></td></tr>
+      <tr><td><span class="chip ts">quorum</span><br><code>172.18.3.240</code></td><td><b>árbitro</b></td><td><b>só</b> o terceiro membro do cluster RAFT. Sem chassis, sem <code>br-int</code>, sem GENEVE, sem workloads, sem NB/SB local.</td></tr>
+    </tbody>
+  </table></div>
+  <div class="note"><span class="tag">Dois grupos que se sobrepõem</span><p><code>[azs]</code> = az1, az2 &mdash; as AZs reais, com chassis, workloads e GENEVE. <code>[ic_cluster]</code> = az1, az2, quorum &mdash; os três nós do cluster RAFT. É por isso que o árbitro nunca recebe nenhuma task de chassis ou de topologia.</p></div>
+
+  <h3>Os dois planes</h3>
+  <p class="lede">Esta é a diferença central em relação à revisão anterior, e o motivo de quase tudo o mais ter mudado.</p>
+  <figure><div class="fw"><svg viewBox="0 0 940 560" style="min-width:900px" role="img" aria-label="Os dois planes do lab: client e management, cada um com switch, router e transit switch próprios, ligados pelo mesmo túnel GENEVE; o banco de dados aparece só no plane de gerência">
+<defs><marker id="arP" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><polygon points="0 0, 7 3, 0 6" fill="var(--muted)"/></marker></defs>
+<rect x="250" y="8" width="440" height="34" rx="5" fill="var(--transit-wash)" stroke="var(--transit)" stroke-width="1.4"/>
+<text x="470" y="30" text-anchor="middle" class="mono" style="font-size:10px" fill="var(--transit)">IC-NB :6645 · IC-SB :6646  —  cluster RAFT: az1 + az2 + quorum</text>
+<path d="M250 26 C 160 26, 130 34, 118 52" class="dash" stroke="var(--transit)" marker-end="url(#arP)"/>
+<path d="M690 26 C 780 26, 810 34, 822 52" class="dash" stroke="var(--transit)" marker-end="url(#arP)"/>
+<text x="168" y="46" text-anchor="middle" class="elbl" fill="var(--transit)">ovn-ic</text>
+<text x="772" y="46" text-anchor="middle" class="elbl" fill="var(--transit)">ovn-ic</text>
+<rect x="10" y="54" width="430" height="436" rx="7" fill="var(--az1-wash)" stroke="var(--az1)" stroke-width="1.3" stroke-dasharray="6 4"/>
+<text x="20" y="74" class="tag" fill="var(--az1)">CÉLULA az1  ·  172.18.3.175</text>
+<rect x="20" y="82" width="410" height="176" rx="6" fill="var(--surface)" stroke="var(--az1)" stroke-width="1.5"/>
+<text x="30" y="100" class="tag" fill="var(--az1)">CLIENT PLANE · 10.10.1.0/24</text>
+<rect x="30" y="108" width="390" height="62" rx="4" fill="var(--surface-2)" stroke="var(--line)"/>
+<text x="40" y="124" class="mono" style="font-size:9.6px">ls-client-az1</text>
+<rect x="40" y="130" width="180" height="32" rx="4" fill="var(--az1-wash)" stroke="var(--az1)"/>
+<text x="47" y="143" class="mono" style="font-size:8.8px">app-vm-1 · client .10</text>
+<text x="47" y="155" class="elbl">React + nginx</text>
+<rect x="230" y="130" width="180" height="32" rx="4" fill="var(--az1-wash)" stroke="var(--az1)"/>
+<text x="237" y="143" class="mono" style="font-size:8.8px">load-vm · client .40</text>
+<text x="237" y="155" class="elbl">gerador</text>
+<path d="M80 170 L80 182" class="edge" marker-end="url(#arP)"/>
+<rect x="30" y="184" width="390" height="66" rx="4" fill="var(--surface-2)" stroke="var(--az1)"/>
+<text x="40" y="200" class="mono" style="font-size:9.6px" fill="var(--az1)">lr-client-az1</text>
+<text x="40" y="214" class="elbl">lrp-client-az1-ls 10.10.1.1  ·  lrp-client-az1-ts 169.254.100.1</text>
+<rect x="40" y="220" width="370" height="24" rx="3" fill="var(--transit-wash)" stroke="var(--transit)"/>
+<text x="48" y="236" class="elbl" fill="var(--transit)">LB lb-web-az1  VIP 10.10.1.100   +   lb-backend-az1  VIP 10.10.1.200 → AZ2</text>
+<rect x="20" y="270" width="410" height="200" rx="6" fill="var(--surface)" stroke="var(--az1)" stroke-width="1.5"/>
+<text x="30" y="288" class="tag" fill="var(--az1)">MANAGEMENT PLANE · 10.20.1.0/24</text>
+<rect x="30" y="296" width="390" height="86" rx="4" fill="var(--surface-2)" stroke="var(--line)"/>
+<text x="40" y="312" class="mono" style="font-size:9.6px">ls-mgmt-az1</text>
+<rect x="40" y="318" width="120" height="54" rx="4" fill="var(--az1-wash)" stroke="var(--az1)"/>
+<text x="46" y="332" class="mono" style="font-size:8.4px">app-vm-1</text>
+<text x="46" y="345" class="elbl">mgmt .10</text>
+<text x="46" y="358" class="elbl">2ª NIC</text>
+<rect x="167" y="318" width="120" height="54" rx="4" fill="var(--az1-wash)" stroke="var(--az1)"/>
+<text x="173" y="332" class="mono" style="font-size:8.4px">obs-vm</text>
+<text x="173" y="345" class="elbl">mgmt .30</text>
+<text x="173" y="358" class="elbl">Prom+Grafana</text>
+<rect x="294" y="318" width="120" height="54" rx="4" fill="var(--az1-wash)" stroke="var(--az1)"/>
+<text x="300" y="332" class="mono" style="font-size:8.4px">load-vm</text>
+<text x="300" y="345" class="elbl">mgmt .40</text>
+<text x="300" y="358" class="elbl">2ª NIC</text>
+<path d="M80 382 L80 394" class="edge" marker-end="url(#arP)"/>
+<rect x="30" y="396" width="390" height="46" rx="4" fill="var(--surface-2)" stroke="var(--az1)"/>
+<text x="40" y="412" class="mono" style="font-size:9.6px" fill="var(--az1)">lr-mgmt-az1</text>
+<text x="40" y="426" class="elbl">lrp-mgmt-az1-ls 10.20.1.1  ·  lrp-mgmt-az1-ts 169.254.200.1</text>
+<text x="30" y="460" class="elbl">os dois plane routers fazem default route para lr-edge-az1 →</text>
+<rect x="500" y="54" width="430" height="436" rx="7" fill="var(--az2-wash)" stroke="var(--az2)" stroke-width="1.3" stroke-dasharray="6 4"/>
+<text x="510" y="74" class="tag" fill="var(--az2)">CÉLULA az2  ·  172.18.33.126</text>
+<rect x="510" y="82" width="410" height="176" rx="6" fill="var(--surface)" stroke="var(--az2)" stroke-width="1.5"/>
+<text x="520" y="100" class="tag" fill="var(--az2)">CLIENT PLANE · 10.10.2.0/24</text>
+<rect x="520" y="108" width="390" height="62" rx="4" fill="var(--surface-2)" stroke="var(--line)"/>
+<text x="530" y="124" class="mono" style="font-size:9.6px">ls-client-az2</text>
+<rect x="530" y="130" width="180" height="32" rx="4" fill="var(--az2-wash)" stroke="var(--az2)"/>
+<text x="537" y="143" class="mono" style="font-size:8.8px">app-vm-2 · client .20</text>
+<text x="537" y="155" class="elbl">backend Java :8080</text>
+<path d="M570 170 L570 182" class="edge" marker-end="url(#arP)"/>
+<rect x="520" y="184" width="390" height="66" rx="4" fill="var(--surface-2)" stroke="var(--az2)"/>
+<text x="530" y="200" class="mono" style="font-size:9.6px" fill="var(--az2)">lr-client-az2</text>
+<text x="530" y="214" class="elbl">lrp-client-az2-ls 10.10.2.1  ·  lrp-client-az2-ts 169.254.100.2</text>
+<rect x="530" y="220" width="370" height="24" rx="3" fill="var(--transit-wash)" stroke="var(--transit)"/>
+<text x="538" y="236" class="elbl" fill="var(--transit)">LB lb-web-az2  VIP 10.10.2.100</text>
+<rect x="510" y="270" width="410" height="200" rx="6" fill="var(--surface)" stroke="var(--az2)" stroke-width="1.5"/>
+<text x="520" y="288" class="tag" fill="var(--az2)">MANAGEMENT PLANE · 10.20.2.0/24</text>
+<rect x="520" y="296" width="390" height="86" rx="4" fill="var(--surface-2)" stroke="var(--line)"/>
+<text x="530" y="312" class="mono" style="font-size:9.6px">ls-mgmt-az2</text>
+<rect x="530" y="318" width="120" height="54" rx="4" fill="var(--az2-wash)" stroke="var(--az2)"/>
+<text x="536" y="332" class="mono" style="font-size:8.4px">app-vm-2</text>
+<text x="536" y="345" class="elbl">mgmt .20</text>
+<text x="536" y="358" class="elbl">2ª NIC</text>
+<rect x="657" y="318" width="120" height="54" rx="4" fill="var(--az2-wash)" stroke="var(--az2)"/>
+<text x="663" y="332" class="mono" style="font-size:8.4px">db-vm</text>
+<text x="663" y="345" class="elbl">mgmt .10</text>
+<text x="663" y="358" class="elbl">PostgreSQL · só esta NIC</text>
+<rect x="784" y="318" width="120" height="54" rx="4" fill="var(--az2-wash)" stroke="var(--az2)"/>
+<text x="790" y="332" class="mono" style="font-size:8.4px">obs-vm</text>
+<text x="790" y="345" class="elbl">mgmt .30</text>
+<text x="790" y="358" class="elbl">Prom+Grafana</text>
+<path d="M570 382 L570 394" class="edge" marker-end="url(#arP)"/>
+<rect x="520" y="396" width="390" height="46" rx="4" fill="var(--surface-2)" stroke="var(--az2)"/>
+<text x="530" y="412" class="mono" style="font-size:9.6px" fill="var(--az2)">lr-mgmt-az2</text>
+<text x="530" y="426" class="elbl">lrp-mgmt-az2-ls 10.20.2.1  ·  lrp-mgmt-az2-ts 169.254.200.2</text>
+<text x="520" y="460" class="elbl">os dois plane routers fazem default route para lr-edge-az2 →</text>
+<rect x="444" y="172" width="52" height="48" rx="5" fill="var(--transit-wash)" stroke="var(--transit)" stroke-width="1.8"/>
+<text x="470" y="190" text-anchor="middle" class="mono" style="font-size:8.6px" fill="var(--transit)">ts-client</text>
+<text x="470" y="238" text-anchor="middle" class="elbl" style="font-size:7.4px">169.254.100.0/24</text>
+<path d="M410 196 L442 196" class="hot"/>
+<path d="M498 196 L530 196" class="hot"/>
+<rect x="444" y="384" width="52" height="48" rx="5" fill="var(--transit-wash)" stroke="var(--transit)" stroke-width="1.8"/>
+<text x="470" y="402" text-anchor="middle" class="mono" style="font-size:8.6px" fill="var(--transit)">ts-mgmt</text>
+<text x="470" y="450" text-anchor="middle" class="elbl" style="font-size:7.4px">169.254.200.0/24</text>
+<path d="M410 408 L442 408" class="hot"/>
+<path d="M498 408 L530 408" class="hot"/>
+<path d="M118 490 L118 520 L822 520 L822 490" class="hot"/>
+<rect x="340" y="506" width="260" height="28" rx="4" fill="var(--paper)" stroke="var(--transit)"/>
+<text x="470" y="524" text-anchor="middle" class="mono" style="font-size:9.6px" fill="var(--transit)">UM TÚNEL GENEVE · UDP 6081</text>
+<text x="470" y="552" text-anchor="middle" class="elbl">os DOIS transit switches viajam neste mesmo túnel — o isolamento é lógico (datapaths distintos), não físico</text>
+</svg></div><figcaption>Cada plane tem switch, router e transit switch próprios, e o <code>ovn-ic</code> anuncia as rotas de cada um só no transit dele &mdash; por isso <code>lr-client-az1</code> nunca aprende <code>10.20.x</code>. Repare que <code>db-vm</code> aparece <b>uma única vez</b>, no plane de gerência: não existe endereço dele no client plane.</figcaption></figure>
+  <div class="tw"><table>
+    <thead><tr><th></th><th>Client plane</th><th>Management plane</th></tr></thead>
+    <tbody>
+      <tr><td>Propósito</td><td>tráfego de tenant — o serviço web</td><td>tráfego de operador — o DBaaS e a observabilidade</td></tr>
+      <tr><td>Switch / router</td><td><code>ls-client-&lt;az&gt;</code> / <code>lr-client-&lt;az&gt;</code></td><td><code>ls-mgmt-&lt;az&gt;</code> / <code>lr-mgmt-&lt;az&gt;</code></td></tr>
+      <tr><td>Federado por</td><td><span class="chip ts">ts-client</span> <code>169.254.100.0/24</code></td><td><span class="chip ts">ts-mgmt</span> <code>169.254.200.0/24</code></td></tr>
+      <tr><td>Subredes</td><td><code>10.10.1.0/24</code> (AZ1), <code>10.10.2.0/24</code> (AZ2)</td><td><code>10.20.1.0/24</code> (AZ1), <code>10.20.2.0/24</code> (AZ2)</td></tr>
+      <tr><td>Supernet</td><td><code>10.10.0.0/16</code></td><td><code>10.20.0.0/16</code></td></tr>
+      <tr><td>Load balancer</td><td>sim — um VIP por AZ + um <b>service VIP</b> na AZ1</td><td>não</td></tr>
+      <tr><td>Membros</td><td><code>app-vm-1</code>, <code>app-vm-2</code>, <code>load-vm</code></td><td>todos os acima + <b><code>db-vm</code></b> + <code>obs-vm</code></td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="note"><span class="tag">Honestidade sobre o que o isolamento é</span><p>Os dois transit switches são carregados pelo <b>mesmo</b> túnel GENEVE entre os <b>mesmos</b> dois chassis; o que os separa é serem datapaths OVN distintos. É uma fronteira de <b>roteamento e tenancy</b>, <b>não</b> de criptografia — quem conseguir injetar no <code>br-int</code> ou ler o túnel não é barrado por ela. O próprio README é explícito sobre isso.</p></div>
+
+  <h4>Quem mantém a separação dentro do container</h4>
+  <p>O netplan por NIC. Além do default route (na NIC marcada <code>default_route: true</code>), <b>cada NIC recebe uma rota explícita para o supernet do seu próprio plane</b>:</p>
+<pre><code>    eth0:                          <span class="cmt"># client</span>
+      addresses: [10.10.1.10/24]
+      mtu: 1442
+      routes:
+        - {to: default, via: 10.10.1.1}
+        - {to: 10.10.0.0/16, via: 10.10.1.1}    <span class="cmt"># client fica preso aqui</span>
+    eth1:                          <span class="cmt"># mgmt</span>
+      addresses: [10.20.1.10/24]
+      mtu: 1442
+      routes:
+        - {to: 10.20.0.0/16, via: 10.20.1.1}    <span class="cmt"># o banco SÓ sai por esta NIC</span>
+        - {to: 172.18.0.0/16, via: 10.20.1.1}   <span class="cmt"># underlay: consultar o probe agent</span></code></pre>
+  <p>Assim o tráfego para <code>10.20.0.0/16</code> fica preso à NIC de gerência e nunca sai pela de client. E o <code>db-vm</code> tem <b>uma única</b> NIC &mdash; não existe endereço que o client plane pudesse sequer usar para nomeá-lo.</p>
+
+  <h3>O edge da célula ("Gateway Nodes")</h3>
+  <figure><div class="fw"><svg viewBox="0 0 920 438" style="min-width:880px" role="img" aria-label="O edge gateway router de uma célula: os dois plane routers entram por um switch interno, o edge faz SNAT de cada plane para um endereço próprio e sai pelo br-ex; duas policies impedem trânsito entre planes">
+<defs><marker id="arE2" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><polygon points="0 0, 7 3, 0 6" fill="var(--muted)"/></marker>
+<marker id="arX" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><polygon points="0 0, 7 3, 0 6" fill="var(--ext)"/></marker></defs>
+<text x="20" y="18" class="tag">O EDGE DA CÉLULA az1 — &ldquo;GATEWAY NODES&rdquo;</text>
+<rect x="20" y="34" width="230" height="68" rx="6" fill="var(--az1-wash)" stroke="var(--az1)" stroke-width="1.5"/>
+<text x="32" y="53" class="mono" style="font-size:10.5px" fill="var(--az1)">lr-client-az1</text>
+<text x="32" y="68" class="elbl">10.10.1.0/24</text>
+<text x="32" y="81" class="elbl">edge 192.168.251.1 · porta PLANA</text>
+<text x="32" y="93" class="elbl">default 0.0.0.0/0 via .251.254</text>
+<path d="M252 68 L292 68" class="edge" marker-end="url(#arE2)"/>
+<rect x="20" y="128" width="230" height="68" rx="6" fill="var(--az1-wash)" stroke="var(--az1)" stroke-width="1.5"/>
+<text x="32" y="147" class="mono" style="font-size:10.5px" fill="var(--az1)">lr-mgmt-az1</text>
+<text x="32" y="162" class="elbl">10.20.1.0/24</text>
+<text x="32" y="175" class="elbl">edge 192.168.251.2 · porta PLANA</text>
+<text x="32" y="187" class="elbl">default 0.0.0.0/0 via .251.254</text>
+<path d="M252 162 L292 162" class="edge" marker-end="url(#arE2)"/>
+<rect x="294" y="34" width="112" height="162" rx="6" fill="var(--surface-2)" stroke="var(--line)"/>
+<text x="350" y="108" text-anchor="middle" class="mono" style="font-size:9.6px">ls-edge-az1</text>
+<text x="350" y="122" text-anchor="middle" class="elbl">switch interno</text>
+<text x="350" y="134" text-anchor="middle" class="elbl">192.168.251.0/24</text>
+<path d="M408 115 L444 115" class="edge" marker-end="url(#arE2)"/>
+<rect x="446" y="34" width="250" height="162" rx="6" fill="var(--ext-wash)" stroke="var(--ext)" stroke-width="1.8"/>
+<text x="458" y="54" class="mono" style="font-size:11px" fill="var(--ext)">lr-edge-az1</text>
+<text x="458" y="68" class="elbl">GATEWAY router (options:chassis=az1-chassis)</text>
+<text x="458" y="82" class="elbl">lrp-edge-az1-int  192.168.251.254</text>
+<text x="458" y="95" class="elbl">lrp-edge-az1-ext  .241.2  +  .241.3   (1 IP por plane)</text>
+<rect x="458" y="102" width="226" height="40" rx="4" fill="var(--surface)" stroke="var(--ext)"/>
+<text x="466" y="116" class="elbl" fill="var(--ext)">SNAT 10.10.1.0/24 → 192.168.241.2</text>
+<text x="466" y="132" class="elbl" fill="var(--ext)">SNAT 10.20.1.0/24 → 192.168.241.3</text>
+<rect x="458" y="148" width="226" height="38" rx="4" fill="var(--warn-wash)" stroke="var(--warn)" stroke-width="1.4"/>
+<text x="466" y="162" class="mono" style="font-size:8.6px" fill="var(--warn)">EDGE FIREWALL · 2 lr-policy prio 100</text>
+<text x="466" y="176" class="elbl" fill="var(--warn)">10.10.0.0/16 ⇄ 10.20.0.0/16 → drop</text>
+<path d="M698 115 L738 115" class="edge" stroke="var(--ext)" marker-end="url(#arX)"/>
+<rect x="740" y="86" width="160" height="58" rx="5" fill="var(--surface)" stroke="var(--ext)"/>
+<text x="752" y="104" class="mono" style="font-size:9.6px">br-ex .241.1</text>
+<text x="752" y="118" class="elbl">host · MASQUERADE</text>
+<text x="752" y="132" class="elbl">sai por ens3 → internet</text>
+<text x="20" y="228" class="tag">POR QUE ESTE TIER EXISTE</text>
+<rect x="20" y="238" width="280" height="84" rx="6" fill="var(--az1-wash)" stroke="var(--az1)" stroke-width="1.3"/>
+<text x="32" y="258" class="mono" style="font-size:10px" fill="var(--az1)">Porque o desenho pede</text>
+<text x="32" y="274" class="elbl">Um bloco Gateway Nodes por célula, com as</text>
+<text x="32" y="286" class="elbl">setas de SNAT dos dois planes apontando para</text>
+<text x="32" y="298" class="elbl">ele.</text>
+<rect x="320" y="238" width="280" height="84" rx="6" fill="var(--transit-wash)" stroke="var(--transit)" stroke-width="1.3"/>
+<text x="332" y="258" class="mono" style="font-size:10px" fill="var(--transit)">Porque o LB exige</text>
+<text x="332" y="274" class="elbl">O OVN recusa um load balancer em router com</text>
+<text x="332" y="286" class="elbl">mais de uma distributed gateway port. Sem o</text>
+<text x="332" y="298" class="elbl">edge, o plane router teria duas: trânsito +</text>
+<text x="332" y="310" class="elbl">externa.</text>
+<rect x="620" y="238" width="280" height="84" rx="6" fill="var(--warn-wash)" stroke="var(--warn)" stroke-width="1.3"/>
+<text x="632" y="258" class="mono" style="font-size:10px" fill="var(--warn)">E por isso a policy</text>
+<text x="632" y="274" class="elbl">O edge PRECISA conhecer rota para os dois</text>
+<text x="632" y="286" class="elbl">planes (para devolver respostas) — o que os</text>
+<text x="632" y="298" class="elbl">reconectaria. As duas policies cortam só o</text>
+<text x="632" y="310" class="elbl">trânsito plane-a-plane.</text>
+<rect x="20" y="334" width="880" height="56" rx="6" class="box" stroke="var(--warn)"/>
+<text x="34" y="354" class="lbl">Esse teste pegou um vazamento real.</text>
+<text x="34" y="370" class="elbl">Antes das policies existirem, o verify.yml detectou que o client plane alcançava o banco pelo edge compartilhado — exatamente o</text>
+<text x="34" y="382" class="elbl">caminho de volta descrito acima. O isolamento dado pelos dois transit switches, sozinho, não bastava.</text>
+<text x="20" y="410" class="elbl">A porta do plane router para o edge é deliberadamente PLANA (sem lrp-set-gateway-chassis): se virasse DGP, o plane router teria duas e o load balancer seria recusado.</text>
+<text x="20" y="426" class="elbl">As rotas de volta no edge são no SUPERNET do plane, não na subrede desta AZ — é isso que permite ao edge alcançar o backend que vive na OUTRA AZ quando o LB o escolhe.</text>
+</svg></div><figcaption>O edge é um <b>gateway router de verdade</b> (<code>options:chassis</code>), não um distribuído: assim ele faz NAT sem precisar de uma distributed gateway port, e o load balancer vale em todas as portas dele.</figcaption></figure>
+
+  <h3>O arranjo dos bancos, agora com cluster</h3>
+  <div class="tw"><table>
+    <thead><tr><th>Banco</th><th>Porta(s)</th><th>Escopo</th><th>Roda em</th><th>Quem conecta</th></tr></thead>
+    <tbody>
+      <tr><td>NB local</td><td><code>6641</code></td><td>por AZ, privado</td><td>cada AZ (127.0.0.1)</td><td><code>ovn-northd</code>, <code>ovn-nbctl</code>, <code>ovn-ic</code> <b>daquela</b> AZ</td></tr>
+      <tr><td>SB local</td><td><code>6642</code></td><td>por AZ, privado</td><td>cada AZ (127.0.0.1)</td><td><code>ovn-northd</code>, <code>ovn-controller</code>, <code>ovn-ic</code> <b>daquela</b> AZ</td></tr>
+      <tr><td><b>IC-NB</b></td><td><code>6645</code> cliente<br><b><code>6647</code> RAFT</b></td><td><b>global, clusterizado</b></td><td>az1 + az2 + quorum</td><td>o <code>ovn-ic</code> das <b>duas</b> AZs</td></tr>
+      <tr><td><b>IC-SB</b></td><td><code>6646</code> cliente<br><b><code>6648</code> RAFT</b></td><td><b>global, clusterizado</b></td><td>az1 + az2 + quorum</td><td>o <code>ovn-ic</code> das <b>duas</b> AZs</td></tr>
+    </tbody>
+  </table></div>
+  <p>A porta RAFT é gravada <b>dentro do arquivo <code>.db</code></b> pelo <code>ovsdb-tool create-cluster</code> / <code>join-cluster</code> &mdash; não é passada no <code>ExecStart</code>. A unit declara só a de <b>cliente</b>:</p>
+<pre><code>ExecStart=/usr/sbin/ovsdb-server /opt/ovn-lab/ic-nb.db \
+  --remote=ptcp:6645:172.18.3.175 \
+  --unixctl=/opt/ovn-lab/ic-nb.ctl \
+  --log-file=/opt/ovn-lab/ic-nb.log</code></pre>
+  <p>Os clientes recebem <b>todos</b> os membros, montados por Jinja:</p>
+<pre><code>ic_nb_remote: "{{ groups['ic_cluster'] | map('extract', hostvars, 'az_private_ip')
+                  | map('regex_replace', '^(.*)$', 'tcp:\1:' ~ ic_nb_port) | join(',') }}"
+<span class="cmt"># tcp:172.18.3.175:6645,tcp:172.18.33.126:6645,tcp:172.18.3.240:6645</span></code></pre>
+  <div class="note"><span class="tag">O data plane é independente disso tudo</span><p>Com os bancos de interconexão fora do ar, os flows já programados continuam encaminhando. O que uma queda do IC custa são <b>mudanças de topologia</b>, não tráfego &mdash; e o <code>verify_ha.yml</code> afirma exatamente isso no teste H3.</p></div>
+
+  <h3>A aplicação &mdash; partida de propósito</h3>
+  <div class="tw"><table>
+    <thead><tr><th>Camada</th><th>Onde</th><th>Stack</th><th>Escuta em</th></tr></thead>
+    <tbody>
+      <tr><td>Frontend</td><td><code>app-vm-1</code>, <span class="chip az1">AZ1</span></td><td>React 18 + Vite, servido por nginx</td><td>NIC client <code>:80</code></td></tr>
+      <tr><td>Backend</td><td><code>app-vm-2</code>, <span class="chip az2">AZ2</span></td><td>Java 21, <code>HttpServer</code> do JDK + JDBC</td><td>NIC client <code>:8080</code></td></tr>
+      <tr><td>Banco</td><td><code>db-vm</code>, <span class="chip az2">AZ2</span></td><td>PostgreSQL 16</td><td>NIC <b>mgmt</b> <code>:5432</code></td></tr>
+    </tbody>
+  </table></div>
+  <figure><div class="fw"><svg viewBox="0 0 920 360" style="min-width:880px" role="img" aria-label="O caminho de cada refresh do dashboard: browser, VIP da AZ1, nginx e React, service VIP, transit switch client sobre GENEVE, backend Java na AZ2 e o banco no plane de gerência">
+<defs><marker id="arA2" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><polygon points="0 0, 7 3, 0 6" fill="var(--muted)"/></marker>
+<marker id="arA2h" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><polygon points="0 0, 7 3, 0 6" fill="var(--transit)"/></marker></defs>
+<text x="20" y="18" class="tag">O QUE ACONTECE A CADA REFRESH DO DASHBOARD</text>
+<rect x="20" y="40" width="160" height="50" rx="5" fill="var(--surface-2)" stroke="var(--line)" stroke-width="1.5"/>
+<rect x="28" y="47" width="20" height="13" rx="3" fill="var(--line)"/>
+<text x="38" y="57" text-anchor="middle" style="font-size:8.4px;font-weight:700" fill="var(--surface)">01</text>
+<text x="54" y="58" class="mono" style="font-size:9.6px">browser</text>
+<text x="30" y="76" class="elbl">túnel ssh → 10.10.1.100</text>
+<rect x="200" y="40" width="160" height="50" rx="5" fill="var(--transit-wash)" stroke="var(--transit)" stroke-width="1.5"/>
+<rect x="208" y="47" width="20" height="13" rx="3" fill="var(--transit)"/>
+<text x="218" y="57" text-anchor="middle" style="font-size:8.4px;font-weight:700" fill="var(--surface)">02</text>
+<text x="234" y="58" class="mono" style="font-size:9.6px">VIP da AZ1</text>
+<text x="210" y="76" class="elbl">lb-web-az1 · DNAT local</text>
+<path d="M180 65 L196 65" class="edge" marker-end="url(#arA2)"/>
+<rect x="380" y="40" width="160" height="50" rx="5" fill="var(--az1-wash)" stroke="var(--az1)" stroke-width="1.5"/>
+<rect x="388" y="47" width="20" height="13" rx="3" fill="var(--az1)"/>
+<text x="398" y="57" text-anchor="middle" style="font-size:8.4px;font-weight:700" fill="var(--surface)">03</text>
+<text x="414" y="58" class="mono" style="font-size:9.6px">nginx + React</text>
+<text x="390" y="76" class="elbl">app-vm-1 · AZ1 · client</text>
+<path d="M360 65 L376 65" class="edge" marker-end="url(#arA2)"/>
+<rect x="560" y="40" width="160" height="50" rx="5" fill="var(--transit-wash)" stroke="var(--transit)" stroke-width="1.5"/>
+<rect x="568" y="47" width="20" height="13" rx="3" fill="var(--transit)"/>
+<text x="578" y="57" text-anchor="middle" style="font-size:8.4px;font-weight:700" fill="var(--surface)">04</text>
+<text x="594" y="58" class="mono" style="font-size:9.6px">service VIP</text>
+<text x="570" y="76" class="elbl">10.10.1.200 · DNAT p/ AZ2</text>
+<path d="M540 65 L556 65" class="edge" marker-end="url(#arA2)"/>
+<path d="M900 90 C 916 92, 916 152, 886 155 L548 155" class="hot" marker-end="url(#arA2h)"/>
+<rect x="380" y="130" width="160" height="50" rx="5" fill="var(--transit-wash)" stroke="var(--transit)" stroke-width="1.5"/>
+<rect x="388" y="137" width="20" height="13" rx="3" fill="var(--transit)"/>
+<text x="398" y="147" text-anchor="middle" style="font-size:8.4px;font-weight:700" fill="var(--surface)">05</text>
+<text x="414" y="148" class="mono" style="font-size:9.6px">ts-client · GENEVE</text>
+<text x="390" y="166" class="elbl">encapsula · UDP 6081</text>
+<rect x="200" y="130" width="160" height="50" rx="5" fill="var(--az2-wash)" stroke="var(--az2)" stroke-width="1.5"/>
+<rect x="208" y="137" width="20" height="13" rx="3" fill="var(--az2)"/>
+<text x="218" y="147" text-anchor="middle" style="font-size:8.4px;font-weight:700" fill="var(--surface)">06</text>
+<text x="234" y="148" class="mono" style="font-size:9.6px">backend Java</text>
+<text x="210" y="166" class="elbl">app-vm-2 · AZ2 · :8080</text>
+<rect x="20" y="130" width="160" height="50" rx="5" fill="var(--az2-wash)" stroke="var(--az2)" stroke-width="1.5"/>
+<rect x="28" y="137" width="20" height="13" rx="3" fill="var(--az2)"/>
+<text x="38" y="147" text-anchor="middle" style="font-size:8.4px;font-weight:700" fill="var(--surface)">07</text>
+<text x="54" y="148" class="mono" style="font-size:9.6px">db-vm</text>
+<text x="30" y="166" class="elbl">10.20.2.10 · MGMT :5432</text>
+<path d="M378 155 L364 155" class="hot" marker-end="url(#arA2h)"/>
+<path d="M198 155 L184 155" class="edge" marker-end="url(#arA2)"/>
+<text x="700" y="120" text-anchor="middle" class="tag" fill="var(--transit)">CRUZA A AZ ↓</text>
+<text x="190" y="120" text-anchor="middle" class="tag">MUDA DE PLANE</text>
+<rect x="20" y="200" width="430" height="66" rx="6" class="box" stroke="var(--transit)"/>
+<text x="34" y="220" class="lbl">Por que um service VIP e não o VIP da AZ2?</text>
+<text x="34" y="236" class="elbl">Um VIP só é utilizável de dentro da AZ que o possui (gotcha #14). Chegando</text>
+<text x="34" y="248" class="elbl">pelo transit, o pacote entra por porta de router: o LB do switch é pulado e o do</text>
+<text x="34" y="260" class="elbl">router não é programado nesse ingresso — ele morre no ARP.</text>
+<rect x="470" y="200" width="430" height="66" rx="6" class="box" stroke="var(--az2)"/>
+<text x="484" y="220" class="lbl">Por que nginx faz proxy de /api/*?</text>
+<text x="484" y="236" class="elbl">Para que o browser só precise alcançar a AZ1, enquanto o salto entre AZs</text>
+<text x="484" y="248" class="elbl">continua acontecendo DENTRO do fabric. Também evita CORS e um</text>
+<text x="484" y="260" class="elbl">segundo túnel SSH.</text>
+<rect x="20" y="278" width="880" height="62" rx="6" fill="var(--surface-2)" stroke="var(--line)"/>
+<text x="34" y="298" class="lbl">E a volta: a visão da infraestrutura percorre a arquitetura inteira</text>
+<text x="34" y="315" class="elbl">host de AZ  →  (lê ovn-nbctl / ovn-ic-sbctl / ovs-appctl)  →  tabela infra_state no db-vm, pelo plane de GERÊNCIA  →  backend Java (AZ2)  →  React (AZ1, cruzando a AZ)  →  browser</text>
+<text x="34" y="331" class="elbl">Por isso o dashboard é uma visão da infra, não uma página de demo: os dados dele só chegam na tela se todo o caminho estiver funcionando.</text>
+</svg></div><figcaption>Camadas separadas de propósito: <b>React na AZ1, Java na AZ2, Postgres no plane de gerência</b>. O fluxo sob teste é o tráfego do próprio produto &mdash; se a interconexão quebra, o dashboard diz em um poll de 5 s.</figcaption></figure>
+  <h4>O <code>Backend.java</code>, em detalhe</h4>
+  <p>Toda a configuração vem do ambiente (<code>APP_AZ</code>, <code>APP_CLIENT_IP</code>, <code>APP_MGMT_IP</code>, <code>DB_HOST</code>, <code>APP_PROBE_AGENTS</code>…), então o código não carrega endereço nenhum.</p>
+  <div class="tw"><table>
+    <thead><tr><th>Endpoint</th><th>O que faz</th></tr></thead>
+    <tbody>
+      <tr><td><code>/api/health</code></td><td>liveness + identidade da camada</td></tr>
+      <tr><td><code>/api/status</code></td><td>auto-probe: identidade, endereços dos dois planes, NICs com MTU, latência do banco</td></tr>
+      <tr><td><code>/api/infra</code></td><td>lê <code>infra_state</code> do banco — o que o dashboard renderiza</td></tr>
+      <tr><td><code>/api/flow</code></td><td>o caminho do request com tempo medido por salto</td></tr>
+      <tr><td><code>/api/test</code></td><td>roda ao vivo as checagens dos botões &ldquo;Testar&rdquo;; <code>?group=</code> filtra</td></tr>
+      <tr><td><code>/api/orders</code></td><td><b>escreve</b> uma linha em <code>orders</code></td></tr>
+      <tr><td><code>/api/report</code></td><td>agregação sobre a tabela <code>orders</code> inteira — leitura deliberadamente mais pesada</td></tr>
+    </tbody>
+  </table></div>
+  <p><b>Dois listeners, dois planes, um processo:</b></p>
+<pre><code>HttpServer server  = HttpServer.create(new InetSocketAddress(PORT), 0);                   <span class="cmt">// client plane</span>
+HttpServer metrics = HttpServer.create(new InetSocketAddress(MGMT_IP, METRICS_PORT), 0);  <span class="cmt">// mgmt plane</span></code></pre>
+  <p>O serviço é oferecido ao tenant no client plane; a instrumentação dele (<code>/metrics</code>, porta 9102) é assunto de operação e vive no mgmt, <b>bindada explicitamente ao IP de gerência</b>. Raspar o backend a partir da rede de tenant é impossível por construção, não por política.</p>
+
+  <h3>O load balancer &mdash; três anexações, três motivos</h3>
+  <figure><div class="fw"><svg viewBox="0 0 920 360" style="min-width:880px" role="img" aria-label="Os três pontos onde o load balancer precisa ser anexado, cada um resolvendo um problema diferente: ARP no switch, clientes externos no edge, e clientes da outra AZ no plane router">
+<defs><marker id="arL" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><polygon points="0 0, 7 3, 0 6" fill="var(--muted)"/></marker></defs>
+<text x="20" y="18" class="tag">O MESMO VIP, ANEXADO EM TRÊS LUGARES — TRÊS PROBLEMAS DIFERENTES</text>
+<rect x="20" y="28" width="280" height="196" rx="6" fill="var(--az1-wash)" stroke="var(--az1)" stroke-width="1.6"/>
+<text x="34" y="48" class="tag" fill="var(--az1)">no SWITCH</text>
+<rect x="34" y="56" width="252" height="26" rx="4" fill="var(--surface)" stroke="var(--az1)"/>
+<text x="42" y="74" class="mono" style="font-size:9.6px">ls-lb-add ls-client-az1</text>
+<text x="34" y="100" class="lbl">Quem precisa: um workload DENTRO da</text>
+<text x="34" y="114" class="lbl">subrede de tenant.</text>
+<text x="34" y="132" class="elbl">Sem isso: ninguém responde ARP pelo VIP. O</text>
+<text x="34" y="144" class="elbl">pacote morre em ls_in_l2_unknown e a falha</text>
+<text x="34" y="156" class="elbl">PARECE problema de roteamento.</text>
+<text x="34" y="214" class="elbl" fill="var(--az1)">Gotchas #11 e #15</text>
+<rect x="320" y="28" width="280" height="196" rx="6" fill="var(--ext-wash)" stroke="var(--ext)" stroke-width="1.6"/>
+<text x="334" y="48" class="tag" fill="var(--ext)">no EDGE GATEWAY ROUTER</text>
+<rect x="334" y="56" width="252" height="26" rx="4" fill="var(--surface)" stroke="var(--ext)"/>
+<text x="342" y="74" class="mono" style="font-size:9.6px">lr-lb-add lr-edge-az1</text>
+<text x="334" y="100" class="lbl">Quem precisa: um cliente de FORA da VPC.</text>
+<text x="334" y="118" class="elbl">Sem isso: nada balanceia tráfego externo. Não</text>
+<text x="334" y="130" class="elbl">pode ser no plane router — num router</text>
+<text x="334" y="142" class="elbl">DISTRIBUÍDO o OVN só programa o LB na DGP, por</text>
+<text x="334" y="154" class="elbl">onde o externo não chega.</text>
+<text x="334" y="214" class="elbl" fill="var(--ext)">Gotchas #10 e #12</text>
+<rect x="620" y="28" width="280" height="196" rx="6" fill="var(--transit-wash)" stroke="var(--transit)" stroke-width="1.6"/>
+<text x="634" y="48" class="tag" fill="var(--transit)">no PLANE ROUTER</text>
+<rect x="634" y="56" width="252" height="26" rx="4" fill="var(--surface)" stroke="var(--transit)"/>
+<text x="642" y="74" class="mono" style="font-size:9.6px">lr-lb-add lr-client-az1</text>
+<text x="634" y="100" class="lbl">Quem precisa: um cliente na OUTRA AZ</text>
+<text x="634" y="114" class="lbl">batendo neste VIP.</text>
+<text x="634" y="132" class="elbl">Esse tráfego chega pela porta de trânsito, que</text>
+<text x="634" y="144" class="elbl">É a DGP deste router — então ali o LB se</text>
+<text x="634" y="156" class="elbl">aplica.</text>
+<text x="634" y="214" class="elbl" fill="var(--transit)">Complementa #12</text>
+<rect x="20" y="238" width="880" height="110" rx="6" class="box" stroke="var(--transit)"/>
+<text x="34" y="258" class="lbl">E ainda o force-SNAT, em dois routers</text>
+<text x="34" y="278" class="mono" style="font-size:9.6px">set logical_router lr-edge-az1   options:lb_force_snat_ip=192.168.251.254</text>
+<text x="34" y="293" class="mono" style="font-size:9.6px">set logical_router lr-client-az1 options:lb_force_snat_ip=169.254.100.1</text>
+<text x="34" y="316" class="elbl">Sem ele, o backend da OUTRA AZ responderia direto ao cliente e a conexão penduraria — o un-DNAT nunca aconteceria. Forçando o SNAT, a resposta volta</text>
+<text x="34" y="329" class="elbl">pelo mesmo caminho. É também por isso que a subrede de EDGE é anunciada na interconexão, e a de provider não.</text>
+<text x="34" y="343" class="elbl" fill="var(--warn)">A palavra-chave documentada router_ip é REJEITADA por este build (gotcha #13) — o endereço precisa ser literal.</text>
+</svg></div><figcaption>A parte mais contra-intuitiva do lab. Cada anexação resolve um problema distinto: o do <b>switch</b> faz o balanceamento e responde ARP; o do <b>edge</b> atende quem vem de fora; o do <b>plane router</b> atende quem vem da outra AZ.</figcaption></figure>
+
+  <h3>As oito roles</h3>
+  <div class="tw"><table>
+    <thead><tr><th>role</th><th>o que faz</th></tr></thead>
+    <tbody>
+      <tr><td><code>common</code></td><td>base apt (OVS/OVN), desabilita as units OVN do apt, <b>compila <code>ovn-ic</code> + schemas IC do fonte</b>, e instala a <b>política de logrotate</b> que impede um daemon em crash loop de encher o disco</td></tr>
+      <tr><td><b><code>ic_cluster</code></b> <span class="chip ts">nova</span></td><td>o <b>cluster RAFT de 3 membros</b>: instala <code>ovsdb-server</code> no árbitro, copia os schemas IC para ele, <code>create-cluster</code> no bootstrap e <code>join-cluster</code> nos outros, e espera todos os membros + um líder</td></tr>
+      <tr><td><code>ovn_central</code></td><td>NB/SB por AZ + <code>ovn-northd</code>, como units systemd. <b>Não tem mais os templates IC</b> — foram para a <code>ic_cluster</code></td></tr>
+      <tr><td><code>ovn_chassis</code></td><td>chassis OVS, <code>ovn-controller</code>, <code>br-ex</code>, <code>ip_forward</code> + MASQUERADE, firewall para GENEVE <b>e todas as portas do cluster IC</b>, <code>node_exporter</code> e o <b>agente de probe</b></td></tr>
+      <tr><td><code>ovn_topology</code></td><td><code>NB_Global</code>, <b>os dois</b> transit switches no IC-NB, e <b>por plane</b>: LS/LR/LRP, gateway chassis na LRP de trânsito, conexão ao transit propagado</td></tr>
+      <tr><td><code>ovn_services</code></td><td>o <b>edge gateway router</b> (uplink, SNAT por plane, Edge Firewall) e o <b>load balancer por AZ</b> + o service VIP cross-AZ</td></tr>
+      <tr><td><code>incus</code></td><td>instala Incus e <code>admin init --minimal</code></td></tr>
+      <tr><td><code>workloads</code></td><td>uma porta lógica OVN <b>por NIC</b>, containers com um veth p2p por plane, netplan com rotas por plane, e as camadas em ordem: Postgres → backend Java → publicação do estado da infra → frontend React → gerador de carga</td></tr>
+    </tbody>
+  </table></div>
+
+  <h4><code>ic_cluster</code> — a role nova, passo a passo</h4>
+  <ol class="steps">
+    <li>garante <code>/opt/ovn-lab</code></li>
+    <li><b>só no árbitro</b>: instala <code>openvswitch-common</code> (<b>não</b> <code>openvswitch-switch</code>)</li>
+    <li>resolve os caminhos absolutos de <code>ovsdb-server</code> e <code>ovsdb-tool</code></li>
+    <li><code>slurp</code> dos dois schemas IC do bootstrap (<code>delegate_to</code> + <code>run_once</code>) e <code>copy</code> para todos — o árbitro não compila nada</li>
+    <li class="hot"><code>create-cluster</code> no bootstrap, com <code>creates:</code> guardando</li>
+    <li>instala as units, <code>flush_handlers</code>, sobe o bootstrap, <b>espera a porta de cliente abrir</b></li>
+    <li class="hot"><code>join-cluster</code> nos demais, apontando para o RAFT do bootstrap, também com <code>creates:</code></li>
+    <li>sobe os membros que entraram</li>
+    <li>espera até <code>cluster/status</code> reportar <b>todos os membros e nenhum candidato</b></li>
+  </ol>
+  <div class="note"><span class="tag">Por que <code>creates:</code> nos dois comandos de cluster</span><p>O endereço RAFT é gravado no arquivo <code>.db</code> no momento da criação/entrada. Re-executar sem guarda poderia <b>reformar</b> um cluster que já existe — destrutivo. Com <code>creates:</code>, a task vira no-op quando o <code>.db</code> já está lá.</p></div>
+  <div class="note"><span class="tag">A ordenação sai de graça</span><p>Na estratégia <code>linear</code> do Ansible, cada task termina em <b>todos</b> os hosts antes de a próxima começar — então "cria o cluster no bootstrap" está completo antes de "entra no cluster" rodar em qualquer outro. É exatamente a ordem que o RAFT precisa, sem <code>serial</code> nem delegação. O mesmo truque garante que o <code>ts-add</code> no az1 aconteça antes de qualquer <code>ovn-ic</code> subir.</p></div>
+
+  <h4><code>ovn_topology</code> — agora em loop por plane</h4>
+<pre><code>main.yml
+ ├── NB_Global: name + ic-route-adv/learn + ic-route-blacklist      <span class="cmt">(gotchas #1, #4)</span>
+ ├── loop planes → plane.yml      LS, LR, LRP-ls, patch, LRP-ts, gateway chassis <span class="cmt">(#5)</span>
+ ├── loop transit_switches → ts-add no IC-NB, só no ic_bootstrap    <span class="cmt">(gotcha #2)</span>
+ ├── unit do ovn-ic (com --unixctl) → start                         <span class="cmt">(gotcha #6)</span>
+ ├── espera os DOIS ts aparecerem no ls-list local
+ ├── loop planes → plane_transit.yml   lsp-add no ts + router-port
+ ├── restart do ovn-ic                                              <span class="cmt">(gotcha #3)</span>
+ ├── espera o gateway desta AZ aparecer no IC-SB
+ └── imprime as rotas de cada plane</code></pre>
+  <p><code>ovn_topology</code> é a <b>única</b> role que não reporta <code>changed=0</code> numa re-execução: o restart do <code>ovn-ic</code> é deliberado.</p>
+
+  <h4>Por que o edge é anunciado e o provider não</h4>
+  <p>É a sutileza de roteamento mais importante da revisão, e vive em <code>ic_route_blacklist</code>:</p>
+<pre><code>ic_route_blacklist: "{{ groups['azs'] | map('extract', hostvars, 'ext_cidr') | join(',') }}"
+<span class="cmt"># = 192.168.241.0/24,192.168.242.0/24   (só os provider subnets)</span></code></pre>
+  <div class="cols2">
+    <div><h4>Provider (<code>br-ex</code>) — na blacklist</h4><p>São encanamento do host: rotas conectadas no edge que não têm por que existir na outra AZ.</p></div>
+    <div><h4>Edge (<code>192.168.25x</code>) — anunciado</h4><p><b>Precisa</b> atravessar a interconexão: quando o LB manda um request para o backend da <em>outra</em> AZ, o edge faz SNAT para o próprio endereço de edge — e o backend remoto só responde se a AZ dele tiver aprendido rota de volta para ele.</p></div>
+  </div>
+
+  <h3>Observabilidade e geração de carga</h3>
+  <p>Cada célula roda o <b>próprio</b> Prometheus + Grafana, no <b>plane de gerência</b>.</p>
+<pre><code>obs-vm (só mgmt)             raspa, tudo pelo management plane
+  ├── node_exporter do host de AZ   :9100   <span class="cmt">← contadores por interface, incl. genev_sys_6081</span>
+  ├── agente de probe da infra      :9101   <span class="cmt">← estado do OVN como métrica</span>
+  ├── cada workload                 :9100   <span class="cmt">← bytes por NIC: client vs mgmt, lado a lado</span>
+  ├── backend Java                  :9102   <span class="cmt">← RPS, histograma de latência, latência de DB</span>
+  ├── postgres_exporter             :9187   <span class="cmt">← commits, rows, conexões</span>
+  └── gerador de carga              :9103   <span class="cmt">← carga oferecida e latência do cliente</span></code></pre>
+  <ul>
+    <li><b><code>genev_sys_6081</code> nos contadores do host</b> é o detalhe mais elegante: bytes/s no túnel vira métrica real, não inferência.</li>
+    <li><b>Cada célula raspa só a si mesma</b> — uma falha numa AZ não cega o monitoramento da outra, e o scrape nunca carrega a interconexão. O efeito colateral: painéis de um componente que só existe numa AZ ficam vazios no Grafana da outra. Isso é o isolamento funcionando.</li>
+    <li><b>O Grafana é alcançado por um <code>proxy device</code> do Incus</b>, não por rota do host para o mgmt. O forwarding acontece dentro do namespace do container, então o host nunca precisa de rota para <code>10.20.x</code>.</li>
+    <li><b>Retenção limitada nos dois eixos</b> (<code>6h</code> <b>e</b> <code>1GB</code>): retenção por tempo sozinha não limita bytes — e um TSDB enchendo o disco é exatamente o modo de falha do <b>gotcha #9</b>.</li>
+  </ul>
+
+  <h4>O gerador de carga</h4>
+  <div class="tw"><table>
+    <thead><tr><th></th><th></th></tr></thead>
+    <tbody>
+      <tr><td>Alvo</td><td>o <b>VIP do frontend</b> da AZ1 — para que cada request passe por nginx, service VIP, <code>ts-client</code> sobre GENEVE, backend Java e PostgreSQL</td></tr>
+      <tr><td>Mix</td><td><code>/api/status</code> 5 · <code>/api/report</code> 3 · <code>/api/orders</code> 2 (um <code>INSERT</code> real) · <code>/api/health</code> 2</td></tr>
+      <tr><td>Taxa</td><td>uma <b>senoide lenta</b> em torno de 6 rps, um ciclo a cada 10 min — os gráficos ganham forma, e uma linha reta passa a ser sinal em vez de norma</td></tr>
+      <tr><td>Carga no mgmt</td><td>uma consulta periódica direto ao banco pelo <code>ts-mgmt</code>. O caminho da app <b>nunca</b> cruza o <code>ts-mgmt</code> (backend e banco estão os dois na AZ2), então sem isso o transit de gerência não carregaria nada mensurável</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Ordem de execução</h3>
+<pre><code>ansible-playbook ping.yml         <span class="cmt"># 0  SSH + Python nos três hosts</span>
+ansible-playbook common.yml       <span class="cmt"># 2  deps + compila OVN v24.03.6 / OVS v3.3.0 (~10-20 min)</span>
+ansible-playbook ic_cluster.yml   <span class="cmt"># 3  cluster RAFT de 3 membros do IC-NB/IC-SB</span>
+ansible-playbook central.yml      <span class="cmt"># 4  NB/SB + northd por AZ</span>
+ansible-playbook chassis.yml      <span class="cmt"># 5  chassis OVS + ovn-controller + br-ex + SNAT do host</span>
+ansible-playbook topology.yml     <span class="cmt"># 6  os dois planes + os dois transit switches + ovn-ic</span>
+ansible-playbook services.yml     <span class="cmt"># 7  edge gateway router + load balancer por AZ</span>
+ansible-playbook incus.yml        <span class="cmt"># 8  instala + inicializa o Incus</span>
+ansible-playbook workloads.yml    <span class="cmt"># 9  containers dual-NIC + Postgres + Java + React + loadgen</span>
+
+ansible-playbook verify.yml       <span class="cmt"># T1-T7, com assert</span>
+ansible-playbook verify_ha.yml    <span class="cmt"># H1-H4, HA da interconexão (disruptivo)</span></code></pre>
+  <div class="note"><span class="tag">O caminho novo: <code>reset.yml</code></span><p>As roles são idempotentes para <em>valores</em>, mas não sabem renomear nem remover objetos que um desenho anterior criou. Quando a <b>forma</b> da topologia muda (routers renomeados, um plane novo), é preciso derrubar primeiro: <code>ansible-playbook reset.yml &amp;&amp; ansible-playbook site.yml</code>. Ele apaga containers, veths <code>veth-*</code> do <code>br-int</code> (por prefixo, para pegar sobras de topologias antigas), os <code>.db</code> locais e do IC, e as rotas de host para VIPs antigos — mas <b>não</b> toca no build em <code>/opt/ovn-build</code> nem no storage pool do Incus.</p></div>
+
+  <h3>O que o <code>verify.yml</code> prova (T1-T7)</h3>
+  <p class="lede">Tudo é <code>assert</code>, então um caminho quebrado <b>falha a execução</b> em vez de imprimir algo para você ler.</p>
+  <div class="tw"><table>
+    <thead><tr><th>Grupo</th><th>O que prova</th></tr></thead>
+    <tbody>
+      <tr><td><b>T1</b> control plane</td><td>os dois transit switches no IC-NB; os dois gateways no IC-SB; túnel GENEVE para o encap-ip do peer; <b>e cada plane router aprendeu só a subrede remota do próprio plane</b></td></tr>
+      <tr><td><b>T2</b> isolamento</td><td>o client plane <b>não</b> alcança o banco; o mgmt plane <b>não</b> alcança o client plane; o <code>db-vm</code> não tem NIC de client nenhuma</td></tr>
+      <tr><td><b>T3</b> client plane</td><td>o VIP de cada AZ responde 12/12 para a camada dela; o <b>service VIP</b> da AZ1 é respondido 8/8 pelo backend da AZ2 (DNAT cross-AZ sobre <code>ts-client</code>)</td></tr>
+      <tr><td><b>T4</b> mgmt plane</td><td>o backend lê o Postgres pela NIC de mgmt; sessão wire-protocol crua das duas AZs; RTT cross-AZ vs intra-AZ</td></tr>
+      <tr><td><b>T5</b> norte-sul</td><td>cada workload alcança a internet pelo SNAT do seu plane</td></tr>
+      <tr><td><b>T6</b> MTU</td><td><code>1414</code> B passa e <code>1415</code> B é rejeitado — o teto do GENEVE exatamente onde deveria</td></tr>
+      <tr><td><b>T7</b> aplicação</td><td>o VIP do frontend serve o bundle React; <code>/api/status</code> é respondido <b>pelo backend da outra AZ</b> com banco vivo; o backend reporta uma NIC client + uma mgmt a MTU 1442; o dashboard mostra linhas das <b>duas</b> AZs, nenhuma em erro</td></tr>
+    </tbody>
+  </table></div>
+  <div class="cols2">
+    <div><h4>T4 não cronometra o <code>psql</code> — de propósito</h4><p>O relógio de parede de <code>incus exec</code> + startup do <code>psql</code> afoga os poucos milissegundos de interconexão e faria o intra-AZ parecer <em>mais lento</em>. O custo real sai do backend de vida longa e do RTT cru.</p></div>
+    <div><h4>T5 tem <code>retries: 3</code></h4><p>Ele sai do fabric inteiro até a internet de verdade; um timeout isolado diz mais sobre o link upstream do que sobre o lab. Sem retry a suíte falharia de forma intermitente — e <em>um teste que grita lobo treina você a ignorá-lo</em>.</p></div>
+  </div>
+
+  <h3>O que o <code>verify_ha.yml</code> prova (H1-H4)</h3>
+  <ol class="steps">
+    <li>o cluster começa com os três membros e um líder, sem eleição em curso</li>
+    <li class="hot">com o <b>líder parado</b>, um sobrevivente é eleito <b>e ainda confirma escrita</b> — testado criando e apagando um transit switch de sonda (<code>ha-probe-ts</code>). Um cluster de 2 membros não conseguiria.</li>
+    <li>o <b>data plane não percebe</b>: os workloads continuam conversando com todo o control plane de interconexão fora do ar</li>
+    <li>o membro parado <b>volta</b> para o cluster limpo</li>
+  </ol>
+  <div class="note"><span class="tag">Por que testar escrita, e não só leitura</span><p>Um cluster <b>sem</b> quórum ainda serve leitura obsoleta de um follower — pareceria saudável. Só uma escrita confirmada prova que há maioria.</p></div>
+
+  <h3>Resultados medidos</h3>
+  <ul>
+    <li><b>Control plane:</b> <code>ts-client</code> e <code>ts-mgmt</code> declarados e propagados; os dois chassis registrados no IC-SB; GENEVE de pé entre <code>172.18.3.175 ↔ 172.18.33.126</code>.</li>
+    <li><b>Separação de planes:</b> <code>lr-client-az1</code> aprendeu <code>10.10.2.0/24</code> <b>e nada de <code>10.20.x</code></b>; <code>lr-mgmt-az1</code> aprendeu <code>10.20.2.0/24</code> <b>e nada de <code>10.10.x</code></b> — simetricamente na AZ2.</li>
+    <li><b>Isolamento:</b> o client plane não alcança <code>10.20.2.10</code> em nenhuma AZ. <b>Antes</b> das policies do Edge Firewall, esse teste <b>pegou um vazamento real</b>.</li>
+    <li><b>Aplicação, ponta a ponta:</b> <code>GET /api/status</code> pelo VIP do frontend da AZ1 é respondido por <code>app-vm-2</code> <b>na AZ2</b> com banco vivo, em ≈ <b>45 ms</b>; o service VIP respondido 8/8 pelo backend da AZ2; os dois VIPs próprios 12/12; o dashboard renderiza <b>19 linhas das duas AZs, nenhuma em erro</b>.</li>
+    <li><b>Cross- vs intra-AZ no <code>ts-mgmt</code>:</b> RTT ao banco de <b>3,191 ms</b> da AZ1 vs <b>0,059 ms</b> da AZ2 — <b>~54×</b>, medido numa execução só.</li>
+    <li><b>Norte-sul:</b> os três workloads alcançam a internet (HTTP 200), cada um pelo SNAT do seu plane.</li>
+    <li><b>MTU:</b> <code>-s 1414 -M do</code> passa, <code>-s 1415</code> falha.</li>
+    <li><b>HA da interconexão:</b> parar o <b>líder</b> elegeu outro em segundos; o cluster degradado 2-de-3 <b>ainda confirmou escrita</b>; o data plane não percebeu; o membro voltou limpo.</li>
+    <li><b>Idempotência:</b> <code>ic_cluster</code>, <code>central</code>, <code>chassis</code> e <code>services</code> reportam <code>changed=0</code>; <code>topology</code> reporta 1 (o restart deliberado).</li>
+  </ul>
+
+  <h3>Decisões de design</h3>
+  <div class="tw"><table>
+    <thead><tr><th>Decisão</th><th>Razão</th><th>Trade-off</th></tr></thead>
+    <tbody>
+      <tr><td><b>OVN dirigido à mão; Incus só fornece o workload</b></td><td>o Incus gerencia o NB sozinho e <b>não expõe configuração de OVN-IC</b></td><td>mais passos manuais na role <code>workloads</code></td></tr>
+      <tr><td><b>Isolamento por datapaths, não por fabrics</b></td><td>é o que o desenho especifica: dois transit switches sobre um túnel</td><td>fronteira de roteamento, <b>não</b> de criptografia</td></tr>
+      <tr><td><b>O banco é single-NIC</b></td><td>o isolamento não pode ser desfeito por erro de roteamento: <b>não existe endereço</b> para alcançá-lo</td><td>nenhum relevante — é garantia mais forte que firewall</td></tr>
+      <tr><td><b>Um tier de edge por célula</b></td><td>pelo desenho, e pela restrição do OVN sobre LB × DGP</td><td>uma camada de roteamento a mais</td></tr>
+      <tr><td><b>VIPs por AZ, não um global</b></td><td>o desenho é simétrico: cada célula oferece o serviço localmente</td><td>exigiu o service VIP para o caso cross-AZ</td></tr>
+      <tr><td><b>Containers, não VMs</b></td><td>hosts de 2 vCPU / 8 GB; containers exercitam <b>o mesmo</b> datapath GENEVE</td><td>isolamento menor</td></tr>
+      <tr><td><b>App partida entre AZs</b></td><td>o fluxo sob teste vira o tráfego do próprio produto, não uma sonda sintética</td><td>acopla as camadas às AZs</td></tr>
+      <tr><td><b>JDK puro, sem Spring/Maven</b></td><td>containers pequenos atrás de NAT duplo; árvore de dependências é lenta e frágil</td><td>sem ergonomia de framework</td></tr>
+      <tr><td><b>O árbitro é mínimo</b></td><td>sem chassis, sem GENEVE, só <code>openvswitch-common</code> — para não virar nó de datapath por acidente</td><td>uma VM só para votar</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Como evoluir para algo mais real</h3>
+  <ol>
+    <li><b>Persistir as partes de rede do host</b> — hoje se perdem no reboot. <em>Baixo esforço, alto valor: o reboot que iniciou a sessão de debug desta revisão é exatamente esse modo de falha.</em></li>
+    <li><b>Segredos com <code>ansible-vault</code></b> — a senha do banco está em texto puro em <code>group_vars</code>.</li>
+    <li><b>Health checks no LB</b> para derrubar backend morto.</li>
+    <li><b>PostgreSQL primário/réplica com failover</b> — réplica na AZ1 mata a latência cross-AZ.</li>
+    <li><b>TLS nos bancos</b> — <em>mais</em> valioso agora, já que o cluster IC fofoca pela rede nas portas 6647/6648.</li>
+    <li><b>ACLs de verdade nos switches de plane</b> — hoje a separação é por roteamento.</li>
+    <li><b>Federação cross-AZ do Prometheus pelo <code>ts-mgmt</code></b> — o monitoramento exercitando o fabric que ele monitora.</li>
+    <li><b>Sondas que devem FALHAR</b> — alertar se o client plane alcançar o banco transforma um invariante de segurança em métrica.</li>
+    <li><b>Injeção de falha</b>: <code>tc netem delay 50ms dev genev_sys_6081</code> faz a latência cross-AZ subir no Grafana enquanto a intra-AZ fica plana.</li>
+    <li><b>Mais de duas AZs</b> — basta <code>host_vars/az3.yml</code> e acrescentá-la a <code>[azs]</code>.</li>
+    <li><b>Workloads como VMs Incus</b>, <b>réplicas por AZ</b>, <b>observabilidade mais profunda</b> e <b>qualidade do Ansible</b> (<code>molecule</code>, <code>ansible-lint</code>).</li>
+  </ol>
+</section>
+
+<section id="gotchas">
+  <h2><span class="n">05</span><span>Os dezesseis gotchas</span></h2>
+  <p class="lede">Os cinco primeiros vieram do <code>pratice-ovn-ic</code>; os #6-#8 da primeira revisão do <code>advanced-ovn-ic</code>; os <b>#9-#16 apareceram nesta revisão dual-plane</b>.</p>
+  <h3>Herdados do <code>pratice-ovn-ic</code></h3>
+<div class="gotcha">
+  <h4><span class="num">#1</span><span>A identidade da AZ vem de <code>NB_Global.name</code></span></h4>
+  <dl class="gx">
+    <dt>Sintoma</dt><dd>Topologia correta, <code>ovn-ic</code> rodando, e <b>nenhum gateway</b> em <code>ovn-ic-sbctl list Gateway</code>.</dd>
+    <dt>Causa</dt><dd>O nome de AZ que o <code>ovn-ic</code> registra no IC-SB vem do campo <code>name</code> da tabela <code>NB_Global</code> do NB <b>local</b>.</dd>
+    <dt>Correção</dt><dd><pre><code>ovn-nbctl set NB_Global . name=az1</code></pre></dd>
+  </dl>
+</div>
+<div class="gotcha">
+  <h4><span class="num">#2</span><span>Os transit switches são gerenciados pelo <code>ovn-ic</code></span></h4>
+  <dl class="gx">
+    <dt>Sintoma</dt><dd>Colisão ao criar o <code>ts</code> à mão no NB local.</dd>
+    <dt>Causa</dt><dd>O <code>ovn-ic</code> detecta cada <code>Transit_Switch</code> declarado no IC-NB e <b>cria automaticamente</b> o switch em cada AZ, já com a anotação <code>interconn-ts</code>.</dd>
+    <dt>Correção</dt><dd><code>ovn-ic-nbctl ts-add &lt;nome&gt;</code> e <b>esperar</b> aparecer no <code>ls-list</code> local. <b>Agora são dois</b>, e a espera virou uma comparação de tamanho de lista.</dd>
+  </dl>
+</div>
+<div class="gotcha">
+  <h4><span class="num">#3</span><span>Race condition na inicialização do <code>ovn-ic</code></span></h4>
+  <dl class="gx">
+    <dt>Sintoma</dt><dd><pre><code>Can't get router uuid for transit switch port
+Route sync ignores port ... Deleting it</code></pre>A porta é descartada e <b>nunca reprocessada</b>.</dd>
+    <dt>Causa</dt><dd>O <code>ovn-ic</code> pode processar a notificação de <code>lsp-ts-*</code> <b>antes</b> de o cache OVSDB local conter a <code>lrp-*-ts</code> correspondente.</dd>
+    <dt>Correção</dt><dd><b>Reiniciar o <code>ovn-ic</code></b> depois da topologia completa. É a única fonte de <code>changed</code> numa re-execução da role <code>ovn_topology</code>.</dd>
+  </dl>
+</div>
+<div class="gotcha">
+  <h4><span class="num">#4</span><span><code>ic-route-adv</code> / <code>ic-route-learn</code> ficam em <code>NB_Global.options</code></span></h4>
+  <dl class="gx">
+    <dt>Sintoma</dt><dd>No log de debug: <code>Route ad: skip network 10.10.1.1/24 of lrp lrp-client-az1-ls.</code> — recusa <b>silenciosa</b> de anunciar redes conectadas.</dd>
+    <dt>Causa</dt><dd>A documentação sugere que são opções por router, mas no OVN 24.03.6 só têm efeito em <code>NB_Global</code>. Confirmado com <code>strings</code> no binário: a tabela <code>Transit_Switch</code> <b>nem tem coluna <code>options</code></b> nessa versão.</dd>
+    <dt>Correção</dt><dd>Setar em <code>NB_Global</code> — junto com <code>ic-route-blacklist</code>, nesta revisão.</dd>
+  </dl>
+  <p class="lbl" style="margin:8px 0 0">O gotcha que mais custou tempo na primeira vez.</p>
+</div>
+<div class="gotcha">
+  <h4><span class="num">#5</span><span>Gateway chassis explícito em <b>cada</b> LRP de trânsito</span></h4>
+  <dl class="gx">
+    <dt>Sintoma</dt><dd>Control plane funcionando (rotas anunciadas e aprendidas) e <b>data plane quebrado</b>.</dd>
+    <dt>Diagnóstico</dt><dd><code>lsp-ts-az2</code> com <code>chassis=[]</code> no <code>Port_Binding</code> do SB local, e campo <code>gateway</code> vazio no IC-SB.</dd>
+    <dt>Causa</dt><dd>Sem gateway chassis fixado, o <code>ovn-ic</code> não associa gateway ao <code>Port_Binding</code> e o tráfego inter-AZ <b>nunca é encapsulado</b>.</dd>
+    <dt>Correção</dt><dd><code>lrp-set-gateway-chassis lrp-&lt;plane&gt;-&lt;az&gt;-ts &lt;chassis&gt; 1</code> — agora <b>por plane</b>.</dd>
+  </dl>
+</div>
+  <h3>Da primeira revisão do <code>advanced-ovn-ic</code></h3>
+<div class="gotcha fixed">
+  <h4><span class="num">#6</span><span><code>ovn-ic</code> precisa de <code>--unixctl</code> explícito</span></h4>
+  <dl class="gx">
+    <dt>Sintoma</dt><dd>Crash loop com <code>binding failed: No such file or directory</code>; o transit switch nunca é propagado.</dd>
+    <dt>Causa</dt><dd>O binário compilado do fonte aponta o socket de controle para <code>/usr/local/var/run/ovn/</code>, que não existe.</dd>
+    <dt>Correção</dt><dd>A unit passa <code>--unixctl=/opt/ovn-lab/ovn-ic.ctl</code>.</dd>
+  </dl>
+</div>
+<div class="gotcha fixed">
+  <h4><span class="num">#7</span><span>O cliente OVS nativo do Incus 6.0 não conecta no <code>br-int</code></span></h4>
+  <dl class="gx">
+    <dt>Sintoma</dt><dd><code>Failed to connect to OVS: ... listdbs failure - unexpected EOF</code>, mesmo com <code>ovs-vsctl</code> funcionando.</dd>
+    <dt>Correção</dt><dd><code>nictype=p2p</code> — o Incus só constrói o par veth; nós adicionamos o lado host ao <code>br-int</code> com <code>external_ids:iface-id=&lt;lsp&gt;</code>. Agora <b>uma vez por plane</b> em que o workload vive.</dd>
+  </dl>
+</div>
+<div class="gotcha fixed">
+  <h4><span class="num">#8</span><span><code>GRANT</code> da role da aplicação nas tabelas</span></h4>
+  <dl class="gx">
+    <dt>Sintoma</dt><dd><code>appuser</code> conecta bem mas recebe <code>permission denied for table lab_info</code>.</dd>
+    <dt>Causa</dt><dd>As tabelas são criadas pelo superusuário <code>postgres</code>.</dd>
+    <dt>Correção</dt><dd><code>GRANT</code> de schema, tabelas e sequences no <code>db_setup.sh</code>.</dd>
+  </dl>
+</div>
+  <h3>Novos nesta revisão</h3>
+<div class="gotcha">
+  <h4><span class="num">#9</span><span><code>ovn-controller</code> precisa que <code>/run/ovn</code> exista, e não aceita ser redirecionado</span></h4>
+  <dl class="gx">
+    <dt>Sintoma</dt><dd>Os dois hosts reiniciando <code>ovn-controller</code> a cada dois segundos.</dd>
+    <dt>Causa</dt><dd>Ele faz bind do socket em <code>/var/run/ovn/&lt;pid&gt;.ctl</code> e <b>não cria</b> o diretório. Diferente do <code>ovn-ic</code> (#6), o binário do apt <b>não tem opção <code>--unixctl</code></b>. E <code>/run</code> é tmpfs — depois de um reboot o diretório some e todo start falha.</dd>
+    <dt>O dano</dt><dd>O crash loop escreveu um <b><code>ovn-controller.log</code> de 8 GB</b> (mais ~25 GB espelhados em <code>/var/log/syslog</code>) e <b>encheu um disco de 38 GB</b>, derrubando o lab inteiro.</dd>
+    <dt>Correção</dt><dd>Duas frentes: <code>RuntimeDirectory=ovn</code> na unit (o systemd cria <code>/run/ovn</code> antes de cada start — a única correção disponível para esse binário), <b>mais</b> <code>RestartSec=10</code> e uma política de <b>logrotate horária</b> sobre <code>/opt/ovn-lab/*.log</code> (<code>size 50M</code>, <code>rotate 3</code>, <code>copytruncate</code>). O timer padrão do logrotate é diário, e um crash loop produz gigabytes numa hora.</dd>
+  </dl>
+  <p class="lbl" style="margin:8px 0 0">A lição: corrigir a causa não bastava. Sem limitar o log, o próximo crash loop faria o mesmo.</p>
+</div>
+<div class="gotcha">
+  <h4><span class="num">#10</span><span>Load balancer exige router com no máximo uma distributed gateway port</span></h4>
+  <dl class="gx">
+    <dt>Sintoma</dt><dd><code>Load-balancer is not supported yet when there is more than one distributed gateway port on the router</code> — em silêncio, com o VIP simplesmente nunca respondendo.</dd>
+    <dt>Correção</dt><dd>Mover o norte-sul para um <b>edge router separado</b>, deixando cada plane router com exatamente uma DGP (a de trânsito). É a razão arquitetural do tier de edge.</dd>
+  </dl>
+</div>
+<div class="gotcha">
+  <h4><span class="num">#11</span><span>Um VIP dentro da subrede de tenant precisa do LB no <b>switch</b></span></h4>
+  <dl class="gx">
+    <dt>Sintoma</dt><dd>Nada responde ARP pelo VIP; o pacote morre em <code>ls_in_l2_unknown</code>.</dd>
+    <dt>Correção</dt><dd>Anexar o LB ao logical <b>switch</b> — é isso que instala o ARP responder.</dd>
+  </dl>
+</div>
+<div class="gotcha">
+  <h4><span class="num">#12</span><span>…mas um LB no switch é pulado para tráfego que entra por porta de router</span></h4>
+  <dl class="gx">
+    <dt>Sintoma</dt><dd>Clientes externos não são balanceados mesmo com o LB no switch.</dd>
+    <dt>Causa</dt><dd><code>ls_in_pre_lb: ip &amp;&amp; inport == &lt;router port&gt; → next</code>.</dd>
+    <dt>Correção</dt><dd>O LB também precisa estar num <b>router</b> — e num router <b>distribuído</b> o OVN só o programa na DGP, por onde o tráfego externo não chega. A combinação que funciona: LB no <b>switch</b> do client <b>e</b> no <b>edge gateway router</b>.</dd>
+  </dl>
+</div>
+<div class="gotcha">
+  <h4><span class="num">#13</span><span><code>lb_force_snat_ip=router_ip</code> é rejeitado por este build</span></h4>
+  <dl class="gx">
+    <dt>Sintoma</dt><dd><code>bad ip router_ip in options of router</code>.</dd>
+    <dt>Correção</dt><dd>Dar o endereço <b>literalmente</b> (<code>192.168.251.254</code> no edge, <code>169.254.100.1</code> no plane router).</dd>
+  </dl>
+</div>
+<div class="gotcha">
+  <h4><span class="num">#14</span><span>Um VIP só é utilizável de dentro da AZ que o possui</span></h4>
+  <dl class="gx">
+    <dt>Sintoma</dt><dd>Um workload na AZ1 não alcança o VIP da AZ2.</dd>
+    <dt>Causa</dt><dd>Seguindo de #11/#12 — chegando pelo transit switch, o pacote entra no <code>ls-client-az2</code> por uma porta de router (LB do switch pulado) e o OVN também não programa o LB do router nesse caminho de ingresso. Ele é roteado como endereço comum e morre no ARP.</dd>
+    <dt>Correção</dt><dd>Um <b>service VIP na AZ do consumidor</b>, cujo backend é o workload remoto. O DNAT acontece localmente e o pacote reescrito cruza a interconexão como tráfego comum. É por isso que a AZ1 tem <code>10.10.1.200</code>.</dd>
+  </dl>
+</div>
+<div class="gotcha">
+  <h4><span class="num">#15</span><span>Um VIP na subrede de tenant precisa do LB no router <b>além</b> do switch</span></h4>
+  <dl class="gx">
+    <dt>Sintoma</dt><dd>As regras de DNAT estão instaladas e o <code>ovn-trace</code> as mostra, mas o cliente <b>nunca recebe resposta de ARP</b> pelo VIP — então nem chega a mandar pacote. A falha <em>parece</em> problema de roteamento.</dd>
+    <dt>Correção</dt><dd>Os <b>dois</b> attachments, por razões diferentes: o do switch faz o balanceamento, o do router torna o endereço <b>respondível</b>.</dd>
+  </dl>
+</div>
+<div class="gotcha">
+  <h4><span class="num">#16</span><span><code>GRANT DELETE</code>, não só <code>SELECT/INSERT/UPDATE</code></span></h4>
+  <dl class="gx">
+    <dt>Sintoma</dt><dd>O publicador de estado da infra falha ao substituir as linhas de uma AZ.</dd>
+    <dt>Causa</dt><dd>Ele apaga e reinsere a cada execução, para que estado que desapareceu não fique pendurado no dashboard.</dd>
+    <dt>Correção</dt><dd>Acrescentar <code>DELETE</code> aos grants — mesma forma de falha do #8, um privilégio adiante.</dd>
+  </dl>
+</div>
+  <div class="note"><span class="tag">Restrições de build (valem para os dois labs)</span><p><b>OVN compilado do fonte na v24.03.6</b> — o pacote <code>ovn-central</code> do Ubuntu 24.04 não traz o binário <code>ovn-ic</code> nem os schemas IC-NB/IC-SB. <b>OVS fixado na v3.3.0</b> — a <code>main</code> do OVS renomeou <code>obs_domain_id</code> → <code>obs_domain_imm</code>, quebrando o build do OVN 24.03.</p></div>
+</section>
+<section id="comp">
+  <h2><span class="n">06</span><span>As três gerações do lab, lado a lado</span></h2>
+  <div class="tw"><table>
+    <thead><tr><th>Aspecto</th><th><code>pratice-ovn-ic</code></th><th><code>advanced</code> v1</th><th><code>advanced</code> <b>atual</b></th></tr></thead>
+    <tbody>
+      <tr><td>VMs</td><td>2</td><td>2</td><td><b>3</b> (a terceira é só árbitro)</td></tr>
+      <tr><td>Planes</td><td>1</td><td>1 (<code>10.10.x</code>)</td><td><b>2</b> — client + mgmt, isolados</td></tr>
+      <tr><td>Transit switches</td><td>1 (<code>ts</code>)</td><td>1 (<code>ts</code>)</td><td><b>2</b> — <code>ts-client</code>, <code>ts-mgmt</code>, um fabric</td></tr>
+      <tr><td>NICs por workload</td><td>1</td><td>1</td><td><b>2</b> nas camadas de app</td></tr>
+      <tr><td>Bancos IC</td><td>standalone no az1</td><td>standalone no az1 (SPOF)</td><td><b>cluster RAFT de 3 membros</b></td></tr>
+      <tr><td>Banco de dados</td><td>—</td><td><code>10.10.2.10</code>, rede de tenant</td><td><b><code>10.20.2.10</code>, só gerência</b></td></tr>
+      <tr><td>Load balancer</td><td>—</td><td>um VIP global na AZ1</td><td><b>um VIP por AZ</b> + <b>service VIP</b> cross-AZ</td></tr>
+      <tr><td>Norte-sul</td><td>—</td><td>plane router com porta externa</td><td><b>edge gateway router</b> + Edge Firewall</td></tr>
+      <tr><td>Workloads</td><td>network namespaces</td><td>containers Incus</td><td>containers Incus <b>dual-homed</b></td></tr>
+      <tr><td>Aplicação</td><td>ICMP</td><td>FastAPI, igual nas duas AZs</td><td><b>React (AZ1) + Java (AZ2) + Postgres</b>, partida</td></tr>
+      <tr><td>Observabilidade</td><td>—</td><td>—</td><td><b>Prometheus + Grafana por célula</b>, probe agent, 3 dashboards, gerador de carga</td></tr>
+      <tr><td>Testes</td><td>prints</td><td>prints</td><td><b><code>assert</code></b> (T1-T7) + suíte de HA (H1-H4)</td></tr>
+      <tr><td>Automação</td><td>scripts bash</td><td>Ansible</td><td>Ansible + <code>reset.yml</code></td></tr>
+      <tr><td>Segurança de log</td><td>—</td><td>—</td><td><b>logrotate</b> + unit do <code>ovn-controller</code> corrigida</td></tr>
+      <tr><td>Gotchas</td><td>1-5</td><td>+ 6-8</td><td><b>+ 9-16</b></td></tr>
+    </tbody>
+  </table></div>
+  <div class="note"><span class="tag">O que não mudou em nenhuma geração</span><p>OVN v24.03.6 do fonte, OVS v3.3.0, GENEVE UDP 6081, NB 6641 / SB 6642 locais em 127.0.0.1, IC-NB 6645 / IC-SB 6646, MTU 1442, e os cinco gotchas originais. A renomeação (<code>lr-az1</code> → <code>lr-client-az1</code>/<code>lr-mgmt-az1</code>, <code>ts</code> → <code>ts-client</code>/<code>ts-mgmt</code>) é justamente o motivo de <code>reset.yml</code> existir.</p></div>
+</section>
+
+<section id="cheat">
+  <h2><span class="n">07</span><span>Cheat-sheet de verificação e troubleshooting</span></h2>
+
+  <h3>Variáveis de ambiente</h3>
+<pre><code>export OVN_NB_DB=tcp:127.0.0.1:6641
+export OVN_SB_DB=tcp:127.0.0.1:6642
+<span class="cmt"># os TRÊS membros do cluster, separados por vírgula:</span>
+export OVN_IC_NB_DB=tcp:172.18.3.175:6645,tcp:172.18.33.126:6645,tcp:172.18.3.240:6645
+export OVN_IC_SB_DB=tcp:172.18.3.175:6646,tcp:172.18.33.126:6646,tcp:172.18.3.240:6646</code></pre>
+
+  <h3>Control plane</h3>
+<pre><code>ovn-ic-nbctl show                       <span class="cmt"># ts-client E ts-mgmt</span>
+ovn-ic-sbctl show                       <span class="cmt"># os dois gateways + portas de trânsito</span>
+ovn-nbctl lr-route-list lr-client-az1   <span class="cmt"># 10.10.2.0/24 (learned) — e NENHUM 10.20.x</span>
+ovn-nbctl lr-route-list lr-mgmt-az1     <span class="cmt"># 10.20.2.0/24 (learned) — e NENHUM 10.10.x</span>
+sudo ovs-vsctl show | grep -A2 geneve   <span class="cmt"># o túnel para o encap-ip do peer</span>
+
+<span class="cmt"># saúde do cluster (em qualquer membro, inclusive o quorum):</span>
+sudo ovs-appctl -t /opt/ovn-lab/ic-nb.ctl cluster/status OVN_IC_Northbound
+sudo ovs-appctl -t /opt/ovn-lab/ic-sb.ctl cluster/status OVN_IC_Southbound</code></pre>
+  <p>No <code>cluster/status</code>, olhe três coisas: <code>Role:</code> (leader/follower/<b>candidate</b>), a contagem de linhas <code>at tcp:</code> (deve ser 3) e <code>Leader:</code> (nunca <code>unknown</code> num cluster saudável).</p>
+
+  <h3>Data plane — os dois planes</h3>
+<pre><code><span class="cmt"># client plane, inter-AZ (sobre ts-client):</span>
+sudo incus exec app-vm-1 -- ping -c3 -I eth0 10.10.2.20
+
+<span class="cmt"># mgmt plane, inter-AZ (sobre ts-mgmt) e intra-AZ:</span>
+sudo incus exec app-vm-1 -- ping -c3 -I eth1 10.20.2.10     <span class="cmt"># AZ1 → db, cruza AZ</span>
+sudo incus exec app-vm-2 -- ping -c3 -I eth1 10.20.2.10     <span class="cmt"># AZ2 → db, local</span>
+
+<span class="cmt"># isolamento: estes TÊM que falhar</span>
+sudo incus exec app-vm-1 -- ping -c2 -W2 -I eth0 10.20.2.10   <span class="cmt"># client → db</span>
+sudo incus exec app-vm-1 -- ping -c2 -W2 -I eth1 10.10.2.20   <span class="cmt"># mgmt → client</span>
+
+<span class="cmt"># MTU</span>
+sudo incus exec app-vm-1 -- ping -c2 -M do -s 1414 10.20.2.10   <span class="cmt"># OK</span>
+sudo incus exec app-vm-1 -- ping -c2 -M do -s 1415 10.20.2.10   <span class="cmt"># falha</span></code></pre>
+
+  <h3>L4 — a aplicação</h3>
+<pre><code><span class="cmt"># no az1 — a cadeia inteira: nginx → service VIP → ts-client → Java → Postgres</span>
+curl -s http://10.10.1.100/api/status | python3 -m json.tool   <span class="cmt"># respondido por app-vm-2, na AZ2</span>
+curl -s http://10.10.1.100/api/infra  | head -c 400            <span class="cmt"># estado da infra, vindo do banco</span>
+
+<span class="cmt"># o service VIP cross-AZ sozinho (de dentro do client plane):</span>
+sudo incus exec app-vm-1 -- curl -s http://10.10.1.200/api/health ; echo
+
+<span class="cmt"># Postgres cru pelo plane de gerência:</span>
+sudo incus exec app-vm-1 -- env PGPASSWORD=apppass \
+  psql -h 10.20.2.10 -U appuser -d appdb -tAc 'SELECT message FROM lab_info LIMIT 1'</code></pre>
+
+  <h3>Norte-sul, dashboard e Grafana</h3>
+<pre><code>sudo incus exec app-vm-1 -- curl -sI https://example.org | head -1   <span class="cmt"># 200 (client plane)</span>
+sudo incus exec db-vm    -- curl -sI https://example.org | head -1   <span class="cmt"># 200 (mgmt plane)</span>
+
+ssh -L 8080:10.10.1.100:80 az1     <span class="cmt"># dashboard  → http://localhost:8080/</span>
+ssh -L 3000:localhost:3000 az1     <span class="cmt"># Grafana    → http://localhost:3000  (admin/admin)</span>
+ssh -L 9090:localhost:9090 az1     <span class="cmt"># Prometheus → http://localhost:9090</span></code></pre>
+
+  <h3>Onde olhar quando quebra</h3>
+<pre><code>sudo systemctl status ovn-ic ovn-northd ovn-controller ovn-ic-nb-db ovn-ic-sb-db
+sudo tail -n 40 /opt/ovn-lab/ovn-ic.log
+sudo tail -n 40 /opt/ovn-lab/ovn-northd.log     <span class="cmt"># reclamações de LB / NAT aparecem aqui</span>
+sudo ovs-vsctl show
+sudo incus exec &lt;nome&gt; -- ip -4 addr show       <span class="cmt"># as duas NICs, mtu 1442?</span>
+df -h                                            <span class="cmt"># gotcha #9 — o disco enche?</span></code></pre>
+
+  <h3>Método de depuração em camadas</h3>
+  <div class="tw"><table>
+    <thead><tr><th>Sintoma</th><th>Camada suspeita</th><th>Comando decisivo</th></tr></thead>
+    <tbody>
+      <tr><td>Nenhum gateway no IC-SB</td><td>identidade da AZ</td><td><code>ovn-nbctl get NB_Global . name</code></td></tr>
+      <tr><td>Um <code>ts</code> não aparece no NB local</td><td><code>ovn-ic</code> não roda / não propaga</td><td><code>systemctl status ovn-ic</code>; <code>tail ovn-ic.log</code></td></tr>
+      <tr><td>Rotas não anunciadas</td><td>opções de rota no lugar errado</td><td><code>ovn-nbctl get NB_Global . options</code></td></tr>
+      <tr><td>Um plane aprendeu rota do outro</td><td>blacklist / transit trocado</td><td><code>lr-route-list</code> nos dois routers</td></tr>
+      <tr><td>Rotas OK mas sem ping inter-AZ</td><td>gateway chassis / Port_Binding</td><td><code>ovn-sbctl list Port_Binding lsp-ts-&lt;az&gt;</code></td></tr>
+      <tr><td>Sem túnel no <code>ovs-vsctl show</code></td><td>encap-ip / firewall</td><td><code>ovs-vsctl get open_vswitch . external_ids</code></td></tr>
+      <tr><td>Ping OK, TCP grande trava</td><td>MTU</td><td><code>ping -M do -s 1414</code> vs <code>-s 1415</code></td></tr>
+      <tr><td>VIP não responde nem ARP</td><td>LB só no switch <em>ou</em> só no router</td><td><code>ls-lb-list</code> e <code>lr-lb-list</code> (#11, #15)</td></tr>
+      <tr><td>VIP responde só local</td><td>é VIP da outra AZ</td><td>precisa de service VIP local (#14)</td></tr>
+      <tr><td>LB nunca programado</td><td>router com 2 DGPs</td><td><code>lrp-get-gateway-chassis</code>; <code>ovn-northd.log</code> (#10)</td></tr>
+      <tr><td>Backend cross-AZ pendura</td><td><code>lb_force_snat_ip</code></td><td><code>ovn-nbctl get logical_router &lt;lr&gt; options</code> (#13)</td></tr>
+      <tr><td>Escrita no IC trava</td><td>quórum RAFT</td><td><code>cluster/status</code> — 3 membros? líder?</td></tr>
+      <tr><td>Container sem rede</td><td>binding da porta</td><td><code>ovs-vsctl get interface &lt;veth&gt; external_ids:iface-id</code></td></tr>
+      <tr><td>Disco cheio / daemon reiniciando</td><td><code>/run/ovn</code> sumiu no reboot</td><td><code>systemctl status ovn-controller</code>; <code>du -sh /opt/ovn-lab</code> (#9)</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section id="qa">
+  <h2><span class="n">08</span><span>Banco de perguntas</span></h2>
+  <p class="lede">Feito para auto-teste: leia a pergunta, responda de cabeça, só então abra. <button class="expand" id="expandAll" type="button">Abrir todas</button></p>
+  <div class="qa-head"><h3>Conceituais</h3></div>
+  <div class="qa">
+    <details><summary>O que é o OVN-IC em uma frase?</summary><div class="ans"><p>É o componente do OVN que federa múltiplas <em>Availability Zones</em> — instalações OVN independentes — numa única rede lógica, usando dois bancos globais (IC-NB/IC-SB), um daemon <code>ovn-ic</code> por AZ e transit switches compartilhados, sem que nenhuma AZ perca a autonomia do seu control plane.</p></div></details>
+    <details><summary>Por que não simplesmente esticar um único control plane entre regiões?</summary><div class="ans"><p>Escala e <em>blast radius</em>: um NB/SB único atendendo chassis em várias regiões sofre com latência de OVSDB, e uma falha no control plane derruba tudo. O OVN-IC é <b>aditivo</b> — se IC-NB/IC-SB ficarem indisponíveis, o tráfego intra-AZ continua.</p></div></details>
+    <details><summary>Qual a diferença entre NB/SB e IC-NB/IC-SB?</summary><div class="ans"><p>NB/SB são <b>por AZ</b> e privados (bind em 127.0.0.1): intenção local e flows compilados. IC-NB/IC-SB são <b>globais e compartilhados</b>: o IC-NB guarda a intenção da federação e o IC-SB o estado de runtime (gateways registrados, rotas anunciadas e aprendidas).</p></div></details>
+    <details><summary>O que exatamente o daemon <code>ovn-ic</code> faz?</summary><div class="ans"><p>Conecta <b>quatro</b> bancos ao mesmo tempo (IC-NB, IC-SB, NB local, SB local) e sincroniza nas duas direções: propaga os transit switches do IC-NB para o NB local, registra a AZ e seu gateway no IC-SB, publica as rotas conectadas locais (<code>ic-route-adv</code>) e injeta no NB local as rotas das outras AZs (<code>ic-route-learn</code>).</p></div></details>
+    <details><summary>Por que GENEVE e não VXLAN?</summary><div class="ans"><p>GENEVE é o padrão do OVN porque tem campos de opção extensíveis que o OVN usa para carregar metadados lógicos (ID de datapath, portas de ingresso/egresso). VXLAN não tem espaço suficiente, o que limita recursos do OVN.</p></div></details>
+    <details><summary>Quando OVN-IC é a escolha certa — e quando não é?</summary><div class="ans"><p><b>Certa</b> para múltiplas nuvens/regiões independentes que precisam de conectividade L2/L3 entre workloads, e para isolamento de compliance/blast-radius com tráfego controlado.</p><p><b>Errada</b> para: site único (OVN puro basta), federação com redes <b>não-OVN</b> (use BGP/EVPN) e necessidade só de HA de control plane (use NB/SB clusterizados, não OVN-IC).</p></div></details>
+  </div>
+  <div class="qa-head"><h3>Sobre os dois planes</h3></div>
+  <div class="qa">
+    <details><summary>O que exatamente separa os dois planes?</summary><div class="ans"><p>Eles são <b>datapaths OVN distintos</b>: switch, router e transit switch próprios. O <code>ovn-ic</code> anuncia as rotas de cada plane só no transit switch daquele plane, então <code>lr-client-az1</code> nunca aprende <code>10.20.x</code> e <code>lr-mgmt-az1</code> nunca aprende <code>10.10.x</code>. Dentro do container, cada NIC ainda recebe rota explícita para o supernet do próprio plane.</p></div></details>
+    <details><summary>Mas eles compartilham o mesmo túnel GENEVE. Isso não anula o isolamento?</summary><div class="ans"><p>Não anula o isolamento de <b>roteamento</b>, que é o que está sendo prometido. Os dois transit switches são carregados pelo mesmo túnel entre os mesmos dois chassis, e o que os separa é serem datapaths distintos. É uma fronteira de tenancy, <b>não</b> de criptografia: quem consegue injetar no <code>br-int</code> ou ler o túnel não é barrado por ela.</p></div></details>
+    <details><summary>Por que o <code>db-vm</code> tem só uma NIC?</summary><div class="ans"><p>Porque torna o isolamento impossível de desfazer por erro de roteamento — <b>não existe endereço</b> no client plane para alcançá-lo. É garantia mais forte que regra de firewall, e é o que dá sentido ao teste &ldquo;isto tem que falhar&rdquo;.</p></div></details>
+    <details><summary>Por que o edge precisa do Edge Firewall?</summary><div class="ans"><p>Porque o edge necessariamente conhece rota para os <b>dois</b> planes — ele precisa, para devolver respostas. Sem policy, um workload do client alcança seu gateway, é roteado ao edge e é roteado de volta para dentro do mgmt, desfazendo em silêncio o isolamento. Duas <code>lr-policy-add … drop</code> cobrem as duas direções, deixando o norte-sul intocado. <b>Esse teste pegou um vazamento real</b> antes das policies existirem.</p></div></details>
+    <details><summary>Se eu quisesse um terceiro plane, o que mudaria no código?</summary><div class="ans"><p>Só dados: uma entrada nova na lista <code>planes:</code> de cada <code>host_vars</code> (nome, LS, LR, CIDR, gateway, MACs, transit switch, endereços de edge/SNAT) e o transit switch novo em <code>transit_switches</code>. As roles já rodam em loop sobre <code>planes</code>. Mas como muda a <em>forma</em> da topologia, precisa de <code>reset.yml</code> antes do <code>site.yml</code>.</p></div></details>
+  </div>
+  <div class="qa-head"><h3>Sobre o cluster RAFT</h3></div>
+  <div class="qa">
+    <details><summary>Por que três membros e não dois?</summary><div class="ans"><p>RAFT exige <b>maioria estrita</b> para eleger líder e confirmar escrita. Maioria de 2 é 2 — perder qualquer membro congela o banco, o que não é melhor que um nó só. Maioria de 3 é 2, então o cluster sobrevive à perda de qualquer um.</p></div></details>
+    <details><summary>Por que uma VM inteira só para votar?</summary><div class="ans"><p>Porque uma AZ a mais teria custado chassis, GENEVE, workloads e um domínio de falha novo — sem necessidade. O árbitro é deliberadamente mínimo: sem chassis, sem <code>br-int</code>, sem GENEVE, sem NB/SB local, e recebe só <code>openvswitch-common</code> (não <code>openvswitch-switch</code>) justamente para que não possa virar nó de datapath por acidente.</p></div></details>
+    <details><summary>Por que o árbitro não compila o OVN?</summary><div class="ans"><p>Porque 1 vCPU / 1 GB não é máquina de build, e ele não precisa: schema é um arquivo JSON. A role faz <code>slurp</code> dos dois schemas do bootstrap e <code>copy</code> para ele.</p></div></details>
+    <details><summary>Quais portas o cluster usa, e por que duas por banco?</summary><div class="ans"><p><code>6645</code>/<code>6646</code> são as portas de <b>cliente</b>, onde os <code>ovn-ic</code> conectam. <code>6647</code>/<code>6648</code> são as de <b>peer RAFT</b>, para replicação. A porta RAFT é gravada <b>dentro do arquivo <code>.db</code></b> pelo <code>create-cluster</code>/<code>join-cluster</code>, não passada no <code>ExecStart</code>.</p></div></details>
+    <details><summary>Como os clientes sabem onde está o líder?</summary><div class="ans"><p>Não precisam saber. Um ovsdb clusterizado atende leitura em qualquer membro e <b>redireciona escrita para o líder</b>. Por isso <code>ic_nb_remote</code> lista os três membros: o <code>ovn-ic</code> continua funcionando quando o membro com quem falava cai.</p></div></details>
+    <details><summary>Por que <code>create-cluster</code> e <code>join-cluster</code> têm <code>creates:</code>?</summary><div class="ans"><p>Porque o endereço RAFT é gravado no <code>.db</code> no momento da criação/entrada. Re-executar sem guarda poderia <b>reformar</b> um cluster que já existe — destrutivo. O <code>creates:</code> faz a task virar no-op quando o <code>.db</code> já está lá.</p></div></details>
+    <details><summary>O que acontece com o tráfego se os dois bancos IC caírem?</summary><div class="ans"><p>Nada, imediatamente. Os flows já programados continuam encaminhando — o data plane não depende dos bancos de interconexão em regime. O que para são <b>mudanças de topologia</b>. O H3 do <code>verify_ha.yml</code> afirma exatamente isso.</p></div></details>
+    <details><summary>Por que o teste de HA verifica escrita, e não só leitura?</summary><div class="ans"><p>Porque um cluster <b>sem</b> quórum ainda serve leitura obsoleta de um follower — pareceria saudável. Só uma escrita confirmada prova que há maioria. Por isso o H2 cria e apaga um transit switch de sonda.</p></div></details>
+  </div>
+  <div class="qa-head"><h3>Sobre o load balancer</h3></div>
+  <div class="qa">
+    <details><summary>Por que o VIP é anexado em três lugares?</summary><div class="ans"><p>Cada attachment resolve um problema diferente:</p><p>no <b>switch</b> do client, instala o <b>ARP responder</b>, sem o qual um workload naquele switch nunca recebe resposta de ARP e não manda nem o primeiro pacote (#11, #15);</p><p>no <b>edge gateway router</b>, atende clientes de fora da VPC — no plane router não funcionaria, porque num router distribuído o OVN só programa o LB na DGP, por onde tráfego externo não chega (#12);</p><p>no <b>plane router</b>, para que um cliente na outra AZ batendo neste VIP também seja balanceado: esse tráfego chega pela porta de trânsito, que <b>é</b> a DGP daquele router.</p></div></details>
+    <details><summary>Qual foi o sintoma que levou ao #15, e por que ele engana?</summary><div class="ans"><p>As regras de DNAT estavam instaladas e o <code>ovn-trace</code> as mostrava, mas o cliente nunca recebia ARP pelo VIP — então nunca mandava pacote. A falha <em>parece</em> problema de roteamento, e você perde tempo olhando rota em vez de olhar quem responde ARP.</p></div></details>
+    <details><summary>Por que existe um service VIP <code>10.10.1.200</code> além do VIP normal?</summary><div class="ans"><p>Porque um VIP só é utilizável de dentro da AZ que o possui (#14). O frontend na AZ1 não consegue usar o VIP da AZ2: chegando pelo transit, o pacote entra no <code>ls-client-az2</code> por porta de router, o LB do switch é pulado e o do router também não é programado nesse ingresso. A solução é um VIP <b>local</b> cujo backend é o workload remoto.</p></div></details>
+    <details><summary>O que <code>lb_force_snat_ip</code> resolve, e por que é literal aqui?</summary><div class="ans"><p>Sem ele, um request balanceado para o backend da outra AZ chegaria lá com o endereço do cliente original, e a resposta sairia pela borda <b>daquela</b> AZ em vez de voltar por aqui — a conexão penduraria. Forçando o SNAT, a resposta volta pelo mesmo caminho e o LB consegue desfazer o DNAT. A palavra-chave documentada <code>router_ip</code> é <b>rejeitada</b> por este build, então o endereço é dado literalmente (#13).</p></div></details>
+    <details><summary>Por que isso obriga a subrede de edge a ser anunciada na interconexão?</summary><div class="ans"><p>Porque o edge faz SNAT para o <b>próprio</b> endereço de edge, e o backend remoto só consegue responder se a AZ dele tiver aprendido rota de volta para aquele endereço. É por isso que <code>ic_route_blacklist</code> lista só as subredes <b>provider</b>.</p></div></details>
+    <details><summary>Por que o edge é um gateway router e não um distribuído?</summary><div class="ans"><p>Porque pinado a um chassis (<code>options:chassis</code>) ele faz NAT sem precisar de uma distributed gateway port, e o load balancer vale em <b>todas</b> as portas dele — não só na DGP.</p></div></details>
+  </div>
+  <div class="qa-head"><h3>Sobre a aplicação e a observabilidade</h3></div>
+  <div class="qa">
+    <details><summary>Por que partir a aplicação entre as AZs?</summary><div class="ans"><p>Para que o fluxo sob teste seja o tráfego do próprio produto, não uma sonda sintética. E torna a falha óbvia: se a interconexão quebra, o dashboard diz em um poll de 5 s.</p></div></details>
+    <details><summary>Por que nginx faz proxy de <code>/api/*</code> em vez de o browser chamar a AZ2?</summary><div class="ans"><p>Para que o browser só precise alcançar a AZ1, enquanto o salto entre AZs continua acontecendo <b>dentro</b> do fabric. Também evita CORS e um segundo túnel SSH.</p></div></details>
+    <details><summary>Por que o backend é JDK puro, sem Spring?</summary><div class="ans"><p>Os workloads são containers de 2 vCPU atrás de um NAT duplo; puxar árvore de dependências por ali é lento e frágil, e nada ali precisa de framework. HTTP, JSON, JDBC e enumeração de interfaces já estão no JDK, e o driver JDBC vem da distro.</p></div></details>
+    <details><summary>Como um processo só serve em dois planes?</summary><div class="ans"><p>Dois <code>HttpServer</code>: o da API em <code>new InetSocketAddress(PORT, 0)</code> (alcançado pelo client plane) e o de métricas em <code>new InetSocketAddress(MGMT_IP, METRICS_PORT)</code> — bindado <b>explicitamente</b> ao IP de gerência. Raspar o backend da rede de tenant é impossível por construção.</p></div></details>
+    <details><summary>O que é o <code>infra_probe.py</code> e por que ele roda no host?</summary><div class="ans"><p>É um agente <b>read-only</b> que responde os botões &ldquo;Testar&rdquo; com estado OVN ao vivo. Precisa rodar no host porque transit switches, rotas aprendidas, túneis e o cluster RAFT só existem nos bancos OVN e no OVS do host. Ele é bindado ao endereço de underlay, só aceita conexão do SNAT do mgmt e do peer, e todo comando é uma lista fixa escolhida de uma whitelist: nenhuma entrada de usuário chega a um shell.</p></div></details>
+    <details><summary>Como o dashboard mostra estado das duas AZs?</summary><div class="ans"><p>Cada host de AZ lê o próprio estado OVN e <b>publica na tabela <code>infra_state</code></b> pelo plane de gerência — de dentro de um workload que tem NIC de mgmt, porque o host em si não tem rota para o banco (o isolamento funcionando). O backend Java lê a tabela; o React exibe.</p></div></details>
+    <details><summary>Por que cada AZ tem seu próprio Prometheus?</summary><div class="ans"><p>Para que uma falha numa AZ não cegue o monitoramento da outra, e para manter scrape fora da interconexão. O custo é que painéis de um componente que só existe numa AZ ficam vazios no Grafana da outra — o que é o isolamento funcionando.</p></div></details>
+    <details><summary>De onde vem a métrica de bytes na interconexão?</summary><div class="ans"><p>Do <code>node_exporter</code> do <b>host</b> da AZ: os contadores por interface incluem <code>genev_sys_6081</code>, que é literalmente a interface do túnel. Vira métrica real, não inferência.</p></div></details>
+    <details><summary>Por que o gerador de carga usa uma senoide?</summary><div class="ans"><p>Para os gráficos terem <b>forma</b>. Com carga constante, uma linha reta é a norma e você não percebe quando ela vira sinal; com um ciclo lento de 10 min, qualquer achatamento ou pico destoa imediatamente.</p></div></details>
+    <details><summary>Por que o gerador faz uma consulta separada direto ao banco?</summary><div class="ans"><p>Porque o caminho da aplicação <b>nunca</b> cruza o <code>ts-mgmt</code> — backend e banco estão os dois na AZ2. Sem essa sonda periódica, o transit switch de gerência não carregaria nada mensurável.</p></div></details>
+  </div>
+  <div class="qa-head"><h3>Sobre o Ansible</h3></div>
+  <div class="qa">
+    <details><summary>Como a ordenação do RAFT é garantida sem <code>serial</code>?</summary><div class="ans"><p>Pela estratégia <code>linear</code> padrão: cada task termina em <b>todos</b> os hosts antes de a próxima começar. Então <code>create-cluster</code> (com <code>when: inventory_hostname == ic_bootstrap</code>) está completa antes de <code>join-cluster</code> rodar em qualquer outro. Mesmo truque que garante que o <code>ts-add</code> no az1 aconteça antes de qualquer <code>ovn-ic</code> subir.</p></div></details>
+    <details><summary>Por que <code>ovn_topology</code> é a única role que não reporta <code>changed=0</code>?</summary><div class="ans"><p>Porque ela sempre reinicia o <code>ovn-ic</code> (gotcha #3). É uma mudança deliberada, não um defeito de idempotência.</p></div></details>
+    <details><summary>O que muda para adicionar uma AZ3 de verdade?</summary><div class="ans"><p>Um <code>host_vars/az3.yml</code> com identidade, edge, a lista <code>planes</code> e os workloads; acrescentá-la a <code>[azs]</code> (e opcionalmente a <code>[ic_cluster]</code>). As roles já rodam em loop sobre <code>planes</code> e <code>workloads</code>, e o cluster IC tolera um membro entrando.</p></div></details>
+    <details><summary>Para que serve o <code>reset.yml</code>, e por que ele não apaga tudo?</summary><div class="ans"><p>Para quando a <b>forma</b> da topologia muda — as roles são idempotentes para <em>valores</em>, mas não sabem renomear nem remover objetos de um desenho anterior. Ele apaga containers, veths <code>veth-*</code> (por prefixo, para pegar sobras antigas), os <code>.db</code> locais e do IC, e rotas de host para VIPs antigos. <b>Não</b> toca no build em <code>/opt/ovn-build</code> nem no storage pool do Incus, que são as partes caras.</p></div></details>
+  </div>
+  <div class="qa-head"><h3>Defesa do projeto / entrevista</h3></div>
+  <div class="qa">
+    <details><summary>Qual foi o incidente mais sério, e o que você mudou por causa dele?</summary><div class="ans"><p>O gotcha #9. Depois de um reboot, <code>/run</code> (tmpfs) perdeu o diretório <code>/run/ovn</code>, o <code>ovn-controller</code> não o cria e — diferente do <code>ovn-ic</code> — o binário do apt <b>não tem</b> opção <code>--unixctl</code>. Ele entrou em crash loop a cada 2 s, escreveu um log de <b>8 GB</b> (mais ~25 GB espelhados em <code>/var/log/syslog</code>) e <b>encheu um disco de 38 GB</b>, derrubando o lab.</p><p>Corrigi em duas frentes: <code>RuntimeDirectory=ovn</code> na unit e uma política de <b>logrotate horária</b>, mais <code>RestartSec=10</code>. A lição é que a correção da causa não bastava: sem limitar o log, o próximo crash loop faria o mesmo.</p></div></details>
+    <details><summary>Qual foi o problema mais difícil de diagnosticar?</summary><div class="ans"><p>A sequência #11 → #12 → #15 do load balancer. O VIP não respondia, o <code>ovn-trace</code> mostrava as regras de DNAT instaladas, e a falha parecia de roteamento — mas o cliente nunca recebia <b>resposta de ARP</b>, então nem chegava a mandar pacote. Foram necessários dois attachments por razões diferentes: o do switch faz o balanceamento, o do router torna o endereço respondível.</p></div></details>
+    <details><summary>Como você provou que o isolamento entre planes é real?</summary><div class="ans"><p>Com testes que <b>devem falhar</b>: o <code>verify.yml</code> afirma que o client plane não alcança o banco e que o mgmt plane não alcança o client plane, nos dois sentidos. Além disso o T1.4 afirma a propriedade no control plane — cada plane router aprendeu só a subrede remota do próprio plane. E esse teste pegou um vazamento real pelo edge compartilhado antes das policies existirem.</p></div></details>
+    <details><summary>Qual é o SPOF hoje?</summary><div class="ans"><p>Não é mais o banco de interconexão — virou cluster RAFT de 3 membros. O que sobra é o <b>PostgreSQL único na AZ2</b> (sem réplica), e o fato de as configurações de rede do host não serem persistentes a reboot. Os dois estão na lista de melhorias, nessa ordem.</p></div></details>
+    <details><summary>O que os números 3,191 ms vs 0,059 ms significam?</summary><div class="ans"><p>RTT ao banco pelo plane de gerência: da AZ1 atravessa o <code>ts-mgmt</code> sobre GENEVE, da AZ2 é local. <b>~54×</b> de diferença, medido numa execução só. É o custo real de acoplar um serviço a um banco em outra AZ — o argumento concreto para uma réplica de leitura na AZ1.</p></div></details>
+    <details><summary>Por que os testes usam <code>assert</code> em vez de imprimir?</summary><div class="ans"><p>Porque saída impressa depende de alguém ler. Com <code>assert</code>, um caminho quebrado <b>falha a execução</b> — o que permite rodar a suíte em CI e tratar a topologia como código testado.</p></div></details>
+    <details><summary>Você cronometrou o cross-AZ com <code>time psql</code>?</summary><div class="ans"><p>Não, e de propósito. O relógio de parede de <code>incus exec</code> + startup do <code>psql</code> afoga os poucos milissegundos de interconexão e faria o intra-AZ parecer <em>mais lento</em>. O custo real sai do backend de vida longa e do RTT cru via ping.</p></div></details>
+    <details><summary>Por que o teste de internet tem retry e os outros não?</summary><div class="ans"><p>Porque ele sai do fabric inteiro até a internet de verdade; um timeout isolado diz mais sobre o link upstream do que sobre o lab. Sem retry a suíte falharia de forma intermitente — e um teste que grita lobo treina você a ignorá-lo, o que é pior do que não testar.</p></div></details>
+  </div>
+</section>
+<section id="incons">
+  <h2><span class="n">09</span><span>Inconsistências encontradas no repositório</span></h2>
+  <p class="lede">Achados de <b>leitura estática</b> do código — nenhum playbook foi executado. Valem como pontos de atenção antes da próxima execução, e como material honesto caso alguém pergunte.</p>
+
+  <div class="gotcha">
+    <h4><span class="num">9.1</span><span>O <code>H3</code> do <code>verify_ha.yml</code> referencia a aplicação antiga</span></h4>
+    <dl class="gx">
+      <dt>Código</dt>
+      <dd><pre><code>incus exec {{ (workloads | selectattr('role', 'equalto', 'app') | first).name }}
+  -- curl -s --max-time 10 http://…:{{ backend_port }}/
+…
+that: "'db_message' in h3.stdout"</code></pre></dd>
+      <dt>Problemas</dt>
+      <dd>Três empilhados, todos herdados da revisão FastAPI:
+        <ol>
+          <li><b>Não existe mais role <code>app</code>.</b> Os roles são <code>frontend</code>, <code>backend</code>, <code>db</code>, <code>loadgen</code> e <code>observability</code>. <code>selectattr(…) | first</code> sobre lista vazia levanta erro de template — e <code>failed_when: false</code> <b>não</b> protege contra falha de renderização.</li>
+          <li><b>O backend Java não expõe <code>/</code>.</b> Os contextos são só <code>/api/health</code>, <code>/api/status</code>, <code>/api/infra</code>, <code>/api/flow</code>, <code>/api/test</code>, <code>/api/orders</code> e <code>/api/report</code>.</li>
+          <li><b><code>db_message</code> não existe mais.</b> O <code>status()</code> devolve <code>db_ok</code>, <code>db_time</code> e <code>db_latency_ms</code>.</li>
+        </ol>
+      </dd>
+      <dt>Correção</dt>
+      <dd>Trocar <code>'app'</code> por <code>'backend'</code>, apontar para <code>/api/status</code> e afirmar <code>db_ok</code>:
+<pre><code>vars:
+  be: "{{ workloads | selectattr('role', 'equalto', 'backend') | list }}"
+when: be | length &gt; 0
+cmd: &gt;
+  incus exec {{ be[0].name }} -- curl -s --max-time 10
+  http://{{ (be[0].nics | selectattr('plane','equalto','client')
+             | map(attribute='ip') | first) }}:{{ backend_port }}/api/status</code></pre></dd>
+    </dl>
+    <p class="lbl" style="margin:8px 0 0">O README afirma que H1-H4 passaram. Ou o H3 rodou numa versão anterior do arquivo, ou está falhando sem que isso tenha sido notado — vale rodar e olhar o recap antes de citar esse resultado.</p>
+  </div>
+
+  <div class="gotcha">
+    <h4><span class="num">9.2</span><span><code>reset.yml</code> roda no <code>quorum</code>, que não define <code>workloads</code> nem <code>planes</code></span></h4>
+    <dl class="gx">
+      <dt>Código</dt>
+      <dd><pre><code>hosts: azs:ic_cluster        <span class="cmt"># inclui o quorum</span>
+…
+cmd: incus delete -f {{ workloads | map(attribute='name') | join(' ') }} …   <span class="cmt"># linha 24</span>
+loop: "{{ planes | selectattr('vip', 'defined') | list }}"                    <span class="cmt"># linha 87</span></code></pre></dd>
+      <dt>Causa</dt>
+      <dd>O <code>host_vars/quorum.yml</code> define só <code>az_private_ip</code> e <code>is_ic_arbiter</code>.</dd>
+      <dt>Correção</dt>
+      <dd>As tasks que só fazem sentido nas AZs deveriam ter <code>when: inventory_hostname in groups['azs']</code>, ou usar <code>workloads | default([])</code> / <code>planes | default([])</code>. As que <b>realmente</b> precisam rodar no quorum são as de parar e apagar os <code>.db</code> do IC.</dd>
+    </dl>
+  </div>
+
+  <div class="gotcha fixed">
+    <h4><span class="num">9.3</span><span>O README lista um arquivo que não existe</span></h4>
+    <dl class="gx">
+      <dt>Onde</dt><dd>O bloco <em>Repository layout</em> do <code>advanced-ovn-ic/README.md</code> cita <code>GUIA-DO-ZERO.md</code>.</dd>
+      <dt>Estado</dt><dd>Esse arquivo não está na pasta. Ou foi removido sem atualizar o README, ou nunca foi commitado.</dd>
+    </dl>
+  </div>
+
+  <div class="gotcha fixed">
+    <h4><span class="num">9.4</span><span>Fragilidade na montagem de <code>lb_backends</code></span></h4>
+    <dl class="gx">
+      <dt>Código</dt>
+      <dd><pre><code>{{ workloads | selectattr('role', 'in', service_tiers) | … | map(attribute='ip')
+   | zip(workloads | rejectattr('role', 'equalto', 'db') | map(attribute='service_port'))
+   | map('join', ':') | join(',') }}</code></pre></dd>
+      <dt>Risco</dt>
+      <dd>O lado esquerdo do <code>zip</code> filtra por <code>service_tiers</code>, mas o direito filtra apenas <code>role != db</code> — o que na AZ1 inclui <code>obs-vm</code> e <code>load-vm</code>, que <b>não</b> têm <code>service_port</code>. O <code>zip</code> trunca pelo menor lado, então na prática provavelmente funciona; mas depende da ordem em que <code>workloads</code> está escrito e da avaliação preguiçosa do <code>map</code>.</dd>
+      <dt>Correção</dt>
+      <dd>Usar o mesmo filtro dos dois lados (<code>selectattr('role', 'in', service_tiers)</code>) deixaria a intenção explícita e removeria o acoplamento com a ordem da lista.</dd>
+    </dl>
+  </div>
+</section>
+
+</main>
+</div>
+
+<footer><div class="wrap">
+  <p style="margin:0">Fonte: <code>projects/ovn-ic</code> na revisão <b>dual-plane</b> — <code>pratice-ovn-ic/</code> (README + os três scripts, inalterados) e <code>advanced-ovn-ic/</code> (README de 47 KB, <code>ansible/</code> completo: <b>8 roles</b>, 12 playbooks, <code>Backend.java</code>, <code>infra_probe.py</code>, <code>loadgen.py</code>, templates e vars).</p>
+</div></footer>
+
+<script>
+(function(){
+  var root = document.documentElement;
+  var btn = document.getElementById('themeBtn');
+  if (btn) {
+    btn.addEventListener('click', function(){
+      var cur = root.getAttribute('data-theme');
+      if (!cur) {
+        var dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+        cur = dark ? 'dark' : 'light';
+      }
+      root.setAttribute('data-theme', cur === 'dark' ? 'light' : 'dark');
+    });
+  }
+
+  var exp = document.getElementById('expandAll');
+  if (exp) {
+    exp.addEventListener('click', function(){
+      var all = document.querySelectorAll('#qa details');
+      var opening = exp.textContent.indexOf('Abrir') === 0;
+      for (var i = 0; i < all.length; i++) { all[i].open = opening; }
+      exp.textContent = opening ? 'Fechar todas' : 'Abrir todas';
+    });
+  }
+
+  var links = Array.prototype.slice.call(document.querySelectorAll('.rail a'));
+  var sections = links.map(function(a){ return document.querySelector(a.getAttribute('href')); });
+  if ('IntersectionObserver' in window) {
+    var io = new IntersectionObserver(function(entries){
+      entries.forEach(function(e){
+        if (!e.isIntersecting) return;
+        var idx = sections.indexOf(e.target);
+        if (idx < 0) return;
+        links.forEach(function(l, i){ l.classList.toggle('on', i === idx); });
+      });
+    }, { rootMargin: '-15% 0px -70% 0px' });
+    sections.forEach(function(s){ if (s) io.observe(s); });
+  }
+})();
+</script>
+
+</body>
+</html>
